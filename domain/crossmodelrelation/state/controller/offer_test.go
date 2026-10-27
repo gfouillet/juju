@@ -283,7 +283,7 @@ func (s *controllerOfferSuite) ensureUser(c *tc.C, userUUID, name, createdByUUID
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, userUUID, name, name, external, removed, createdByUUID, time.Now())
+`, userUUID, name, name, external, removed, createdByUUID, time.Now())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -291,7 +291,7 @@ func (s *controllerOfferSuite) ensureUser(c *tc.C, userUUID, name, createdByUUID
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user_authentication (user_uuid, disabled)
 			VALUES (?, ?)
-		`, userUUID, disabled)
+`, userUUID, disabled)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -303,7 +303,7 @@ func (s *controllerOfferSuite) addOfferPermission(c *tc.C, userUUID, offerUUID s
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO permission (uuid, access_type_id, object_type_id, grant_to, grant_on)
 			VALUES (?, ?, ?, ?, ?)
-		`, permissionUUID, accessType, 3, userUUID, offerUUID)
+`, permissionUUID, accessType, 3, userUUID, offerUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -319,7 +319,7 @@ func (s *controllerOfferSuite) addPermission(c *tc.C, userUUID, grantOn string, 
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO permission (uuid, access_type_id, object_type_id, grant_to, grant_on)
 			VALUES (?, ?, ?, ?, ?)
-		`, permissionUUID, accessTypeID, objectTypeTypeID, userUUID, grantOn)
+`, permissionUUID, accessTypeID, objectTypeTypeID, userUUID, grantOn)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

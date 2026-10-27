@@ -108,7 +108,7 @@ func (st State) getApplicationUUID(ctx context.Context, tx *sqlair.TX, appName s
 	selectApplicationUUIDStmt, err := st.Prepare(`
 SELECT &application.uuid
 FROM application
-WHERE name=$application.name`, app)
+WHERE name = $application.name`, app)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -143,7 +143,7 @@ func (st State) getUnitUUID(ctx context.Context, tx *sqlair.TX, unitName coreuni
 	selectUnitUUIDStmt, err := st.Prepare(`
 SELECT &unit.uuid
 FROM unit
-WHERE name=$unit.name`, u)
+WHERE name = $unit.name`, u)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -201,8 +201,8 @@ func (st State) GetUnitReservedSecretIDs(ctx context.Context, unitUUID coreunit.
 	u := entityRef{UUID: unitUUID.String()}
 	selectStmt, err := st.Prepare(`
 SELECT secret_id AS &secretID.id
-FROM   secret_reservation
-WHERE  unit_uuid = $entityRef.uuid`, secretID{}, u)
+FROM secret_reservation
+WHERE unit_uuid = $entityRef.uuid`, secretID{}, u)
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -295,15 +295,15 @@ func (st State) checkApplicationSecretLabelExists(ctx context.Context, tx *sqlai
 SELECT COUNT(*) AS &count.num
 FROM (
     SELECT secret_id
-    FROM   secret_application_owner
-    WHERE  label = $secretApplicationOwner.label
-    AND    application_uuid = $secretApplicationOwner.application_uuid
+    FROM secret_application_owner
+    WHERE label = $secretApplicationOwner.label
+    AND application_uuid = $secretApplicationOwner.application_uuid
     UNION
     SELECT secret_id
-    FROM   secret_unit_owner
+    FROM secret_unit_owner
        JOIN unit u ON u.uuid = unit_uuid
-    WHERE  label = $secretApplicationOwner.label
-    AND    u.application_uuid = $secretApplicationOwner.application_uuid
+    WHERE label = $secretApplicationOwner.label
+    AND u.application_uuid = $secretApplicationOwner.application_uuid
 )
 WHERE secret_id != $secretApplicationOwner.secret_id`
 
@@ -335,15 +335,15 @@ func (st State) checkUnitSecretLabelExists(ctx context.Context, tx *sqlair.TX, u
 SELECT COUNT(*) AS &count.num
 FROM (
     SELECT secret_id
-    FROM   secret_application_owner AS sao
+    FROM secret_application_owner AS sao
            JOIN unit AS u ON sao.application_uuid = u.application_uuid
-    WHERE  label = $secretUnitOwner.label
-    AND    u.uuid = $secretUnitOwner.unit_uuid
+    WHERE label = $secretUnitOwner.label
+    AND u.uuid = $secretUnitOwner.unit_uuid
     UNION ALL
     SELECT secret_id
-    FROM   secret_unit_owner AS suo
-    WHERE  label = $secretUnitOwner.label
-    AND    suo.unit_uuid = $secretUnitOwner.unit_uuid
+    FROM secret_unit_owner AS suo
+    WHERE label = $secretUnitOwner.label
+    AND suo.unit_uuid = $secretUnitOwner.unit_uuid
 )
 WHERE secret_id != $secretUnitOwner.secret_id`
 
@@ -372,9 +372,9 @@ func (st State) checkUserSecretLabelExists(ctx context.Context, tx *sqlair.TX, l
 	count := count{}
 	checkLabelExistsSQL := `
 SELECT COUNT(*) AS &count.num
-FROM   secret_model_owner
-WHERE  label = $secretOwner.label
-AND    secret_id != $secretOwner.secret_id`
+FROM secret_model_owner
+WHERE label = $secretOwner.label
+AND secret_id != $secretOwner.secret_id`
 
 	checkExistsStmt, err := st.Prepare(checkLabelExistsSQL, input, count)
 	if err != nil {
@@ -765,8 +765,8 @@ func (st State) getSecretOwner(ctx context.Context, tx *sqlair.TX, uri *coresecr
 	input := secretID{ID: uri.ID}
 	stmt, err := st.Prepare(`
 SELECT &secretOwner.*
-FROM   v_secret_owner
-WHERE  secret_id = $secretID.id
+FROM v_secret_owner
+WHERE secret_id = $secretID.id
 `, input, secretOwner{})
 	if err != nil {
 		return domainsecret.Owner{}, errors.Capture(err)
@@ -803,8 +803,8 @@ func (st State) GetSecretOwnerKinds(ctx context.Context, uris []*coresecrets.URI
 
 	stmt, err := st.Prepare(`
 SELECT &secretOwner.*
-FROM   v_secret_owner
-WHERE  secret_id IN ($secretIDs[:])
+FROM v_secret_owner
+WHERE secret_id IN ($secretIDs[:])
 `, ids, secretOwner{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -850,11 +850,11 @@ SELECT
        sm.latest_revision_checksum AS &secretInfo.latest_revision_checksum,
        sr.uuid AS &secretInfo.latest_revision_uuid,
        (so.*) AS (&secretOwner.*)
-FROM   secret_metadata sm
+FROM secret_metadata sm
        JOIN secret_revision sr ON sr.secret_id = sm.secret_id
        LEFT JOIN secret_rotate_policy rp ON rp.id = sm.rotate_policy_id
        LEFT JOIN v_secret_owner AS so ON so.secret_id = sm.secret_id
-WHERE  sm.secret_id = $secretID.id
+WHERE sm.secret_id = $secretID.id
 GROUP BY sm.secret_id`
 
 	existingSecretStmt, err := st.Prepare(existingSecretQuery, secretID{}, secretInfo{}, secretOwner{})
@@ -903,7 +903,7 @@ GROUP BY sm.secret_id`
 
 	// Will secret rotate? If not, delete next rotation row.
 	if secret.RotatePolicy != nil && *secret.RotatePolicy == domainsecret.RotateNever {
-		deleteNextRotate := "DELETE FROM secret_rotation WHERE secret_id=$secretID.id"
+		deleteNextRotate := "DELETE FROM secret_rotation WHERE secret_id = $secretID.id"
 		deleteNextRotateStmt, err := st.Prepare(deleteNextRotate, secretID{})
 		if err != nil {
 			return errors.Capture(err)
@@ -972,19 +972,19 @@ GROUP BY sm.secret_id`
 func (st State) markObsoleteRevisions(ctx context.Context, tx *sqlair.TX, uri *coresecrets.URI) error {
 	query, err := st.Prepare(`
 SELECT sr.uuid AS &secretRevision.uuid
-FROM   secret_revision sr
+FROM secret_revision sr
        LEFT JOIN (
            -- revisions that have local consumers.
            SELECT DISTINCT current_revision AS revision FROM secret_unit_consumer suc
-           WHERE  suc.secret_id = $secretRef.secret_id
+           WHERE suc.secret_id = $secretRef.secret_id
            UNION
            -- revisions that have remote consumers.
            SELECT DISTINCT current_revision AS revision FROM secret_remote_unit_consumer suc
-           WHERE  suc.secret_id = $secretRef.secret_id
+           WHERE suc.secret_id = $secretRef.secret_id
            UNION
            -- the latest revision.
            SELECT MAX(revision) FROM secret_revision rev
-           WHERE  rev.secret_id = $secretRef.secret_id
+           WHERE rev.secret_id = $secretRef.secret_id
        ) in_use ON sr.revision = in_use.revision
 WHERE sr.secret_id = $secretRef.secret_id
 AND (in_use.revision IS NULL OR in_use.revision = 0);
@@ -996,9 +996,9 @@ AND (in_use.revision IS NULL OR in_use.revision = 0);
 	stmt, err := st.Prepare(`
 INSERT INTO secret_revision_obsolete (*)
 VALUES ($secretRevisionObsolete.*)
-ON CONFLICT(revision_uuid) DO UPDATE SET
-    obsolete=excluded.obsolete,
-    pending_delete=excluded.pending_delete`, secretRevisionObsolete{})
+ON CONFLICT (revision_uuid) DO UPDATE SET
+    obsolete = excluded.obsolete,
+    pending_delete = excluded.pending_delete`, secretRevisionObsolete{})
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -1077,13 +1077,13 @@ func (st State) upsertSecret(ctx context.Context, tx *sqlair.TX, dbSecret secret
 	insertMetadataQuery := `
 INSERT INTO secret_metadata (*)
 VALUES ($secretMetadata.*)
-ON CONFLICT(secret_id) DO UPDATE SET
-    version=excluded.version,
-    description=excluded.description,
-    rotate_policy_id=excluded.rotate_policy_id,
-    auto_prune=excluded.auto_prune,
-    latest_revision_checksum=excluded.latest_revision_checksum,
-    update_time=excluded.update_time
+ON CONFLICT (secret_id) DO UPDATE SET
+    version = excluded.version,
+    description = excluded.description,
+    rotate_policy_id = excluded.rotate_policy_id,
+    auto_prune = excluded.auto_prune,
+    latest_revision_checksum = excluded.latest_revision_checksum,
+    update_time = excluded.update_time
 `
 
 	insertMetadataStmt, err := st.Prepare(insertMetadataQuery, secretMetadata{})
@@ -1122,8 +1122,8 @@ func (st State) grantSecretOwnerManage(
 func (st State) upsertSecretModelOwner(ctx context.Context, tx *sqlair.TX, owner secretModelOwner) error {
 	insertQuery := `
 INSERT INTO secret_model_owner (secret_id, label)
-VALUES      ($secretModelOwner.*)
-ON CONFLICT(secret_id) DO UPDATE SET label=excluded.label`
+VALUES ($secretModelOwner.*)
+ON CONFLICT (secret_id) DO UPDATE SET label = excluded.label`
 
 	insertStmt, err := st.Prepare(insertQuery, secretModelOwner{})
 	if err != nil {
@@ -1140,8 +1140,8 @@ ON CONFLICT(secret_id) DO UPDATE SET label=excluded.label`
 func (st State) upsertSecretApplicationOwner(ctx context.Context, tx *sqlair.TX, owner secretApplicationOwner) error {
 	insertQuery := `
 INSERT INTO secret_application_owner (secret_id, application_uuid, label)
-VALUES      ($secretApplicationOwner.*)
-ON CONFLICT(secret_id, application_uuid) DO UPDATE SET label=excluded.label`
+VALUES ($secretApplicationOwner.*)
+ON CONFLICT (secret_id, application_uuid) DO UPDATE SET label = excluded.label`
 
 	insertStmt, err := st.Prepare(insertQuery, secretApplicationOwner{})
 	if err != nil {
@@ -1159,7 +1159,7 @@ func (st State) upsertSecretUnitOwner(ctx context.Context, tx *sqlair.TX, owner 
 	insertQuery := `
 INSERT INTO secret_unit_owner (secret_id, unit_uuid, label)
 VALUES ($secretUnitOwner.*)
-ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET label=excluded.label`
+ON CONFLICT (secret_id, unit_uuid) DO UPDATE SET label = excluded.label`
 
 	insertStmt, err := st.Prepare(insertQuery, secretUnitOwner{})
 	if err != nil {
@@ -1179,8 +1179,8 @@ func (st State) upsertSecretNextRotateTime(
 	insertQuery := `
 INSERT INTO secret_rotation (*)
 VALUES ($secretRotate.*)
-ON CONFLICT(secret_id) DO UPDATE SET
-    next_rotation_time=excluded.next_rotation_time`
+ON CONFLICT (secret_id) DO UPDATE SET
+    next_rotation_time = excluded.next_rotation_time`
 
 	rotate := secretRotate{SecretID: uri.ID, NextRotateTime: next.UTC()}
 	insertStmt, err := st.Prepare(insertQuery, rotate)
@@ -1202,7 +1202,7 @@ func (st State) upsertSecretRevision(
 INSERT INTO secret_revision (*)
 VALUES ($secretRevision.*)
 ON CONFLICT (uuid) DO UPDATE SET
-    update_time=excluded.update_time`
+    update_time = excluded.update_time`
 
 	insertStmt, err := st.Prepare(insertQuery, secretRevision{})
 	if err != nil {
@@ -1221,8 +1221,8 @@ func (st State) upsertSecretRevisionExpiry(ctx context.Context, tx *sqlair.TX, r
 	insertExpireTimeQuery := `
 INSERT INTO secret_revision_expire (*)
 VALUES ($secretRevisionExpire.*)
-ON CONFLICT(revision_uuid) DO UPDATE SET
-    expire_time=excluded.expire_time`
+ON CONFLICT (revision_uuid) DO UPDATE SET
+    expire_time = excluded.expire_time`
 
 	expire := secretRevisionExpire{RevisionUUID: revisionUUID, ExpireTime: expireTime.UTC()}
 	insertExpireTimeStmt, err := st.Prepare(insertExpireTimeQuery, expire)
@@ -1244,9 +1244,9 @@ func (st State) upsertSecretValueRef(
 	upsertQuery := `
 INSERT INTO secret_value_ref (*)
 VALUES ($secretValueRef.*)
-ON CONFLICT(revision_uuid) DO UPDATE SET
-    backend_uuid=excluded.backend_uuid,
-    revision_id=excluded.revision_id`
+ON CONFLICT (revision_uuid) DO UPDATE SET
+    backend_uuid = excluded.backend_uuid,
+    revision_id = excluded.revision_id`
 
 	upsertStmt, err := st.Prepare(upsertQuery, secretValueRef{})
 	if err != nil {
@@ -1272,8 +1272,8 @@ func (st State) updateSecretContent(
 	// Delete any keys no longer in the content map.
 	deleteQuery := `
 DELETE FROM secret_content
-WHERE  revision_uuid = $revisionUUID.uuid
-AND    name NOT IN ($keysToKeep[:])`
+WHERE revision_uuid = $revisionUUID.uuid
+AND name NOT IN ($keysToKeep[:])`
 
 	deleteStmt, err := st.Prepare(deleteQuery, revisionUUID{}, keysToKeep{})
 	if err != nil {
@@ -1287,9 +1287,9 @@ VALUES (
     $secretContent.name,
     $secretContent.content
 )
-ON CONFLICT(revision_uuid, name) DO UPDATE SET
-    name=excluded.name,
-    content=excluded.content`
+ON CONFLICT (revision_uuid, name) DO UPDATE SET
+    name = excluded.name,
+    content = excluded.content`
 
 	insertStmt, err := st.Prepare(insertQuery, secretContent{})
 	if err != nil {
@@ -1329,8 +1329,8 @@ func (st State) GetApplicationUUIDsForNames(ctx context.Context, names domainsec
 
 	queryStmt, err := st.Prepare(`
 SELECT uuid AS &application.uuid
-FROM   application a
-WHERE  a.name IN ($ApplicationOwners[:])
+FROM application a
+WHERE a.name IN ($ApplicationOwners[:])
 `, names, application{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1367,8 +1367,8 @@ func (st State) GetUnitUUIDsForNames(ctx context.Context, names domainsecret.Uni
 
 	queryStmt, err := st.Prepare(`
 SELECT uuid AS &unit.uuid
-FROM   unit u
-WHERE  u.name IN ($UnitOwners[:])
+FROM unit u
+WHERE u.name IN ($UnitOwners[:])
 `, names, unit{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1427,10 +1427,10 @@ func (st State) getSecretsForOwners(
 
 	query := `
 SELECT sm.secret_id AS &secretID.id
-FROM   secret_metadata sm
+FROM secret_metadata sm
        LEFT JOIN secret_application_owner sao ON sao.secret_id = sm.secret_id
        LEFT JOIN secret_unit_owner suo ON suo.secret_id = sm.secret_id
-WHERE  sao.application_uuid IN ($ApplicationOwners[:]) OR suo.unit_uuid IN ($UnitOwners[:])
+WHERE sao.application_uuid IN ($ApplicationOwners[:]) OR suo.unit_uuid IN ($UnitOwners[:])
 `
 
 	queryTypes := []any{
@@ -1615,8 +1615,8 @@ func (st State) GetLatestRevision(ctx context.Context, uri *coresecrets.URI) (in
 	}
 	query := `
 SELECT MAX(sr.revision) AS &secretInfo.latest_revision
-FROM   secret_revision sr
-WHERE  sr.secret_id = $secretInfo.secret_id
+FROM secret_revision sr
+WHERE sr.secret_id = $secretInfo.secret_id
 `
 	info := secretInfo{
 		ID: uri.ID,
@@ -1658,10 +1658,10 @@ func (st State) GetLatestRevisions(ctx context.Context, uris []*coresecrets.URI)
 	}
 
 	stmt, err := st.Prepare(`
-SELECT   sr.secret_id AS &lastestSecretRevision.secret_id,
+SELECT sr.secret_id AS &lastestSecretRevision.secret_id,
          MAX(sr.revision) AS &lastestSecretRevision.latest_revision
-FROM     secret_revision sr
-WHERE    sr.secret_id IN ($secretIDStr[:])
+FROM secret_revision sr
+WHERE sr.secret_id IN ($secretIDStr[:])
 GROUP BY sr.secret_id
 `, uriStr, lastestSecretRevision{})
 	if err != nil {
@@ -1701,16 +1701,16 @@ func (st State) GetRotationExpiryInfo(ctx context.Context, uri *coresecrets.URI)
 	input := secretID{ID: uri.ID}
 	result := secretInfo{}
 	stmt, err := st.Prepare(`
-SELECT   sp.policy AS &secretInfo.policy,
+SELECT sp.policy AS &secretInfo.policy,
          sro.next_rotation_time AS &secretInfo.next_rotation_time,
          sre.expire_time AS &secretInfo.latest_expire_time,
          MAX(sr.revision) AS &secretInfo.latest_revision
-FROM     secret_metadata sm
+FROM secret_metadata sm
          JOIN secret_revision sr ON sm.secret_id = sr.secret_id
          JOIN secret_rotate_policy sp ON sp.id = sm.rotate_policy_id
          LEFT JOIN secret_rotation sro ON sro.secret_id = sm.secret_id
          LEFT JOIN secret_revision_expire sre ON sre.revision_uuid = sr.uuid
-WHERE    sm.secret_id = $secretID.id
+WHERE sm.secret_id = $secretID.id
 GROUP BY sr.secret_id`, input, result)
 
 	if err != nil {
@@ -1920,7 +1920,7 @@ SELECT sm.secret_id AS &secretInfo.secret_id,
        (so.owner_kind,
        so.owner_name,
        so.label) AS (&secretOwner.*)
-FROM   secret_metadata sm
+FROM secret_metadata sm
        JOIN secret_revision sr ON sr.secret_id = sm.secret_id
        LEFT JOIN secret_revision_expire sre ON sre.revision_uuid = sr.uuid
        LEFT JOIN secret_rotate_policy rp ON rp.id = sm.rotate_policy_id
@@ -1981,10 +1981,10 @@ SELECT sm.secret_id AS &secretID.id,
        svr.backend_uuid AS &secretExternalRevision.backend_uuid,
        svr.revision_id AS &secretExternalRevision.revision_id,
        rev.revision AS &secretExternalRevision.revision
-FROM      secret_metadata sm
-JOIN      secret_revision rev ON rev.secret_id = sm.secret_id
+FROM secret_metadata sm
+JOIN secret_revision rev ON rev.secret_id = sm.secret_id
 LEFT JOIN secret_value_ref svr ON svr.revision_uuid = rev.uuid
-JOIN      secret_model_owner mso ON mso.secret_id = sm.secret_id`
+JOIN secret_model_owner mso ON mso.secret_id = sm.secret_id`
 
 	queryStmt, err := st.Prepare(query, secretID{}, secretExternalRevision{})
 	if err != nil {
@@ -2065,8 +2065,8 @@ SELECT sm.secret_id AS &secretID.id,
        svr.backend_uuid AS &secretExternalRevision.backend_uuid,
        svr.revision_id AS &secretExternalRevision.revision_id,
        rev.revision AS &secretExternalRevision.revision
-FROM      secret_metadata sm
-JOIN      secret_revision rev ON rev.secret_id = sm.secret_id
+FROM secret_metadata sm
+JOIN secret_revision rev ON rev.secret_id = sm.secret_id
 LEFT JOIN secret_value_ref svr ON svr.revision_uuid = rev.uuid`[1:]
 
 	queryParts = append(queryParts, query)
@@ -2116,10 +2116,10 @@ func (st State) GetUserSecretURIByLabel(ctx context.Context, label string) (*cor
 
 	query := `
 SELECT sm.secret_id AS &secretInfo.secret_id
-FROM   secret_metadata sm
-JOIN   secret_model_owner mso ON sm.secret_id = mso.secret_id
-WHERE  mso.label = $M.label
-	`
+FROM secret_metadata sm
+JOIN secret_model_owner mso ON sm.secret_id = mso.secret_id
+WHERE mso.label = $M.label
+`
 	arg := sqlair.M{"label": label}
 
 	queryStmt, err := st.Prepare(query, secretInfo{}, arg)
@@ -2162,9 +2162,9 @@ func (st State) GetURIByConsumerLabel(ctx context.Context, label string, unitNam
 	query := `
 SELECT secret_id AS &secretUnitConsumer.secret_id,
        source_model_uuid AS &secretUnitConsumer.source_model_uuid
-FROM   secret_unit_consumer suc
-WHERE  suc.label = $secretUnitConsumer.label
-AND    suc.unit_uuid = $secretUnitConsumer.unit_uuid
+FROM secret_unit_consumer suc
+WHERE suc.label = $secretUnitConsumer.label
+AND suc.unit_uuid = $secretUnitConsumer.unit_uuid
 `
 
 	queryStmt, err := st.Prepare(query, secretUnitConsumer{})
@@ -2207,10 +2207,10 @@ func (st State) listSecretRevisions(
 SELECT (sr.*) AS (&secretRevision.*),
        (svr.*) AS (&secretValueRef.*),
        (sre.*) AS (&secretRevisionExpire.*)
-FROM   secret_revision sr
+FROM secret_revision sr
        LEFT JOIN secret_revision_expire sre ON sre.revision_uuid = sr.uuid
        LEFT JOIN secret_value_ref svr ON svr.revision_uuid = sr.uuid
-WHERE  secret_id = $secretRevision.secret_id
+WHERE secret_id = $secretRevision.secret_id
 `
 	want := secretRevision{SecretID: uri.ID}
 	if revision != nil {
@@ -2250,10 +2250,10 @@ func (st State) GetSecretValue(
 	// We look for either content or a value reference, which ever is present.
 	contentQuery := `
 SELECT (*) AS (&secretContent.*)
-FROM   secret_content sc
-JOIN   secret_revision rev ON sc.revision_uuid = rev.uuid
-WHERE  rev.secret_id = $secretRevision.secret_id
-AND    rev.revision = $secretRevision.revision`
+FROM secret_content sc
+JOIN secret_revision rev ON sc.revision_uuid = rev.uuid
+WHERE rev.secret_id = $secretRevision.secret_id
+AND rev.revision = $secretRevision.revision`
 
 	contentQueryStmt, err := st.Prepare(contentQuery, secretContent{}, secretRevision{})
 	if err != nil {
@@ -2262,10 +2262,10 @@ AND    rev.revision = $secretRevision.revision`
 
 	valueRefQuery := `
 SELECT (*) AS (&secretValueRef.*)
-FROM   secret_value_ref val
-JOIN   secret_revision rev ON val.revision_uuid = rev.uuid
-WHERE  rev.secret_id = $secretRevision.secret_id
-AND    rev.revision = $secretRevision.revision`
+FROM secret_value_ref val
+JOIN secret_revision rev ON val.revision_uuid = rev.uuid
+WHERE rev.secret_id = $secretRevision.secret_id
+AND rev.revision = $secretRevision.revision`
 
 	valueRefQueryStmt, err := st.Prepare(valueRefQuery, secretValueRef{}, secretRevision{})
 	if err != nil {
@@ -2331,8 +2331,8 @@ func (st State) checkExistsIfLocal(ctx context.Context, tx *sqlair.TX, uri *core
 	query := `
 WITH local AS (
     SELECT 'local' AS is_local FROM secret_metadata sm
-    WHERE  sm.secret_id = $secretRef.secret_id
-    AND    ($secretRef.source_uuid = '' OR $secretRef.source_uuid = (SELECT uuid FROM model))
+    WHERE sm.secret_id = $secretRef.secret_id
+    AND ($secretRef.source_uuid = '' OR $secretRef.source_uuid = (SELECT uuid FROM model))
 ),
 remote AS (
     SELECT 'remote' AS is_local FROM model
@@ -2381,9 +2381,9 @@ func (st State) GetSecretConsumer(
 	query := `
 SELECT suc.label AS &secretUnitConsumer.label,
        suc.current_revision AS &secretUnitConsumer.current_revision
-FROM   secret_unit_consumer suc
-WHERE  suc.secret_id = $secretUnitConsumer.secret_id
-AND    suc.unit_uuid = $secretUnitConsumer.unit_uuid`
+FROM secret_unit_consumer suc
+WHERE suc.secret_id = $secretUnitConsumer.secret_id
+AND suc.unit_uuid = $secretUnitConsumer.unit_uuid`
 
 	queryStmt, err := st.Prepare(query, secretUnitConsumer{})
 	if err != nil {
@@ -2392,19 +2392,19 @@ AND    suc.unit_uuid = $secretUnitConsumer.unit_uuid`
 
 	selectLatestLocalRevision := `
 SELECT MAX(revision) AS &secretRef.revision
-FROM   secret_revision rev
-WHERE  rev.secret_id = $secretRef.secret_id`
+FROM secret_revision rev
+WHERE rev.secret_id = $secretRef.secret_id`
 	selectLatestLocalRevisionStmt, err := st.Prepare(selectLatestLocalRevision, secretRef{})
 	if err != nil {
 		return nil, 0, errors.Capture(err)
 	}
 
 	selectLatestRemoteRevision := `
-SELECT 
+SELECT
     latest_revision AS &secretRef.revision,
 	migrated AS &secretRef.migrated
-FROM   secret_reference ref
-WHERE  ref.secret_id = $secretRef.secret_id`
+FROM secret_reference ref
+WHERE ref.secret_id = $secretRef.secret_id`
 	selectLatestRemoteRevisionStmt, err := st.Prepare(selectLatestRemoteRevision, secretRef{})
 	if err != nil {
 		return nil, 0, errors.Capture(err)
@@ -2479,9 +2479,9 @@ func (st State) SaveSecretConsumer(ctx context.Context, uri *coresecrets.URI, un
 	insertQuery := `
 INSERT INTO secret_unit_consumer (*)
 VALUES ($secretUnitConsumer.*)
-ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET
-    label=excluded.label,
-    current_revision=excluded.current_revision`
+ON CONFLICT (secret_id, unit_uuid) DO UPDATE SET
+    label = excluded.label,
+    current_revision = excluded.current_revision`
 
 	insertStmt, err := st.Prepare(insertQuery, secretUnitConsumer{})
 	if err != nil {
@@ -2533,7 +2533,7 @@ SELECT suc.secret_id AS &secretUnitConsumerInfo.secret_id,
        suc.label AS &secretUnitConsumerInfo.label,
        suc.current_revision AS &secretUnitConsumerInfo.current_revision,
        u.name AS &secretUnitConsumerInfo.unit_name
-FROM   secret_unit_consumer suc
+FROM secret_unit_consumer suc
        JOIN secret_metadata sm ON sm.secret_id = suc.secret_id
        JOIN unit u ON u.uuid = suc.unit_uuid
 `
@@ -2569,7 +2569,7 @@ func (st State) AllSecretRemoteConsumers(ctx context.Context) (map[string][]doma
 SELECT suc.secret_id AS &secretUnitConsumerInfo.secret_id,
        suc.current_revision AS &secretUnitConsumerInfo.current_revision,
        suc.unit_name AS &secretUnitConsumerInfo.unit_name
-FROM   secret_remote_unit_consumer suc
+FROM secret_remote_unit_consumer suc
 `
 
 	queryStmt, err := st.Prepare(query, secretUnitConsumerInfo{})
@@ -2607,7 +2607,7 @@ SELECT suc.secret_id AS &secretUnitConsumerInfo.secret_id,
        suc.current_revision AS &secretUnitConsumerInfo.current_revision,
        sr.latest_revision AS &secretUnitConsumerInfo.latest_revision,
        u.name AS &secretUnitConsumerInfo.unit_name
-FROM   secret_unit_consumer suc
+FROM secret_unit_consumer suc
        JOIN unit u ON u.uuid = suc.unit_uuid
        JOIN secret_reference sr ON sr.secret_id = suc.secret_id
 `
@@ -2660,13 +2660,13 @@ func (st State) GetRegularRelationUUIDByEndpointIdentifiers(
 	}
 	stmt, err := st.Prepare(`
 SELECT &relationUUID.*
-FROM   relation r
-JOIN   v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
-JOIN   v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
-WHERE  e1.application_name = $endpointIdentifier1.application_name 
-AND    e1.endpoint_name    = $endpointIdentifier1.endpoint_name
-AND    e2.application_name = $endpointIdentifier2.application_name 
-AND    e2.endpoint_name    = $endpointIdentifier2.endpoint_name
+FROM relation r
+JOIN v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
+JOIN v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
+WHERE e1.application_name = $endpointIdentifier1.application_name
+AND e1.endpoint_name = $endpointIdentifier1.endpoint_name
+AND e2.application_name = $endpointIdentifier2.application_name
+AND e2.endpoint_name = $endpointIdentifier2.endpoint_name
 `, relationUUID{}, e1, e2)
 
 	var uuids []relationUUID
@@ -2717,10 +2717,10 @@ func (st State) GetPeerRelationUUIDByEndpointIdentifiers(
 
 	stmt, err := st.Prepare(`
 SELECT &relationUUIDAndRole.*
-FROM   relation r
-JOIN   v_relation_endpoint e ON r.uuid = e.relation_uuid
-WHERE  e.application_name = $endpointIdentifier.application_name
-AND    e.endpoint_name    = $endpointIdentifier.endpoint_name
+FROM relation r
+JOIN v_relation_endpoint e ON r.uuid = e.relation_uuid
+WHERE e.application_name = $endpointIdentifier.application_name
+AND e.endpoint_name = $endpointIdentifier.endpoint_name
 `, relationUUIDAndRole{}, e)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -2768,8 +2768,8 @@ func (st State) GetRelationEndpoints(ctx context.Context, relUUID string) ([]cor
 	id := relationUUID{UUID: relUUID}
 	q, err := st.Prepare(`
 SELECT &endpointIdentifier.*
-FROM   v_relation_endpoint
-WHERE  relation_uuid = $relationUUID.uuid
+FROM v_relation_endpoint
+WHERE relation_uuid = $relationUUID.uuid
 ORDER BY CASE role
     WHEN 'requirer' THEN 0
     WHEN 'provider' THEN 1
@@ -2818,10 +2818,10 @@ func (st State) GrantAccess(ctx context.Context, uri *coresecrets.URI, params do
 
 	checkInvariantQuery := `
 SELECT sp.secret_id AS &secretID.id
-FROM   secret_permission sp
-WHERE  sp.secret_id = $secretPermission.secret_id
-AND    sp.subject_uuid = $secretPermission.subject_uuid
-AND    (sp.subject_type_id <> $secretPermission.subject_type_id
+FROM secret_permission sp
+WHERE sp.secret_id = $secretPermission.secret_id
+AND sp.subject_uuid = $secretPermission.subject_uuid
+AND (sp.subject_type_id <> $secretPermission.subject_type_id
         OR sp.scope_uuid <> $secretPermission.scope_uuid
         OR sp.scope_type_id <> $secretPermission.scope_type_id)`
 
@@ -2882,10 +2882,10 @@ func (st State) NamespaceForWatchSecretRevisionObsolete() string {
 }
 
 const (
-	selectUnitUUID        = `SELECT uuid AS &entityRef.uuid FROM unit WHERE uuid=$entityRef.uuid`
-	selectApplicationUUID = `SELECT uuid AS &entityRef.uuid FROM application WHERE uuid=$entityRef.uuid`
-	selectRelationUUID    = `SELECT uuid AS &entityRef.uuid FROM relation WHERE uuid=$entityRef.uuid`
-	selectModelUUID       = `SELECT uuid AS &entityRef.uuid FROM model WHERE uuid=$entityRef.uuid`
+	selectUnitUUID        = `SELECT uuid AS &entityRef.uuid FROM unit WHERE uuid = $entityRef.uuid`
+	selectApplicationUUID = `SELECT uuid AS &entityRef.uuid FROM application WHERE uuid = $entityRef.uuid`
+	selectRelationUUID    = `SELECT uuid AS &entityRef.uuid FROM relation WHERE uuid = $entityRef.uuid`
+	selectModelUUID       = `SELECT uuid AS &entityRef.uuid FROM model WHERE uuid = $entityRef.uuid`
 )
 
 func (st State) checkSubjectUUIDExists(
@@ -2974,12 +2974,12 @@ func (st State) grantAccess(ctx context.Context, tx *sqlair.TX, perm secretPermi
 	insertQuery := `
 INSERT INTO secret_permission (*)
 VALUES ($secretPermission.*)
-ON CONFLICT(secret_id, subject_uuid) DO UPDATE SET
-    role_id=excluded.role_id,
+ON CONFLICT (secret_id, subject_uuid) DO UPDATE SET
+    role_id = excluded.role_id,
     -- These are needed to fire the immutable trigger.
-    subject_type_id=excluded.subject_type_id,
-    scope_type_id=excluded.scope_type_id,
-    scope_uuid=excluded.scope_uuid`
+    subject_type_id = excluded.subject_type_id,
+    scope_type_id = excluded.scope_type_id,
+    scope_uuid = excluded.scope_uuid`
 
 	insertStmt, err := st.Prepare(insertQuery, secretPermission{})
 	if err != nil {
@@ -3004,9 +3004,9 @@ func (st State) RevokeAccess(ctx context.Context, uri *coresecrets.URI, params d
 
 	deleteQuery := `
 DELETE FROM secret_permission
-WHERE  secret_id = $secretPermission.secret_id
-AND    subject_type_id = $secretPermission.subject_type_id
-AND    subject_uuid = $secretPermission.subject_uuid`
+WHERE secret_id = $secretPermission.secret_id
+AND subject_type_id = $secretPermission.subject_type_id
+AND subject_uuid = $secretPermission.subject_uuid`
 
 	deleteStmt, err := st.Prepare(deleteQuery, secretPermission{})
 	if err != nil {
@@ -3051,11 +3051,11 @@ func (st State) GetSecretAccess(
 
 	query := `
 SELECT sr.role AS &secretRole.role
-FROM   v_secret_permission sp
-JOIN   secret_role sr ON sr.id = sp.role_id
-WHERE  secret_id = $secretAccessor.secret_id
-AND    subject_type_id = $secretAccessor.subject_type_id
-AND    subject_id = $secretAccessor.subject_id`
+FROM v_secret_permission sp
+JOIN secret_role sr ON sr.id = sp.role_id
+WHERE secret_id = $secretAccessor.secret_id
+AND subject_type_id = $secretAccessor.subject_type_id
+AND subject_id = $secretAccessor.subject_id`
 
 	access := secretAccessor{
 		SecretID:      uri.ID,
@@ -3097,14 +3097,14 @@ func (st State) GetSecretGrants(
 	query := `
 SELECT (sp.*) AS (&secretAccessor.*),
        (sp.*) AS (&secretAccessScope.*)
-FROM   v_secret_permission sp
-WHERE  secret_id = $secretID.id
-AND    role_id = $secretAccessor.role_id
+FROM v_secret_permission sp
+WHERE secret_id = $secretID.id
+AND role_id = $secretAccessor.role_id
 -- exclude remote applications
-AND    NOT EXISTS (
+AND NOT EXISTS (
          SELECT 1
-         FROM   application_remote_consumer arc
-         WHERE  arc.offer_connection_uuid = sp.subject_uuid
+         FROM application_remote_consumer arc
+         WHERE arc.offer_connection_uuid = sp.subject_uuid
        )
 `
 	selectStmt, err := st.Prepare(query, secretID{}, secretAccessor{}, secretAccessScope{})
@@ -3155,7 +3155,7 @@ func (st State) AllSecretGrants(ctx context.Context) (map[string][]domainsecret.
 	query := `
 SELECT (sp.*) AS (&secretAccessor.*),
        (sp.*) AS (&secretAccessScope.*)
-FROM   v_secret_permission sp
+FROM v_secret_permission sp
 `
 
 	selectStmt, err := st.Prepare(query, secretAccessor{}, secretAccessScope{})
@@ -3205,15 +3205,15 @@ func (st State) ListGrantedSecretsForBackend(
 	query := `
 SELECT (sm.secret_id) AS (&secretInfo.*),
        (svr.*) AS (&secretValueRef.*)
-FROM   secret_metadata sm
-JOIN   secret_revision rev ON rev.secret_id = sm.secret_id
-JOIN   secret_value_ref svr ON svr.revision_uuid = rev.uuid
-JOIN   secret_permission sp ON sp.secret_id = sm.secret_id
+FROM secret_metadata sm
+JOIN secret_revision rev ON rev.secret_id = sm.secret_id
+JOIN secret_value_ref svr ON svr.revision_uuid = rev.uuid
+JOIN secret_permission sp ON sp.secret_id = sm.secret_id
 LEFT JOIN unit suu ON sp.subject_uuid = suu.uuid AND sp.subject_type_id = $secretAccessorType.unit_type_id
 LEFT JOIN application sua ON sp.subject_uuid = sua.uuid AND sp.subject_type_id = $secretAccessorType.app_type_id
-WHERE  sp.role_id IN ($roles[:])
-AND    svr.backend_uuid = $secretBackendID.id
-AND    (sp.subject_type_id = $secretAccessorType.unit_type_id AND suu.name IN ($units[:])
+WHERE sp.role_id IN ($roles[:])
+AND svr.backend_uuid = $secretBackendID.id
+AND (sp.subject_type_id = $secretAccessorType.unit_type_id AND suu.name IN ($units[:])
         OR sp.subject_type_id = $secretAccessorType.app_type_id AND sua.name IN ($applications[:])
         OR sp.subject_type_id = $secretAccessorType.model_type_id AND sp.subject_uuid IN ($models[:])
        )`
@@ -3255,14 +3255,14 @@ func (st State) ListGrantedSecretsForDrain(
 	query := `
 SELECT (sm.secret_id) AS (&secretInfo.*),
        (svr.*) AS (&secretValueRef.*)
-FROM   secret_metadata sm
-JOIN   secret_revision rev ON rev.secret_id = sm.secret_id
+FROM secret_metadata sm
+JOIN secret_revision rev ON rev.secret_id = sm.secret_id
 LEFT JOIN secret_value_ref svr ON svr.revision_uuid = rev.uuid
-JOIN   secret_permission sp ON sp.secret_id = sm.secret_id
+JOIN secret_permission sp ON sp.secret_id = sm.secret_id
 LEFT JOIN unit suu ON sp.subject_uuid = suu.uuid AND sp.subject_type_id = $secretAccessorType.unit_type_id
 LEFT JOIN application sua ON sp.subject_uuid = sua.uuid AND sp.subject_type_id = $secretAccessorType.app_type_id
-WHERE  sp.role_id IN ($roles[:])
-AND    (sp.subject_type_id = $secretAccessorType.unit_type_id AND suu.name IN ($units[:])
+WHERE sp.role_id IN ($roles[:])
+AND (sp.subject_type_id = $secretAccessorType.unit_type_id AND suu.name IN ($units[:])
         OR sp.subject_type_id = $secretAccessorType.app_type_id AND sua.name IN ($applications[:])
         OR sp.subject_type_id = $secretAccessorType.model_type_id AND sp.subject_uuid IN ($models[:])
        )`
@@ -3360,9 +3360,9 @@ func (st State) GetSecretRevisionUUID(ctx context.Context, uri *coresecrets.URI,
 	}
 	stmt, err := st.Prepare(`
 SELECT uuid AS &secretRevision.uuid
-FROM   secret_revision
-WHERE  secret_id = $secretRevision.secret_id
-    AND    revision = $secretRevision.revision`, secretRev)
+FROM secret_revision
+WHERE secret_id = $secretRevision.secret_id
+    AND revision = $secretRevision.revision`, secretRev)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -3386,13 +3386,13 @@ type dbrevisionUUIDs []revisionUUID
 func (st State) InitialWatchStatementForConsumedSecretsChange(unitName coreunit.Name) (string, eventsource.NamespaceQuery) {
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		q := `
-SELECT   DISTINCT sr.uuid AS &revisionUUID.uuid
-FROM     secret_unit_consumer suc
-JOIN     unit u ON u.uuid = suc.unit_uuid
-JOIN     secret_revision sr ON sr.secret_id = suc.secret_id
-WHERE    u.name = $unit.name
+SELECT DISTINCT sr.uuid AS &revisionUUID.uuid
+FROM secret_unit_consumer suc
+JOIN unit u ON u.uuid = suc.unit_uuid
+JOIN secret_revision sr ON sr.secret_id = suc.secret_id
+WHERE u.name = $unit.name
 GROUP BY sr.secret_id
-HAVING   suc.current_revision < MAX(sr.revision)`
+HAVING suc.current_revision < MAX(sr.revision)`
 
 		queryParams := []any{
 			unit{Name: unitName},
@@ -3488,11 +3488,11 @@ HAVING suc.current_revision < MAX(sr.revision)`
 func (st State) InitialWatchStatementForConsumedRemoteSecretsChange(unitName coreunit.Name) (string, eventsource.NamespaceQuery) {
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		q := `
-SELECT   sr.secret_id AS &secretID.id
-FROM     secret_unit_consumer suc
-JOIN     unit u ON u.uuid = suc.unit_uuid
-JOIN     secret_reference sr ON sr.secret_id = suc.secret_id
-WHERE    u.name = $unit.name AND
+SELECT sr.secret_id AS &secretID.id
+FROM secret_unit_consumer suc
+JOIN unit u ON u.uuid = suc.unit_uuid
+JOIN secret_reference sr ON sr.secret_id = suc.secret_id
+WHERE u.name = $unit.name AND
          suc.current_revision < sr.latest_revision`
 
 		input := unit{Name: unitName}
@@ -3540,10 +3540,10 @@ func (st State) GetConsumedRemoteSecretURIsWithChanges(
 	q := `
 SELECT suc.secret_id AS &secretUnitConsumer.secret_id,
        suc.source_model_uuid AS &secretUnitConsumer.source_model_uuid
-FROM   secret_unit_consumer suc
-JOIN   unit u ON u.uuid = suc.unit_uuid
-JOIN   secret_reference sr ON sr.secret_id = suc.secret_id
-WHERE  u.name = $unit.name AND
+FROM secret_unit_consumer suc
+JOIN unit u ON u.uuid = suc.unit_uuid
+JOIN secret_reference sr ON sr.secret_id = suc.secret_id
+WHERE u.name = $unit.name AND
        sr.secret_id IN ($dbSecretIDs[:]) AND
        suc.current_revision < sr.latest_revision`
 	stmt, err := st.Prepare(q, u, s, secretUnitConsumer{})
@@ -3589,14 +3589,14 @@ func (st State) InitialWatchStatementForObsoleteRevision(
 		}
 
 		q := `
-SELECT    sr.secret_id AS &secretRevision.secret_id,
+SELECT sr.secret_id AS &secretRevision.secret_id,
           sr.revision AS &secretRevision.revision,
           sro.revision_uuid AS &secretRevision.uuid
-FROM      secret_revision_obsolete sro
-JOIN      secret_revision sr ON sr.uuid = sro.revision_uuid
+FROM secret_revision_obsolete sro
+JOIN secret_revision sr ON sr.uuid = sro.revision_uuid
 LEFT JOIN secret_application_owner sao ON sr.secret_id = sao.secret_id
 LEFT JOIN secret_unit_owner suo ON sr.secret_id = suo.secret_id
-WHERE     sro.obsolete = true AND
+WHERE sro.obsolete = true AND
           (
             sao.application_uuid IN ($ApplicationOwners[:]) OR
             suo.unit_uuid IN ($UnitOwners[:])
@@ -3659,14 +3659,14 @@ func (st State) GetRevisionIDsForObsolete(
 
 	rUUIDs := revisionUUIDs(revUUIDs)
 	q := `
-SELECT    sr.secret_id AS &secretRevision.secret_id,
+SELECT sr.secret_id AS &secretRevision.secret_id,
           sr.revision AS &secretRevision.revision,
           sro.revision_uuid AS &secretRevision.uuid
-FROM      secret_revision_obsolete sro
-JOIN      secret_revision sr ON sr.uuid = sro.revision_uuid
+FROM secret_revision_obsolete sro
+JOIN secret_revision sr ON sr.uuid = sro.revision_uuid
 LEFT JOIN secret_application_owner sao ON sr.secret_id = sao.secret_id
 LEFT JOIN secret_unit_owner suo ON sr.secret_id = suo.secret_id
-WHERE     sro.obsolete = true AND
+WHERE sro.obsolete = true AND
           sr.uuid IN ($revisionUUIDs[:]) AND
           (
             sao.application_uuid IN ($ApplicationOwners[:]) OR
@@ -4039,11 +4039,11 @@ func (st State) GetObsoleteUserSecretRevisionsReadyToPrune(ctx context.Context) 
 	}
 	q := `
 SELECT (sr.revision, sr.secret_id) AS (&obsoleteRevisionRow.*)
-FROM      secret_model_owner smo
-JOIN      secret_metadata sm ON sm.secret_id = smo.secret_id
-JOIN      secret_revision sr ON sr.secret_id = smo.secret_id
+FROM secret_model_owner smo
+JOIN secret_metadata sm ON sm.secret_id = smo.secret_id
+JOIN secret_revision sr ON sr.secret_id = smo.secret_id
 LEFT JOIN secret_revision_obsolete sro ON sro.revision_uuid = sr.uuid
-WHERE     sm.auto_prune = true AND sro.obsolete = true`
+WHERE sm.auto_prune = true AND sro.obsolete = true`
 	stmt, err := st.Prepare(q, obsoleteRevisionRow{})
 	if err != nil {
 		return nil, errors.Capture(err)

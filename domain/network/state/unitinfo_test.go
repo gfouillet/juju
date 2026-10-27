@@ -972,8 +972,8 @@ func (s *infoSuite) addApplicationEndpoint(c *tc.C, appUUID, charmUUID, endpoint
 	}
 	appEndpointUUID := uuid.MustNewUUID().String()
 	s.query(c, `
-INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid, space_uuid) 
-VALUES (?, ?,?, ?)`,
+INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid, space_uuid)
+VALUES (?, ?, ?, ?)`,
 		appEndpointUUID, appUUID, relationUUID, spacePtr)
 	return appEndpointUUID
 }

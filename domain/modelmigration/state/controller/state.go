@@ -63,24 +63,24 @@ func (s *State) DeleteModelImportingStatus(ctx context.Context, modelUUID string
 	// controllers.
 	deleteOffersStmt, err := s.Prepare(`
 DELETE FROM model_migration_import_offer
-WHERE  migration_uuid IN (
+WHERE migration_uuid IN (
        SELECT uuid FROM model_migration_import WHERE model_uuid = $modelUUIDArg.model_uuid)
-	`, mUUID)
+`, mUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
 	deleteExternalControllersStmt, err := s.Prepare(`
 DELETE FROM model_migration_import_external_controller_model
-WHERE  migration_uuid IN (
+WHERE migration_uuid IN (
        SELECT uuid FROM model_migration_import WHERE model_uuid = $modelUUIDArg.model_uuid)
-	`, mUUID)
+`, mUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
 	stmt, err := s.Prepare(`
 DELETE FROM model_migration_import
 WHERE model_uuid = $modelUUIDArg.model_uuid
-	`, mUUID)
+`, mUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -110,7 +110,7 @@ func (s *State) GetControllerTargetVersion(ctx context.Context) (string, error) 
 	var versionValue controllerTargetVersion
 	stmt, err := s.Prepare(`
 SELECT &controllerTargetVersion.*
-FROM   controller
+FROM controller
 `,
 		versionValue)
 	if err != nil {
@@ -183,9 +183,9 @@ func (s *State) GetActiveExportUUID(ctx context.Context, modelUUID string) (stri
 
 	stmt, err := s.Prepare(`
 SELECT &entityUUID.uuid
-FROM   model_migration_export
-WHERE  model_uuid = $modelUUIDArg.model_uuid
-AND    current_phase_id NOT IN (
+FROM model_migration_export
+WHERE model_uuid = $modelUUIDArg.model_uuid
+AND current_phase_id NOT IN (
        $terminalPhaseIDArgs.reap_failed_id,
        $terminalPhaseIDArgs.done_id,
        $terminalPhaseIDArgs.abort_done_id)
@@ -275,9 +275,9 @@ INSERT INTO model_migration_export_phase (*) VALUES ($migrationPhaseEntry.*)
 	}
 	countActiveStmt, err := s.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   model_migration_export
-WHERE  model_uuid = $modelUUIDArg.model_uuid
-AND    current_phase_id NOT IN (
+FROM model_migration_export
+WHERE model_uuid = $modelUUIDArg.model_uuid
+AND current_phase_id NOT IN (
        $terminalPhaseIDArgs.reap_failed_id,
        $terminalPhaseIDArgs.done_id,
        $terminalPhaseIDArgs.abort_done_id)
@@ -343,16 +343,16 @@ func (s *State) ensureExternalControllerSaved(
 
 	selectCtrlStmt, err := s.Prepare(`
 SELECT &externalControllerInfo.*
-FROM   external_controller
-WHERE  uuid = $entityUUID.uuid
+FROM external_controller
+WHERE uuid = $entityUUID.uuid
 `, ctrlUUID, externalControllerInfo{})
 	if err != nil {
 		return errors.Capture(err)
 	}
 	selectAddrsStmt, err := s.Prepare(`
 SELECT &addressValue.address
-FROM   external_controller_address
-WHERE  controller_uuid = $entityUUID.uuid
+FROM external_controller_address
+WHERE controller_uuid = $entityUUID.uuid
 `, ctrlUUID, addressValue{})
 	if err != nil {
 		return errors.Capture(err)
@@ -406,9 +406,9 @@ func (s *State) updateExternalController(
 ) error {
 	updateCtrlStmt, err := s.Prepare(`
 UPDATE external_controller
-SET    alias = $externalControllerInfo.alias,
+SET alias = $externalControllerInfo.alias,
        ca_cert = $externalControllerInfo.ca_cert
-WHERE  uuid = $externalControllerInfo.uuid
+WHERE uuid = $externalControllerInfo.uuid
 `, info)
 	if err != nil {
 		return errors.Capture(err)
@@ -420,7 +420,7 @@ WHERE  uuid = $externalControllerInfo.uuid
 	ctrlUUID := entityUUID{UUID: info.UUID}
 	deleteAddrsStmt, err := s.Prepare(`
 DELETE FROM external_controller_address
-WHERE  controller_uuid = $entityUUID.uuid
+WHERE controller_uuid = $entityUUID.uuid
 `, ctrlUUID)
 	if err != nil {
 		return errors.Capture(err)
@@ -476,9 +476,9 @@ func (s *State) GetActiveExport(ctx context.Context, modelUUID string) (modelmig
 
 	selectExportStmt, err := s.Prepare(`
 SELECT &migrationExport.*
-FROM   model_migration_export
-WHERE  model_uuid = $modelUUIDArg.model_uuid
-AND    current_phase_id NOT IN (
+FROM model_migration_export
+WHERE model_uuid = $modelUUIDArg.model_uuid
+AND current_phase_id NOT IN (
        $terminalPhaseIDArgs.reap_failed_id,
        $terminalPhaseIDArgs.done_id,
        $terminalPhaseIDArgs.abort_done_id)
@@ -509,8 +509,8 @@ AND    current_phase_id NOT IN (
 		migUUID := migrationUUIDArg{MigrationUUID: export.UUID}
 		selectAuthStmt, err := s.Prepare(`
 SELECT &migrationTargetAuth.*
-FROM   model_migration_export_target_auth
-WHERE  migration_uuid = $migrationUUIDArg.migration_uuid
+FROM model_migration_export_target_auth
+WHERE migration_uuid = $migrationUUIDArg.migration_uuid
 `, migUUID, migrationTargetAuth{})
 		if err != nil {
 			return errors.Capture(err)
@@ -523,8 +523,8 @@ WHERE  migration_uuid = $migrationUUIDArg.migration_uuid
 		ctrlUUID := entityUUID{UUID: export.TargetControllerUUID}
 		selectCtrlStmt, err := s.Prepare(`
 SELECT &externalControllerInfo.*
-FROM   external_controller
-WHERE  uuid = $entityUUID.uuid
+FROM external_controller
+WHERE uuid = $entityUUID.uuid
 `, ctrlUUID, externalControllerInfo{})
 		if err != nil {
 			return errors.Capture(err)
@@ -536,8 +536,8 @@ WHERE  uuid = $entityUUID.uuid
 
 		selectAddrsStmt, err := s.Prepare(`
 SELECT &addressValue.address
-FROM   external_controller_address
-WHERE  controller_uuid = $entityUUID.uuid
+FROM external_controller_address
+WHERE controller_uuid = $entityUUID.uuid
 `, ctrlUUID, addressValue{})
 		if err != nil {
 			return errors.Capture(err)
@@ -601,9 +601,9 @@ func (s *State) SetPhase(ctx context.Context, migrationUUID string, newPhase mig
 	migUUID := entityUUID{UUID: migrationUUID}
 	selectPhaseStmt, err := s.Prepare(`
 SELECT &currentPhase.*
-FROM   model_migration_export
-WHERE  uuid = $entityUUID.uuid
-AND    current_phase_id NOT IN (
+FROM model_migration_export
+WHERE uuid = $entityUUID.uuid
+AND current_phase_id NOT IN (
        $terminalPhaseIDArgs.reap_failed_id,
        $terminalPhaseIDArgs.done_id,
        $terminalPhaseIDArgs.abort_done_id)
@@ -614,10 +614,10 @@ AND    current_phase_id NOT IN (
 
 	updateStmt, err := s.Prepare(`
 UPDATE model_migration_export
-SET    current_phase_id = $phaseUpdate.new_phase_id,
+SET current_phase_id = $phaseUpdate.new_phase_id,
        updated_at = $phaseUpdate.updated_at
-WHERE  uuid = $phaseUpdate.uuid
-AND    current_phase_id = $phaseUpdate.expected_phase_id
+WHERE uuid = $phaseUpdate.uuid
+AND current_phase_id = $phaseUpdate.expected_phase_id
 `, phaseUpdate{})
 	if err != nil {
 		return errors.Capture(err)
@@ -706,8 +706,8 @@ func (s *State) SetStatusMessage(ctx context.Context, migrationUUID, message str
 	}
 	countStmt, err := s.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   model_migration_export_status
-WHERE  migration_uuid = $migrationStatus.migration_uuid
+FROM model_migration_export_status
+WHERE migration_uuid = $migrationStatus.migration_uuid
 `, status, countResult{})
 	if err != nil {
 		return errors.Capture(err)
@@ -720,9 +720,9 @@ INSERT INTO model_migration_export_status (*) VALUES ($migrationStatus.*)
 	}
 	updateStmt, err := s.Prepare(`
 UPDATE model_migration_export_status
-SET    message = $migrationStatus.message,
+SET message = $migrationStatus.message,
        recorded_at = $migrationStatus.recorded_at
-WHERE  migration_uuid = $migrationStatus.migration_uuid
+WHERE migration_uuid = $migrationStatus.migration_uuid
 `, status)
 	if err != nil {
 		return errors.Capture(err)
@@ -774,10 +774,10 @@ func (s *State) InsertMinionReport(
 	}
 	selectStmt, err := s.Prepare(`
 SELECT &minionReportRow.*
-FROM   model_migration_export_minion_sync
-WHERE  migration_uuid = $migrationMinionSync.migration_uuid
-AND    phase_id = $migrationMinionSync.phase_id
-AND    entity_key = $migrationMinionSync.entity_key
+FROM model_migration_export_minion_sync
+WHERE migration_uuid = $migrationMinionSync.migration_uuid
+AND phase_id = $migrationMinionSync.phase_id
+AND entity_key = $migrationMinionSync.entity_key
 `, report, minionReportRow{})
 	if err != nil {
 		return errors.Capture(err)
@@ -844,9 +844,9 @@ func (s *State) AggregateMinionReports(
 	phaseArg := phaseIDArg{PhaseID: int(phaseID)}
 	stmt, err := s.Prepare(`
 SELECT &minionReportRow.*
-FROM   model_migration_export_minion_sync
-WHERE  migration_uuid = $migrationUUIDArg.migration_uuid
-AND    phase_id = $phaseIDArg.phase_id
+FROM model_migration_export_minion_sync
+WHERE migration_uuid = $migrationUUIDArg.migration_uuid
+AND phase_id = $phaseIDArg.phase_id
 `, migUUID, phaseArg, minionReportRow{})
 	if err != nil {
 		return modelmigrationinternal.MinionReports{}, errors.Capture(err)
@@ -905,9 +905,9 @@ func (s *State) MarkExportEnded(ctx context.Context, migrationUUID string, termi
 	}
 	selectExportStmt, err := s.Prepare(`
 SELECT &currentPhase.*
-FROM   model_migration_export
-WHERE  uuid = $endExport.uuid
-AND    current_phase_id NOT IN (
+FROM model_migration_export
+WHERE uuid = $endExport.uuid
+AND current_phase_id NOT IN (
        $terminalPhaseIDArgs.reap_failed_id,
        $terminalPhaseIDArgs.done_id,
        $terminalPhaseIDArgs.abort_done_id)
@@ -917,10 +917,10 @@ AND    current_phase_id NOT IN (
 	}
 	updateStmt, err := s.Prepare(`
 UPDATE model_migration_export
-SET    current_phase_id = $endExport.current_phase_id,
+SET current_phase_id = $endExport.current_phase_id,
        updated_at = $endExport.updated_at
-WHERE  uuid = $endExport.uuid
-AND    current_phase_id NOT IN (
+WHERE uuid = $endExport.uuid
+AND current_phase_id NOT IN (
        $terminalPhaseIDArgs.reap_failed_id,
        $terminalPhaseIDArgs.done_id,
        $terminalPhaseIDArgs.abort_done_id)
@@ -982,9 +982,9 @@ func (s *State) GetMigrationMode(ctx context.Context, modelUUID string) (modelmi
 	terminalIDs := terminalPhaseIDs()
 	exportStmt, err := s.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   model_migration_export
-WHERE  model_uuid = $modelUUIDArg.model_uuid
-AND    current_phase_id NOT IN (
+FROM model_migration_export
+WHERE model_uuid = $modelUUIDArg.model_uuid
+AND current_phase_id NOT IN (
        $terminalPhaseIDArgs.reap_failed_id,
        $terminalPhaseIDArgs.done_id,
        $terminalPhaseIDArgs.abort_done_id)
@@ -994,8 +994,8 @@ AND    current_phase_id NOT IN (
 	}
 	importStmt, err := s.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   model_migration_import
-WHERE  model_uuid = $modelUUIDArg.model_uuid
+FROM model_migration_import
+WHERE model_uuid = $modelUUIDArg.model_uuid
 `, mUUID, countResult{})
 	if err != nil {
 		return modelmigration.MigrationModeNone, errors.Capture(err)
@@ -1048,17 +1048,17 @@ func (s *State) GetMigrationPhase(ctx context.Context, modelUUID string) (string
 	terminalIDs := terminalPhaseIDs()
 	importStmt, err := s.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   model_migration_import
-WHERE  model_uuid = $modelUUIDArg.model_uuid
+FROM model_migration_import
+WHERE model_uuid = $modelUUIDArg.model_uuid
 `, mUUID, countResult{})
 	if err != nil {
 		return "", errors.Capture(err)
 	}
 	exportStmt, err := s.Prepare(`
 SELECT &currentPhase.current_phase_id
-FROM   model_migration_export
-WHERE  model_uuid = $modelUUIDArg.model_uuid
-AND    current_phase_id NOT IN (
+FROM model_migration_export
+WHERE model_uuid = $modelUUIDArg.model_uuid
+AND current_phase_id NOT IN (
        $terminalPhaseIDArgs.reap_failed_id,
        $terminalPhaseIDArgs.done_id,
        $terminalPhaseIDArgs.abort_done_id)
@@ -1208,14 +1208,14 @@ SELECT m.uuid AS &modelIdentityRow.uuid,
        cc.name AS &modelIdentityRow.credential_name,
        cco.name AS &modelIdentityRow.credential_owner,
        l.value AS &modelIdentityRow.life
-FROM   model AS m
-JOIN   model_type AS mt ON mt.id = m.model_type_id
-JOIN   cloud AS c ON c.uuid = m.cloud_uuid
-JOIN   life AS l ON l.id = m.life_id
+FROM model AS m
+JOIN model_type AS mt ON mt.id = m.model_type_id
+JOIN cloud AS c ON c.uuid = m.cloud_uuid
+JOIN life AS l ON l.id = m.life_id
 LEFT JOIN cloud_region AS cr ON cr.uuid = m.cloud_region_uuid
 LEFT JOIN cloud_credential AS cc ON cc.uuid = m.cloud_credential_uuid
 LEFT JOIN user AS cco ON cco.uuid = cc.owner_uuid
-WHERE  m.uuid = $modelUUIDArg.model_uuid
+WHERE m.uuid = $modelUUIDArg.model_uuid
 `, mUUID, modelIdentityRow{})
 	if err != nil {
 		return coremodelmigration.ModelIdentityInfo{}, errors.Capture(err)
@@ -1260,12 +1260,12 @@ SELECT pot.type AS &permissionRow.object_type,
        p.grant_on AS &permissionRow.grant_on,
        u.name AS &permissionRow.subject_name,
        pat.type AS &permissionRow.access
-FROM   permission AS p
-JOIN   permission_object_type AS pot ON pot.id = p.object_type_id
-JOIN   permission_access_type AS pat ON pat.id = p.access_type_id
-JOIN   user AS u ON u.uuid = p.grant_to
-WHERE  (pot.type = 'model' AND p.grant_on = $modelUUIDArg.model_uuid)
-OR     (pot.type = 'offer' AND p.grant_on IN ($grantOnList[:]))
+FROM permission AS p
+JOIN permission_object_type AS pot ON pot.id = p.object_type_id
+JOIN permission_access_type AS pat ON pat.id = p.access_type_id
+JOIN user AS u ON u.uuid = p.grant_to
+WHERE (pot.type = 'model' AND p.grant_on = $modelUUIDArg.model_uuid)
+OR (pot.type = 'offer' AND p.grant_on IN ($grantOnList[:]))
 `, mUUID, permissionRow{}, grantOnList{})
 		args = []any{mUUID, grantOnList(offerUUIDs)}
 	} else {
@@ -1274,11 +1274,11 @@ SELECT pot.type AS &permissionRow.object_type,
        p.grant_on AS &permissionRow.grant_on,
        u.name AS &permissionRow.subject_name,
        pat.type AS &permissionRow.access
-FROM   permission AS p
-JOIN   permission_object_type AS pot ON pot.id = p.object_type_id
-JOIN   permission_access_type AS pat ON pat.id = p.access_type_id
-JOIN   user AS u ON u.uuid = p.grant_to
-WHERE  pot.type = 'model' AND p.grant_on = $modelUUIDArg.model_uuid
+FROM permission AS p
+JOIN permission_object_type AS pot ON pot.id = p.object_type_id
+JOIN permission_access_type AS pat ON pat.id = p.access_type_id
+JOIN user AS u ON u.uuid = p.grant_to
+WHERE pot.type = 'model' AND p.grant_on = $modelUUIDArg.model_uuid
 `, mUUID, permissionRow{})
 		args = []any{mUUID}
 	}
@@ -1319,10 +1319,10 @@ SELECT vcc.cloud_name AS &credentialRow.cloud,
        vcc.invalid_reason AS &credentialRow.invalid_reason,
        cca."key" AS &credentialRow.attr_key,
        cca.value AS &credentialRow.attr_value
-FROM   v_cloud_credential AS vcc
-JOIN   model AS m ON m.cloud_credential_uuid = vcc.uuid
+FROM v_cloud_credential AS vcc
+JOIN model AS m ON m.cloud_credential_uuid = vcc.uuid
 LEFT JOIN cloud_credential_attribute AS cca ON cca.cloud_credential_uuid = vcc.uuid
-WHERE  m.uuid = $modelUUIDArg.model_uuid
+WHERE m.uuid = $modelUUIDArg.model_uuid
 `, mUUID, credentialRow{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1367,9 +1367,9 @@ func (s *State) getAuthorizedKeys(
 	stmt, err := s.Prepare(`
 SELECT u.name AS &authorizedKeyRow.username,
        vak.public_key AS &authorizedKeyRow.public_key
-FROM   v_model_authorized_keys AS vak
-JOIN   user AS u ON u.uuid = vak.user_uuid
-WHERE  vak.model_uuid = $modelUUIDArg.model_uuid
+FROM v_model_authorized_keys AS vak
+JOIN user AS u ON u.uuid = vak.user_uuid
+WHERE vak.model_uuid = $modelUUIDArg.model_uuid
 `, mUUID, authorizedKeyRow{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1410,11 +1410,11 @@ SELECT u.name AS &userRow.name,
        u.removed AS &userRow.removed,
        u.external AS &userRow.external,
        mll.time AS &userRow.last_login
-FROM   user AS u
+FROM user AS u
 LEFT JOIN user AS cb ON cb.uuid = u.created_by_uuid
 LEFT JOIN model_last_login AS mll
        ON mll.user_uuid = u.uuid AND mll.model_uuid = $modelUUIDArg.model_uuid
-WHERE  u.name IN ($nameList[:])
+WHERE u.name IN ($nameList[:])
 `, mUUID, userRow{}, nameList{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1449,10 +1449,10 @@ func (s *State) getModelSecretBackend(
 	stmt, err := s.Prepare(`
 SELECT sb.name AS &modelSecretBackendRow.name,
        sbt.type AS &modelSecretBackendRow.backend_type
-FROM   model_secret_backend AS msb
-JOIN   secret_backend AS sb ON sb.uuid = msb.secret_backend_uuid
-JOIN   secret_backend_type AS sbt ON sbt.id = sb.backend_type_id
-WHERE  msb.model_uuid = $modelUUIDArg.model_uuid
+FROM model_secret_backend AS msb
+JOIN secret_backend AS sb ON sb.uuid = msb.secret_backend_uuid
+JOIN secret_backend_type AS sbt ON sbt.id = sb.backend_type_id
+WHERE msb.model_uuid = $modelUUIDArg.model_uuid
 `, mUUID, modelSecretBackendRow{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1481,9 +1481,9 @@ func (s *State) getSecretBackendRefs(
 SELECT sb.name AS &secretBackendRefRow.backend_name,
        sbr.secret_revision_uuid AS &secretBackendRefRow.secret_revision_uuid,
        COALESCE(sbr.secret_id, sbr.secret_revision_uuid) AS &secretBackendRefRow.secret_id
-FROM   secret_backend_reference AS sbr
-JOIN   secret_backend AS sb ON sb.uuid = sbr.secret_backend_uuid
-WHERE  sbr.model_uuid = $modelUUIDArg.model_uuid
+FROM secret_backend_reference AS sbr
+JOIN secret_backend AS sb ON sb.uuid = sbr.secret_backend_uuid
+WHERE sbr.model_uuid = $modelUUIDArg.model_uuid
 `, mUUID, secretBackendRefRow{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1517,9 +1517,9 @@ func (s *State) getApplicationLeadership(
 	stmt, err := s.Prepare(`
 SELECT l.name AS &leadershipRow.name,
        l.holder AS &leadershipRow.holder
-FROM   lease AS l
-JOIN   lease_type AS lt ON lt.id = l.lease_type_id
-WHERE  l.model_uuid = $modelUUIDArg.model_uuid AND lt.type = $leaseTypeArg.type
+FROM lease AS l
+JOIN lease_type AS lt ON lt.id = l.lease_type_id
+WHERE l.model_uuid = $modelUUIDArg.model_uuid AND lt.type = $leaseTypeArg.type
 `, mUUID, leaseType, leadershipRow{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1559,9 +1559,9 @@ SELECT cim.stream AS &cloudImageMetadataRow.stream,
        COALESCE(cim.priority, 0) AS &cloudImageMetadataRow.priority,
        cim.image_id AS &cloudImageMetadataRow.image_id,
        cim.created_at AS &cloudImageMetadataRow.created_at
-FROM   cloud_image_metadata AS cim
-JOIN   architecture AS a ON a.id = cim.architecture_id
-WHERE  cim.source = $cloudImageMetadataSource.source
+FROM cloud_image_metadata AS cim
+JOIN architecture AS a ON a.id = cim.architecture_id
+WHERE cim.source = $cloudImageMetadataSource.source
 `, cloudImageMetadataRow{}, source)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1605,8 +1605,8 @@ func (s *State) getExternalControllers(
 
 	ctrlStmt, err := s.Prepare(`
 SELECT &externalControllerRow.*
-FROM   external_controller
-WHERE  uuid IN ($uuidList[:])
+FROM external_controller
+WHERE uuid IN ($uuidList[:])
 `, externalControllerRow{}, uuidList{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1614,8 +1614,8 @@ WHERE  uuid IN ($uuidList[:])
 	addrStmt, err := s.Prepare(`
 SELECT controller_uuid AS &externalControllerAddressRow.controller_uuid,
        address AS &externalControllerAddressRow.address
-FROM   external_controller_address
-WHERE  controller_uuid IN ($uuidList[:])
+FROM external_controller_address
+WHERE controller_uuid IN ($uuidList[:])
 `, externalControllerAddressRow{}, uuidList{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1623,8 +1623,8 @@ WHERE  controller_uuid IN ($uuidList[:])
 	modelStmt, err := s.Prepare(`
 SELECT controller_uuid AS &externalModelRow.controller_uuid,
        uuid AS &externalModelRow.model_uuid
-FROM   external_model
-WHERE  controller_uuid IN ($uuidList[:])
+FROM external_model
+WHERE controller_uuid IN ($uuidList[:])
 `, externalModelRow{}, uuidList{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1798,7 +1798,7 @@ func (s *State) GetSourceControllerInfo(ctx context.Context) (modelmigrationinte
 	}
 	stmtName, err := s.Prepare(`
 SELECT value AS &controllerNameRow.name
-FROM   v_controller_config
+FROM v_controller_config
 WHERE  key = 'controller-name'
 `, controllerNameRow{})
 	if err != nil {

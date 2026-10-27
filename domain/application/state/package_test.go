@@ -952,26 +952,26 @@ func (s *baseSuite) assertApplication(
 		gotAvailable bool
 	)
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT uuid, charm_uuid, name FROM application WHERE name=?", name).Scan(&gotUUID, &gotCharmUUID, &gotName)
+		err := tx.QueryRowContext(ctx, "SELECT uuid, charm_uuid, name FROM application WHERE name = ?", name).Scan(&gotUUID, &gotCharmUUID, &gotName)
 		if err != nil {
 			return err
 		}
-		err = tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid=?", gotUUID).
+		err = tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid = ?", gotUUID).
 			Scan(&gotScale.Scale, &gotScale.Scaling, &gotScale.ScaleTarget)
 		if err != nil {
 			return err
 		}
-		err = tx.QueryRowContext(ctx, "SELECT channel, os_id, architecture_id FROM application_platform WHERE application_uuid=?", gotUUID).
+		err = tx.QueryRowContext(ctx, "SELECT channel, os_id, architecture_id FROM application_platform WHERE application_uuid = ?", gotUUID).
 			Scan(&gotPlatform.Channel, &gotPlatform.OSType, &gotPlatform.Architecture)
 		if err != nil {
 			return err
 		}
-		err = tx.QueryRowContext(ctx, "SELECT track, risk, branch FROM application_channel WHERE application_uuid=?", gotUUID).
+		err = tx.QueryRowContext(ctx, "SELECT track, risk, branch FROM application_channel WHERE application_uuid = ?", gotUUID).
 			Scan(&gotChannel.Track, &gotChannel.Risk, &gotChannel.Branch)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		err = tx.QueryRowContext(ctx, "SELECT available FROM charm WHERE uuid=?", gotCharmUUID).Scan(&gotAvailable)
+		err = tx.QueryRowContext(ctx, "SELECT available FROM charm WHERE uuid = ?", gotCharmUUID).Scan(&gotAvailable)
 		if err != nil {
 			return err
 		}

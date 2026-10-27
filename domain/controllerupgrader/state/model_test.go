@@ -56,7 +56,7 @@ func (s *controllerModelStateSuite) seedControllerModel(c *tc.C) {
 
 	_, err = s.DB().Exec(`
 INSERT INTO model (uuid, controller_uuid, name, type, cloud, cloud_type, qualifier, is_controller_model)
-VALUES            (?, ?, "test-model", "iaas", "test-cloud", "ec2", "testq", true)
+VALUES (?, ?, "test-model", "iaas", "test-cloud", "ec2", "testq", true)
 `,
 		modelUUID, controllerUUID.String(),
 	)
@@ -71,7 +71,7 @@ func (s *controllerModelStateSuite) seedModel(c *tc.C) {
 
 	_, err = s.DB().Exec(`
 INSERT INTO model (uuid, controller_uuid, name, type, cloud, cloud_type, qualifier)
-VALUES            (?, ?, "test-model", "iaas", "test-cloud", "ec2", "testq")
+VALUES (?, ?, "test-model", "iaas", "test-cloud", "ec2", "testq")
 `,
 		modelUUID, controllerUUID.String(),
 	)
@@ -133,7 +133,7 @@ VALUES (?, ?, ?, ?)
 // addAgentBinaryStore.
 func (s *controllerModelStateSuite) addAgentBinaryStore(c *tc.C, version semversion.Number, architecture agentbinary.Architecture, storeUUID objectstore.UUID) {
 	_, err := s.DB().Exec(`
-INSERT INTO agent_binary_store(version, architecture_id, object_store_uuid) VALUES(?, ?, ?)
+INSERT INTO agent_binary_store (version, architecture_id, object_store_uuid) VALUES (?, ?, ?)
 `, version.String(), int(architecture), storeUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 }

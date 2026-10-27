@@ -30,8 +30,8 @@ func (st *State) StorageAttachmentExists(ctx context.Context, saUUID string) (bo
 	attachmentUUID := entityUUID{UUID: saUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   storage_attachment
-WHERE  uuid = $entityUUID.uuid`, attachmentUUID)
+FROM storage_attachment
+WHERE uuid = $entityUUID.uuid`, attachmentUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing storage attachment exists query: %w", err)
 	}
@@ -131,14 +131,14 @@ func (st *State) EnsureStorageAttachmentNotAliveWithFulfilment(
 	// related attachments for the same storage the entity is fulfilling.
 	fulfilmentQ := `
 SELECT COUNT(saRel.uuid) AS &count.count
-FROM   storage_attachment saEntity
-JOIN   storage_attachment saRel ON saEntity.unit_uuid = saRel.unit_uuid
-JOIN   storage_instance siEntity ON saEntity.storage_instance_uuid = siEntity.uuid
-JOIN   storage_instance siRel ON saRel.storage_instance_uuid = siRel.uuid
+FROM storage_attachment saEntity
+JOIN storage_attachment saRel ON saEntity.unit_uuid = saRel.unit_uuid
+JOIN storage_instance siEntity ON saEntity.storage_instance_uuid = siEntity.uuid
+JOIN storage_instance siRel ON saRel.storage_instance_uuid = siRel.uuid
                            AND siRel.storage_name = siEntity.storage_name
-AND    saEntity.uuid = $entityUUID.uuid
-AND    saRel.uuid != $entityUUID.uuid
-AND    saRel.life_id = 0
+AND saEntity.uuid = $entityUUID.uuid
+AND saRel.uuid != $entityUUID.uuid
+AND saRel.life_id = 0
 `
 
 	fulfilmentStmt, err := st.Prepare(fulfilmentQ, entityUUID, fulfilmentDBVal)
@@ -213,13 +213,13 @@ func (st *State) GetDetachInfoForStorageAttachment(
 WITH
 fulfilment AS (
     SELECT COUNT(saA.uuid) AS fulfilment
-    FROM   storage_attachment saE
-    JOIN   storage_attachment saA ON saE.unit_uuid = saA.unit_uuid
-    JOIN   storage_instance siE ON saE.storage_instance_uuid = siE.uuid
-    JOIN   storage_instance siA ON saA.storage_instance_uuid = siA.uuid
+    FROM storage_attachment saE
+    JOIN storage_attachment saA ON saE.unit_uuid = saA.unit_uuid
+    JOIN storage_instance siE ON saE.storage_instance_uuid = siE.uuid
+    JOIN storage_instance siA ON saA.storage_instance_uuid = siA.uuid
                                AND siA.storage_name = siE.storage_name
-    AND    saE.uuid = $entityUUID.uuid
-    AND    saA.life_id = 0
+    AND saE.uuid = $entityUUID.uuid
+    AND saA.life_id = 0
 )
 SELECT &storageAttachmentDetachInfo.* FROM (
     SELECT cs.name AS charm_storage_name,
@@ -228,12 +228,12 @@ SELECT &storageAttachmentDetachInfo.* FROM (
            sa.life_id,
            u.life_id AS unit_life_id,
            u.uuid AS unit_uuid
-    FROM   storage_attachment sa, fulfilment f
-    JOIN   storage_instance si ON sa.storage_instance_uuid = si.uuid
-    JOIN   unit u ON sa.unit_uuid = u.uuid
-    JOIN   charm_storage cs ON cs.charm_uuid = u.charm_uuid
+    FROM storage_attachment sa, fulfilment f
+    JOIN storage_instance si ON sa.storage_instance_uuid = si.uuid
+    JOIN unit u ON sa.unit_uuid = u.uuid
+    JOIN charm_storage cs ON cs.charm_uuid = u.charm_uuid
                            AND cs.name = si.storage_name
-    WHERE  sa.uuid = $entityUUID.uuid
+    WHERE sa.uuid = $entityUUID.uuid
 )
 `
 
@@ -323,8 +323,8 @@ func (st *State) GetStorageAttachmentLife(ctx context.Context, rUUID string) (li
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   storage_attachment
-WHERE  uuid = $entityUUID.uuid`, saLife, saUUID)
+FROM storage_attachment
+WHERE uuid = $entityUUID.uuid`, saLife, saUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing storage attachment life query: %w", err)
 	}
@@ -368,8 +368,8 @@ func (st *State) EnsureStorageAttachmentDeadCascade(
 	saUUID := entityUUID{UUID: uuid}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   storage_attachment
-WHERE  uuid = $entityUUID.uuid`, saUUID)
+FROM storage_attachment
+WHERE uuid = $entityUUID.uuid`, saUUID)
 	if err != nil {
 		return internal.CascadedStorageProvisionedAttachmentLives{}, errors.Errorf(
 			"preparing storage attachment exists query: %w", err,
@@ -416,23 +416,23 @@ func (st *State) DeleteStorageAttachment(ctx context.Context, rUUID string) erro
 
 	q := `
 SELECT suo.storage_instance_uuid AS &entityUUID.uuid
-FROM   storage_unit_owner suo
-JOIN   storage_attachment sa
-       ON  suo.storage_instance_uuid = sa.storage_instance_uuid
+FROM storage_unit_owner suo
+JOIN storage_attachment sa
+       ON suo.storage_instance_uuid = sa.storage_instance_uuid
 	   AND suo.unit_uuid = sa.unit_uuid
-WHERE  sa.uuid = $entityUUID.uuid`
+WHERE sa.uuid = $entityUUID.uuid`
 	suoStmt, err := st.Prepare(q, saUUID)
 	if err != nil {
 		return errors.Errorf("preparing unit storage owner query: %w", err)
 	}
 
-	dsaStmt, err := st.Prepare("DELETE FROM storage_attachment WHERE uuid = $entityUUID.uuid ", saUUID)
+	dsaStmt, err := st.Prepare("DELETE FROM storage_attachment WHERE uuid = $entityUUID.uuid", saUUID)
 	if err != nil {
 		return errors.Errorf("preparing unit storage attachment deletion: %w", err)
 	}
 
 	var siUUID entityUUID
-	dsoStmt, err := st.Prepare("DELETE FROM storage_unit_owner WHERE storage_instance_uuid = $entityUUID.uuid ", siUUID)
+	dsoStmt, err := st.Prepare("DELETE FROM storage_unit_owner WHERE storage_instance_uuid = $entityUUID.uuid", siUUID)
 	if err != nil {
 		return errors.Errorf("preparing unit storage attachment deletion: %w", err)
 	}
@@ -488,8 +488,8 @@ func (st *State) EnsureStorageInstanceNotAliveCascade(
 
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   storage_instance
-WHERE  uuid = $entityUUID.uuid`, input)
+FROM storage_instance
+WHERE uuid = $entityUUID.uuid`, input)
 	if err != nil {
 		return cascaded, errors.Errorf(
 			"preparing storage instance exists query: %w", err,
@@ -498,9 +498,9 @@ WHERE  uuid = $entityUUID.uuid`, input)
 
 	attachmentCountStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM   storage_attachment
-WHERE  storage_instance_uuid = $entityUUID.uuid
-AND    life_id < 2`, input, count{})
+FROM storage_attachment
+WHERE storage_instance_uuid = $entityUUID.uuid
+AND life_id < 2`, input, count{})
 	if err != nil {
 		return cascaded, errors.Errorf(
 			"preparing storage attachment count query: %w", err,
@@ -509,9 +509,9 @@ AND    life_id < 2`, input, count{})
 
 	forceFilesystemStmt, err := st.Prepare(`
 SELECT sf.uuid AS &entityUUID.uuid
-FROM   storage_instance_filesystem sif
-JOIN   storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
-WHERE  sif.storage_instance_uuid = $entityUUID.uuid
+FROM storage_instance_filesystem sif
+JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
+WHERE sif.storage_instance_uuid = $entityUUID.uuid
 `, entityUUID{})
 	if err != nil {
 		return cascaded, errors.Errorf(
@@ -521,9 +521,9 @@ WHERE  sif.storage_instance_uuid = $entityUUID.uuid
 
 	forceVolumeStmt, err := st.Prepare(`
 SELECT sv.uuid AS &entityUUID.uuid
-FROM   storage_instance_volume siv
-JOIN   storage_volume sv ON siv.storage_volume_uuid = sv.uuid
-WHERE  siv.storage_instance_uuid = $entityUUID.uuid
+FROM storage_instance_volume siv
+JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
+WHERE siv.storage_instance_uuid = $entityUUID.uuid
 `, entityUUID{})
 	if err != nil {
 		return cascaded, errors.Errorf(
@@ -637,8 +637,8 @@ func (st *State) GetStorageInstanceLife(
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   storage_instance
-WHERE  uuid = $entityUUID.uuid`, saLife, input)
+FROM storage_instance
+WHERE uuid = $entityUUID.uuid`, saLife, input)
 	if err != nil {
 		return -1, errors.Errorf("preparing storage instance life query: %w", err)
 	}
@@ -710,13 +710,13 @@ func (st *State) CheckStorageInstanceHasNoChildren(
 
 	stmt, err := st.Prepare(`
 SELECT SUM(n) AS &count.count FROM (
-	SELECT    COUNT(*) AS n
-	FROM      storage_instance_volume
-	WHERE     storage_instance_uuid = $entityUUID.uuid
+	SELECT COUNT(*) AS n
+	FROM storage_instance_volume
+	WHERE storage_instance_uuid = $entityUUID.uuid
 	UNION
-	SELECT    COUNT(*) AS n
-	FROM      storage_instance_filesystem
-	WHERE     storage_instance_uuid = $entityUUID.uuid
+	SELECT COUNT(*) AS n
+	FROM storage_instance_filesystem
+	WHERE storage_instance_uuid = $entityUUID.uuid
 )`, input, count{})
 	if err != nil {
 		return false, errors.Errorf(
@@ -805,8 +805,8 @@ func (st *State) GetVolumeLife(
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   storage_volume
-WHERE  uuid = $entityUUID.uuid`, volLife, volUUID)
+FROM storage_volume
+WHERE uuid = $entityUUID.uuid`, volLife, volUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing volume life query: %w", err)
 	}
@@ -879,8 +879,8 @@ func (st *State) GetVolumeStatus(
 
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_volume
-WHERE  uuid = $entityUUID.uuid
+FROM storage_volume
+WHERE uuid = $entityUUID.uuid
 `, inputUUID)
 	if err != nil {
 		return -1, errors.Errorf(
@@ -890,8 +890,8 @@ WHERE  uuid = $entityUUID.uuid
 
 	stmt, err := st.Prepare(`
 SELECT &entityStatus.*
-FROM   storage_volume_status
-WHERE  volume_uuid = $entityUUID.uuid
+FROM storage_volume_status
+WHERE volume_uuid = $entityUUID.uuid
 `, inputUUID, entityStatus{})
 	if err != nil {
 		return -1, errors.Errorf(
@@ -938,8 +938,8 @@ func (st *State) SetVolumeStatus(
 
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_volume
-WHERE  uuid = $entityUUID.uuid
+FROM storage_volume
+WHERE uuid = $entityUUID.uuid
 `, inputUUID)
 	if err != nil {
 		return errors.Errorf(
@@ -949,10 +949,10 @@ WHERE  uuid = $entityUUID.uuid
 
 	stmt, err := st.Prepare(`
 UPDATE storage_volume_status
-SET    status_id=$entityStatus.status_id,
-       message='',
-       updated_at=DATETIME('now')
-WHERE  volume_uuid = $entityUUID.uuid
+SET status_id = $entityStatus.status_id,
+       message = '',
+       updated_at = DATETIME('now')
+WHERE volume_uuid = $entityUUID.uuid
 `, inputUUID, inputStatus)
 	if err != nil {
 		return errors.Errorf("preparing storage volume status update: %w", err)
@@ -1037,8 +1037,8 @@ func (st *State) GetFilesystemLife(
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   storage_filesystem
-WHERE  uuid = $entityUUID.uuid`, fsLife, fsUUID)
+FROM storage_filesystem
+WHERE uuid = $entityUUID.uuid`, fsLife, fsUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing filesystem life query: %w", err)
 	}
@@ -1113,8 +1113,8 @@ func (st *State) GetFilesystemStatus(
 
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_filesystem
-WHERE  uuid = $entityUUID.uuid
+FROM storage_filesystem
+WHERE uuid = $entityUUID.uuid
 `, inputUUID)
 	if err != nil {
 		return -1, errors.Errorf(
@@ -1124,8 +1124,8 @@ WHERE  uuid = $entityUUID.uuid
 
 	stmt, err := st.Prepare(`
 SELECT &entityStatus.*
-FROM   storage_filesystem_status
-WHERE  filesystem_uuid = $entityUUID.uuid
+FROM storage_filesystem_status
+WHERE filesystem_uuid = $entityUUID.uuid
 `, inputUUID, entityStatus{})
 	if err != nil {
 		return -1, errors.Errorf(
@@ -1173,8 +1173,8 @@ func (st *State) SetFilesystemStatus(
 
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_filesystem
-WHERE  uuid = $entityUUID.uuid
+FROM storage_filesystem
+WHERE uuid = $entityUUID.uuid
 `, inputUUID)
 	if err != nil {
 		return errors.Errorf(
@@ -1184,10 +1184,10 @@ WHERE  uuid = $entityUUID.uuid
 
 	stmt, err := st.Prepare(`
 UPDATE storage_filesystem_status
-SET    status_id=$entityStatus.status_id,
-       message='',
-       updated_at=DATETIME('now')
-WHERE  filesystem_uuid = $entityUUID.uuid
+SET status_id = $entityStatus.status_id,
+       message = '',
+       updated_at = DATETIME('now')
+WHERE filesystem_uuid = $entityUUID.uuid
 `, inputUUID, inputStatus)
 	if err != nil {
 		return errors.Errorf(
@@ -1232,8 +1232,8 @@ func (st *State) CheckVolumeBackedFilesystemCrossProvisioned(
 
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_filesystem
-WHERE  uuid = $entityUUID.uuid
+FROM storage_filesystem
+WHERE uuid = $entityUUID.uuid
 `, inputUUID)
 	if err != nil {
 		return false, errors.Errorf(
@@ -1242,13 +1242,13 @@ WHERE  uuid = $entityUUID.uuid
 	}
 
 	crossProvisionedStmt, err := st.Prepare(`
-SELECT    COUNT(sf.uuid) AS &count.count
-FROM      storage_filesystem sf
-JOIN      storage_instance_filesystem sif ON sf.uuid = sif.storage_filesystem_uuid
-JOIN      storage_instance_volume siv ON sif.storage_instance_uuid = siv.storage_instance_uuid
-JOIN      storage_volume sv ON siv.storage_volume_uuid = sv.uuid
+SELECT COUNT(sf.uuid) AS &count.count
+FROM storage_filesystem sf
+JOIN storage_instance_filesystem sif ON sf.uuid = sif.storage_filesystem_uuid
+JOIN storage_instance_volume siv ON sif.storage_instance_uuid = siv.storage_instance_uuid
+JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
 LEFT JOIN machine_filesystem mf ON sf.uuid = mf.filesystem_uuid
-WHERE     sf.uuid = $entityUUID.uuid AND
+WHERE sf.uuid = $entityUUID.uuid AND
           sf.provision_scope_id != sv.provision_scope_id AND
           mf.machine_uuid IS NULL
 `, inputUUID, count{})
@@ -1342,8 +1342,8 @@ func (st *State) GetFilesystemAttachmentLife(
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   storage_filesystem_attachment
-WHERE  uuid = $entityUUID.uuid`, fsaLife, fsaUUID)
+FROM storage_filesystem_attachment
+WHERE uuid = $entityUUID.uuid`, fsaLife, fsaUUID)
 	if err != nil {
 		return -1, errors.Errorf(
 			"preparing filesystem attachment life query: %w", err,
@@ -1388,8 +1388,8 @@ func (st *State) MarkFilesystemAttachmentAsDead(
 	fsaUUID := entityUUID{UUID: rUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   storage_filesystem_attachment
-WHERE  uuid = $entityUUID.uuid`, fsaUUID)
+FROM storage_filesystem_attachment
+WHERE uuid = $entityUUID.uuid`, fsaUUID)
 	if err != nil {
 		return errors.Errorf(
 			"preparing filesystem attachment exists query: %w", err,
@@ -1398,8 +1398,8 @@ WHERE  uuid = $entityUUID.uuid`, fsaUUID)
 
 	markDeadStmt, err := st.Prepare(`
 UPDATE storage_filesystem_attachment
-SET    life_id = 2
-WHERE  uuid = $entityUUID.uuid`, fsaUUID)
+SET life_id = 2
+WHERE uuid = $entityUUID.uuid`, fsaUUID)
 	if err != nil {
 		return errors.Errorf(
 			"preparing mark filesystem attachment exists dead: %w", err,
@@ -1408,9 +1408,9 @@ WHERE  uuid = $entityUUID.uuid`, fsaUUID)
 
 	remainingAttachmentsStmt, err := st.Prepare(`
 SELECT COUNT(sfaB.uuid) AS &count.count
-FROM   storage_filesystem_attachment sfaA
-JOIN   storage_filesystem_attachment sfaB ON sfaB.storage_filesystem_uuid = sfaA.storage_filesystem_uuid
-WHERE  sfaA.uuid = $entityUUID.uuid AND
+FROM storage_filesystem_attachment sfaA
+JOIN storage_filesystem_attachment sfaB ON sfaB.storage_filesystem_uuid = sfaA.storage_filesystem_uuid
+WHERE sfaA.uuid = $entityUUID.uuid AND
        sfaB.uuid != $entityUUID.uuid AND
        sfaB.life_id != 2
 `, fsaUUID, count{})
@@ -1423,12 +1423,12 @@ WHERE  sfaA.uuid = $entityUUID.uuid AND
 	markDyingFilesystemDeadStmt, err := st.Prepare(`
 WITH fs AS (
 	SELECT storage_filesystem_uuid
-	FROM   storage_filesystem_attachment
-	WHERE  uuid = $entityUUID.uuid
+	FROM storage_filesystem_attachment
+	WHERE uuid = $entityUUID.uuid
 )
 UPDATE storage_filesystem
-SET    life_id = 2
-WHERE  life_id = 1 AND uuid IN fs
+SET life_id = 2
+WHERE life_id = 1 AND uuid IN fs
 `, fsaUUID)
 	if err != nil {
 		return errors.Errorf(

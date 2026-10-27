@@ -84,7 +84,7 @@ func (s *watcherSuite) SetUpTest(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, "test", "prod", "iaas", "test-model", "ec2")
-		`, modelUUID.String(), coretesting.ControllerTag.Id())
+`, modelUUID.String(), coretesting.ControllerTag.Id())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -223,7 +223,7 @@ func (s *watcherSuite) createUnitWithoutMachine(c *tc.C, netNodeUUID, appName, a
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO unit (uuid, name, application_uuid, net_node_uuid, life_id, charm_uuid)
 VALUES (?, ?, ?, ?, 0, ?)
-		`, unitUUID, unitName, appUUID, netNodeUUID, charmUUID)
+`, unitUUID, unitName, appUUID, netNodeUUID, charmUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

@@ -19,8 +19,8 @@ INSERT INTO secret_backend
     (uuid, name, backend_type_id, token_rotate_interval, origin_id)
 VALUES ($SecretBackend.*)
 ON CONFLICT (uuid) DO UPDATE SET
-    name=EXCLUDED.name,
-    token_rotate_interval=EXCLUDED.token_rotate_interval;`, SecretBackend{})
+    name = EXCLUDED.name,
+    token_rotate_interval = EXCLUDED.token_rotate_interval;`, SecretBackend{})
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -40,7 +40,7 @@ INSERT INTO secret_backend_rotation
     (backend_uuid, next_rotation_time)
 VALUES ($SecretBackendRotation.*)
 ON CONFLICT (backend_uuid) DO UPDATE SET
-    next_rotation_time=EXCLUDED.next_rotation_time;`,
+    next_rotation_time = EXCLUDED.next_rotation_time;`,
 		SecretBackendRotation{})
 	if err != nil {
 		return errors.Capture(err)

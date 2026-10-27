@@ -177,7 +177,7 @@ func (st *State) Export(ctx context.Context) (*v4_1_0.ModelExport, error) {
 	}
 	stmtApplication, err := sqlair.Prepare(`SELECT &Application.*,
        t."charm_upgrade_on_error" IS NULL AS &nullableApplication.charm_upgrade_on_error_is_null
-FROM   "application" AS t`, v4_1_0.Application{}, nullableApplication{})
+FROM "application" AS t`, v4_1_0.Application{}, nullableApplication{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing Application statement: %w", err)
 	}
@@ -243,7 +243,7 @@ FROM   "application" AS t`, v4_1_0.Application{}, nullableApplication{})
 	}
 	stmtApplicationRemoteOffererStatus, err := sqlair.Prepare(`SELECT &ApplicationRemoteOffererStatus.*,
        t."updated_at" IS NULL AS &nullableApplicationRemoteOffererStatus.updated_at_is_null
-FROM   "application_remote_offerer_status" AS t`, v4_1_0.ApplicationRemoteOffererStatus{}, nullableApplicationRemoteOffererStatus{})
+FROM "application_remote_offerer_status" AS t`, v4_1_0.ApplicationRemoteOffererStatus{}, nullableApplicationRemoteOffererStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing ApplicationRemoteOffererStatus statement: %w", err)
 	}
@@ -253,19 +253,19 @@ FROM   "application_remote_offerer_status" AS t`, v4_1_0.ApplicationRemoteOffere
 	}
 	stmtApplicationScale, err := sqlair.Prepare(`SELECT &ApplicationScale.*,
        t."scaling" IS NULL AS &nullableApplicationScale.scaling_is_null
-FROM   "application_scale" AS t`, v4_1_0.ApplicationScale{}, nullableApplicationScale{})
+FROM "application_scale" AS t`, v4_1_0.ApplicationScale{}, nullableApplicationScale{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing ApplicationScale statement: %w", err)
 	}
 	stmtApplicationSetting, err := sqlair.Prepare(`SELECT &ApplicationSetting.*,
        t."trust" IS NULL AS &nullableApplicationSetting.trust_is_null
-FROM   "application_setting" AS t`, v4_1_0.ApplicationSetting{}, nullableApplicationSetting{})
+FROM "application_setting" AS t`, v4_1_0.ApplicationSetting{}, nullableApplicationSetting{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing ApplicationSetting statement: %w", err)
 	}
 	stmtApplicationStatus, err := sqlair.Prepare(`SELECT &ApplicationStatus.*,
        t."updated_at" IS NULL AS &nullableApplicationStatus.updated_at_is_null
-FROM   "application_status" AS t`, v4_1_0.ApplicationStatus{}, nullableApplicationStatus{})
+FROM "application_status" AS t`, v4_1_0.ApplicationStatus{}, nullableApplicationStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing ApplicationStatus statement: %w", err)
 	}
@@ -299,7 +299,7 @@ FROM   "application_status" AS t`, v4_1_0.ApplicationStatus{}, nullableApplicati
 	}
 	stmtBlockDevice, err := sqlair.Prepare(`SELECT &BlockDevice.*,
        t."in_use" IS NULL AS &nullableBlockDevice.in_use_is_null
-FROM   "block_device" AS t`, v4_1_0.BlockDevice{}, nullableBlockDevice{})
+FROM "block_device" AS t`, v4_1_0.BlockDevice{}, nullableBlockDevice{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing BlockDevice statement: %w", err)
 	}
@@ -329,13 +329,13 @@ FROM   "block_device" AS t`, v4_1_0.BlockDevice{}, nullableBlockDevice{})
 	}
 	stmtCharm, err := sqlair.Prepare(`SELECT &Charm.*,
        t."available" IS NULL AS &nullableCharm.available_is_null
-FROM   "charm" AS t`, v4_1_0.Charm{}, nullableCharm{})
+FROM "charm" AS t`, v4_1_0.Charm{}, nullableCharm{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing Charm statement: %w", err)
 	}
 	stmtCharmAction, err := sqlair.Prepare(`SELECT &CharmAction.*,
        t."parallel" IS NULL AS &nullableCharmAction.parallel_is_null
-FROM   "charm_action" AS t`, v4_1_0.CharmAction{}, nullableCharmAction{})
+FROM "charm_action" AS t`, v4_1_0.CharmAction{}, nullableCharmAction{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing CharmAction statement: %w", err)
 	}
@@ -389,7 +389,7 @@ FROM   "charm_action" AS t`, v4_1_0.CharmAction{}, nullableCharmAction{})
 	}
 	stmtCharmRelation, err := sqlair.Prepare(`SELECT &CharmRelation.*,
        t."optional" IS NULL AS &nullableCharmRelation.optional_is_null
-FROM   "charm_relation" AS t`, v4_1_0.CharmRelation{}, nullableCharmRelation{})
+FROM "charm_relation" AS t`, v4_1_0.CharmRelation{}, nullableCharmRelation{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing CharmRelation statement: %w", err)
 	}
@@ -419,7 +419,7 @@ FROM   "charm_relation" AS t`, v4_1_0.CharmRelation{}, nullableCharmRelation{})
 	}
 	stmtCharmStorage, err := sqlair.Prepare(`SELECT &CharmStorage.*,
        t."read_only" IS NULL AS &nullableCharmStorage.read_only_is_null
-FROM   "charm_storage" AS t`, v4_1_0.CharmStorage{}, nullableCharmStorage{})
+FROM "charm_storage" AS t`, v4_1_0.CharmStorage{}, nullableCharmStorage{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing CharmStorage statement: %w", err)
 	}
@@ -486,7 +486,7 @@ FROM   "charm_storage" AS t`, v4_1_0.CharmStorage{}, nullableCharmStorage{})
 	stmtIpAddress, err := sqlair.Prepare(`SELECT &IpAddress.*,
        t."is_secondary" IS NULL AS &nullableIpAddress.is_secondary_is_null,
        t."is_shadow" IS NULL AS &nullableIpAddress.is_shadow_is_null
-FROM   "ip_address" AS t`, v4_1_0.IpAddress{}, nullableIpAddress{})
+FROM "ip_address" AS t`, v4_1_0.IpAddress{}, nullableIpAddress{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing IpAddress statement: %w", err)
 	}
@@ -516,7 +516,7 @@ FROM   "ip_address" AS t`, v4_1_0.IpAddress{}, nullableIpAddress{})
 	}
 	stmtK8sPodStatus, err := sqlair.Prepare(`SELECT &K8sPodStatus.*,
        t."updated_at" IS NULL AS &nullableK8sPodStatus.updated_at_is_null
-FROM   "k8s_pod_status" AS t`, v4_1_0.K8sPodStatus{}, nullableK8sPodStatus{})
+FROM "k8s_pod_status" AS t`, v4_1_0.K8sPodStatus{}, nullableK8sPodStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing K8sPodStatus statement: %w", err)
 	}
@@ -560,13 +560,13 @@ FROM   "k8s_pod_status" AS t`, v4_1_0.K8sPodStatus{}, nullableK8sPodStatus{})
        t."force_destroyed" IS NULL AS &nullableMachine.force_destroyed_is_null,
        t."agent_started_at" IS NULL AS &nullableMachine.agent_started_at_is_null,
        t."keep_instance" IS NULL AS &nullableMachine.keep_instance_is_null
-FROM   "machine" AS t`, v4_1_0.Machine{}, nullableMachine{})
+FROM "machine" AS t`, v4_1_0.Machine{}, nullableMachine{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing Machine statement: %w", err)
 	}
 	stmtMachineAgentPresence, err := sqlair.Prepare(`SELECT &MachineAgentPresence.*,
        t."last_seen" IS NULL AS &nullableMachineAgentPresence.last_seen_is_null
-FROM   "machine_agent_presence" AS t`, v4_1_0.MachineAgentPresence{}, nullableMachineAgentPresence{})
+FROM "machine_agent_presence" AS t`, v4_1_0.MachineAgentPresence{}, nullableMachineAgentPresence{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing MachineAgentPresence statement: %w", err)
 	}
@@ -580,7 +580,7 @@ FROM   "machine_agent_presence" AS t`, v4_1_0.MachineAgentPresence{}, nullableMa
 	}
 	stmtMachineCloudInstanceStatus, err := sqlair.Prepare(`SELECT &MachineCloudInstanceStatus.*,
        t."updated_at" IS NULL AS &nullableMachineCloudInstanceStatus.updated_at_is_null
-FROM   "machine_cloud_instance_status" AS t`, v4_1_0.MachineCloudInstanceStatus{}, nullableMachineCloudInstanceStatus{})
+FROM "machine_cloud_instance_status" AS t`, v4_1_0.MachineCloudInstanceStatus{}, nullableMachineCloudInstanceStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing MachineCloudInstanceStatus statement: %w", err)
 	}
@@ -638,7 +638,7 @@ FROM   "machine_cloud_instance_status" AS t`, v4_1_0.MachineCloudInstanceStatus{
 	}
 	stmtMachineStatus, err := sqlair.Prepare(`SELECT &MachineStatus.*,
        t."updated_at" IS NULL AS &nullableMachineStatus.updated_at_is_null
-FROM   "machine_status" AS t`, v4_1_0.MachineStatus{}, nullableMachineStatus{})
+FROM "machine_status" AS t`, v4_1_0.MachineStatus{}, nullableMachineStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing MachineStatus statement: %w", err)
 	}
@@ -656,7 +656,7 @@ FROM   "machine_status" AS t`, v4_1_0.MachineStatus{}, nullableMachineStatus{})
 	}
 	stmtModel, err := sqlair.Prepare(`SELECT &Model.*,
        t."is_controller_model" IS NULL AS &nullableModel.is_controller_model_is_null
-FROM   "model" AS t`, v4_1_0.Model{}, nullableModel{})
+FROM "model" AS t`, v4_1_0.Model{}, nullableModel{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing Model statement: %w", err)
 	}
@@ -728,7 +728,7 @@ FROM   "model" AS t`, v4_1_0.Model{}, nullableModel{})
        t."started_at" IS NULL AS &nullableOperation.started_at_is_null,
        t."completed_at" IS NULL AS &nullableOperation.completed_at_is_null,
        t."parallel" IS NULL AS &nullableOperation.parallel_is_null
-FROM   "operation" AS t`, v4_1_0.Operation{}, nullableOperation{})
+FROM "operation" AS t`, v4_1_0.Operation{}, nullableOperation{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing Operation statement: %w", err)
 	}
@@ -747,7 +747,7 @@ FROM   "operation" AS t`, v4_1_0.Operation{}, nullableOperation{})
 	stmtOperationTask, err := sqlair.Prepare(`SELECT &OperationTask.*,
        t."started_at" IS NULL AS &nullableOperationTask.started_at_is_null,
        t."completed_at" IS NULL AS &nullableOperationTask.completed_at_is_null
-FROM   "operation_task" AS t`, v4_1_0.OperationTask{}, nullableOperationTask{})
+FROM "operation_task" AS t`, v4_1_0.OperationTask{}, nullableOperationTask{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing OperationTask statement: %w", err)
 	}
@@ -761,7 +761,7 @@ FROM   "operation_task" AS t`, v4_1_0.OperationTask{}, nullableOperationTask{})
 	}
 	stmtOperationTaskStatus, err := sqlair.Prepare(`SELECT &OperationTaskStatus.*,
        t."updated_at" IS NULL AS &nullableOperationTaskStatus.updated_at_is_null
-FROM   "operation_task_status" AS t`, v4_1_0.OperationTaskStatus{}, nullableOperationTaskStatus{})
+FROM "operation_task_status" AS t`, v4_1_0.OperationTaskStatus{}, nullableOperationTaskStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing OperationTaskStatus statement: %w", err)
 	}
@@ -775,7 +775,7 @@ FROM   "operation_task_status" AS t`, v4_1_0.OperationTaskStatus{}, nullableOper
 	}
 	stmtOperatorStatus, err := sqlair.Prepare(`SELECT &OperatorStatus.*,
        t."updated_at" IS NULL AS &nullableOperatorStatus.updated_at_is_null
-FROM   "operator_status" AS t`, v4_1_0.OperatorStatus{}, nullableOperatorStatus{})
+FROM "operator_status" AS t`, v4_1_0.OperatorStatus{}, nullableOperatorStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing OperatorStatus statement: %w", err)
 	}
@@ -825,7 +825,7 @@ FROM   "operator_status" AS t`, v4_1_0.OperatorStatus{}, nullableOperatorStatus{
 	}
 	stmtRelation, err := sqlair.Prepare(`SELECT &Relation.*,
        t."suspended" IS NULL AS &nullableRelation.suspended_is_null
-FROM   "relation" AS t`, v4_1_0.Relation{}, nullableRelation{})
+FROM "relation" AS t`, v4_1_0.Relation{}, nullableRelation{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing Relation statement: %w", err)
 	}
@@ -851,7 +851,7 @@ FROM   "relation" AS t`, v4_1_0.Relation{}, nullableRelation{})
 	}
 	stmtRelationStatus, err := sqlair.Prepare(`SELECT &RelationStatus.*,
        t."updated_at" IS NULL AS &nullableRelationStatus.updated_at_is_null
-FROM   "relation_status" AS t`, v4_1_0.RelationStatus{}, nullableRelationStatus{})
+FROM "relation_status" AS t`, v4_1_0.RelationStatus{}, nullableRelationStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing RelationStatus statement: %w", err)
 	}
@@ -893,7 +893,7 @@ FROM   "relation_status" AS t`, v4_1_0.RelationStatus{}, nullableRelationStatus{
 	}
 	stmtResource, err := sqlair.Prepare(`SELECT &Resource.*,
        t."last_polled" IS NULL AS &nullableResource.last_polled_is_null
-FROM   "resource" AS t`, v4_1_0.Resource{}, nullableResource{})
+FROM "resource" AS t`, v4_1_0.Resource{}, nullableResource{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing Resource statement: %w", err)
 	}
@@ -979,7 +979,7 @@ FROM   "resource" AS t`, v4_1_0.Resource{}, nullableResource{})
 	}
 	stmtSecretRevision, err := sqlair.Prepare(`SELECT &SecretRevision.*,
        t."update_time" IS NULL AS &nullableSecretRevision.update_time_is_null
-FROM   "secret_revision" AS t`, v4_1_0.SecretRevision{}, nullableSecretRevision{})
+FROM "secret_revision" AS t`, v4_1_0.SecretRevision{}, nullableSecretRevision{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing SecretRevision statement: %w", err)
 	}
@@ -1037,19 +1037,19 @@ FROM   "secret_revision" AS t`, v4_1_0.SecretRevision{}, nullableSecretRevision{
 	}
 	stmtStorageFilesystem, err := sqlair.Prepare(`SELECT &StorageFilesystem.*,
        t."obliterate_on_cleanup" IS NULL AS &nullableStorageFilesystem.obliterate_on_cleanup_is_null
-FROM   "storage_filesystem" AS t`, v4_1_0.StorageFilesystem{}, nullableStorageFilesystem{})
+FROM "storage_filesystem" AS t`, v4_1_0.StorageFilesystem{}, nullableStorageFilesystem{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing StorageFilesystem statement: %w", err)
 	}
 	stmtStorageFilesystemAttachment, err := sqlair.Prepare(`SELECT &StorageFilesystemAttachment.*,
        t."read_only" IS NULL AS &nullableStorageFilesystemAttachment.read_only_is_null
-FROM   "storage_filesystem_attachment" AS t`, v4_1_0.StorageFilesystemAttachment{}, nullableStorageFilesystemAttachment{})
+FROM "storage_filesystem_attachment" AS t`, v4_1_0.StorageFilesystemAttachment{}, nullableStorageFilesystemAttachment{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing StorageFilesystemAttachment statement: %w", err)
 	}
 	stmtStorageFilesystemStatus, err := sqlair.Prepare(`SELECT &StorageFilesystemStatus.*,
        t."updated_at" IS NULL AS &nullableStorageFilesystemStatus.updated_at_is_null
-FROM   "storage_filesystem_status" AS t`, v4_1_0.StorageFilesystemStatus{}, nullableStorageFilesystemStatus{})
+FROM "storage_filesystem_status" AS t`, v4_1_0.StorageFilesystemStatus{}, nullableStorageFilesystemStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing StorageFilesystemStatus statement: %w", err)
 	}
@@ -1096,13 +1096,13 @@ FROM   "storage_filesystem_status" AS t`, v4_1_0.StorageFilesystemStatus{}, null
 	stmtStorageVolume, err := sqlair.Prepare(`SELECT &StorageVolume.*,
        t."persistent" IS NULL AS &nullableStorageVolume.persistent_is_null,
        t."obliterate_on_cleanup" IS NULL AS &nullableStorageVolume.obliterate_on_cleanup_is_null
-FROM   "storage_volume" AS t`, v4_1_0.StorageVolume{}, nullableStorageVolume{})
+FROM "storage_volume" AS t`, v4_1_0.StorageVolume{}, nullableStorageVolume{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing StorageVolume statement: %w", err)
 	}
 	stmtStorageVolumeAttachment, err := sqlair.Prepare(`SELECT &StorageVolumeAttachment.*,
        t."read_only" IS NULL AS &nullableStorageVolumeAttachment.read_only_is_null
-FROM   "storage_volume_attachment" AS t`, v4_1_0.StorageVolumeAttachment{}, nullableStorageVolumeAttachment{})
+FROM "storage_volume_attachment" AS t`, v4_1_0.StorageVolumeAttachment{}, nullableStorageVolumeAttachment{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing StorageVolumeAttachment statement: %w", err)
 	}
@@ -1120,7 +1120,7 @@ FROM   "storage_volume_attachment" AS t`, v4_1_0.StorageVolumeAttachment{}, null
 	}
 	stmtStorageVolumeStatus, err := sqlair.Prepare(`SELECT &StorageVolumeStatus.*,
        t."updated_at" IS NULL AS &nullableStorageVolumeStatus.updated_at_is_null
-FROM   "storage_volume_status" AS t`, v4_1_0.StorageVolumeStatus{}, nullableStorageVolumeStatus{})
+FROM "storage_volume_status" AS t`, v4_1_0.StorageVolumeStatus{}, nullableStorageVolumeStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing StorageVolumeStatus statement: %w", err)
 	}
@@ -1138,13 +1138,13 @@ FROM   "storage_volume_status" AS t`, v4_1_0.StorageVolumeStatus{}, nullableStor
 	}
 	stmtUnitAgentPresence, err := sqlair.Prepare(`SELECT &UnitAgentPresence.*,
        t."last_seen" IS NULL AS &nullableUnitAgentPresence.last_seen_is_null
-FROM   "unit_agent_presence" AS t`, v4_1_0.UnitAgentPresence{}, nullableUnitAgentPresence{})
+FROM "unit_agent_presence" AS t`, v4_1_0.UnitAgentPresence{}, nullableUnitAgentPresence{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing UnitAgentPresence statement: %w", err)
 	}
 	stmtUnitAgentStatus, err := sqlair.Prepare(`SELECT &UnitAgentStatus.*,
        t."updated_at" IS NULL AS &nullableUnitAgentStatus.updated_at_is_null
-FROM   "unit_agent_status" AS t`, v4_1_0.UnitAgentStatus{}, nullableUnitAgentStatus{})
+FROM "unit_agent_status" AS t`, v4_1_0.UnitAgentStatus{}, nullableUnitAgentStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing UnitAgentStatus statement: %w", err)
 	}
@@ -1190,7 +1190,7 @@ FROM   "unit_agent_status" AS t`, v4_1_0.UnitAgentStatus{}, nullableUnitAgentSta
 	}
 	stmtUnitWorkloadStatus, err := sqlair.Prepare(`SELECT &UnitWorkloadStatus.*,
        t."updated_at" IS NULL AS &nullableUnitWorkloadStatus.updated_at_is_null
-FROM   "unit_workload_status" AS t`, v4_1_0.UnitWorkloadStatus{}, nullableUnitWorkloadStatus{})
+FROM "unit_workload_status" AS t`, v4_1_0.UnitWorkloadStatus{}, nullableUnitWorkloadStatus{})
 	if err != nil {
 		return nil, fmt.Errorf("preparing UnitWorkloadStatus statement: %w", err)
 	}

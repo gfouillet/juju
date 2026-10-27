@@ -1800,8 +1800,8 @@ func (s *stateSuite) addBuiltInBackend(c *tc.C, name string) string {
 	backendUUID := uuid.MustNewUUID().String()
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, txn *sql.Tx) error {
 		_, err := txn.ExecContext(ctx, `
-INSERT INTO secret_backend (uuid, name, backend_type_id, origin_id) 
-VALUES (?,?,0,0)`,
+INSERT INTO secret_backend (uuid, name, backend_type_id, origin_id)
+VALUES (?, ?, 0, 0)`,
 			backendUUID, name)
 		return errors.Capture(err)
 	})

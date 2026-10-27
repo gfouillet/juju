@@ -227,12 +227,12 @@ func (st *State) getUnitsInRelation(ctx context.Context, relUUID string) ([]rela
 SELECT u.uuid as &relationUnit.unit_uuid,
 	   re.uuid as &relationUnit.relation_endpoint_uuid,
        IFNULL(ru.uuid, '') as &relationUnit.uuid
-FROM   relation_endpoint re
+FROM relation_endpoint re
        JOIN application_endpoint ae ON re.endpoint_uuid = ae.uuid
        JOIN unit u ON ae.application_uuid = u.application_uuid
        LEFT JOIN relation_unit ru ON u.uuid = ru.unit_uuid
                                   AND re.uuid = ru.relation_endpoint_uuid
-WHERE  re.relation_uuid = $relationUnit.relation_uuid
+WHERE re.relation_uuid = $relationUnit.relation_uuid
 -- This aids the domain-level integration tests.
 ORDER BY u.uuid`
 
@@ -270,8 +270,8 @@ func (st *State) getDepartedUnitsInRelation(ctx context.Context, relUUID string)
 SELECT rud.unit_uuid AS &relationUnit.unit_uuid,
        rud.relation_endpoint_uuid AS &relationUnit.relation_endpoint_uuid,
        rud.relation_uuid AS &relationUnit.relation_uuid
-FROM   relation_unit_departure AS rud
-WHERE  rud.relation_uuid = $relationUnit.relation_uuid
+FROM relation_unit_departure AS rud
+WHERE rud.relation_uuid = $relationUnit.relation_uuid
 ORDER BY rud.unit_uuid`, relUnit)
 	if err != nil {
 		return nil, errors.Errorf("preparing departed units in relation query: %w", err)
@@ -305,8 +305,8 @@ func (st *State) getRelationAppEndpoints(ctx context.Context, relationUUID strin
 
 	q := `
 SELECT (re.uuid, ae.application_uuid) AS (&appEndpoint.*)
-FROM   relation_endpoint re JOIN application_endpoint ae ON re.endpoint_uuid = ae.uuid
-WHERE  re.relation_uuid = $entityUUID.uuid`
+FROM relation_endpoint re JOIN application_endpoint ae ON re.endpoint_uuid = ae.uuid
+WHERE re.relation_uuid = $entityUUID.uuid`
 
 	stmt, err := st.Prepare(q, appEndpoint{}, rUUID)
 	if err != nil {

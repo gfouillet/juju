@@ -45,8 +45,8 @@ func (st *State) ModelUUID() model.UUID {
 func (st *State) checkApplicationNotDead(ctx context.Context, tx *sqlair.TX, appUUID string) error {
 	stmt, err := st.Prepare(`
 SELECT &lifeID.*
-FROM   application
-WHERE  uuid = $uuid.uuid
+FROM application
+WHERE uuid = $uuid.uuid
 `, lifeID{}, uuid{})
 	if err != nil {
 		return errors.Capture(err)

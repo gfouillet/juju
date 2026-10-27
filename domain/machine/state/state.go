@@ -288,8 +288,8 @@ func (st *State) IsMachineController(ctx context.Context, mName machine.Name) (b
 	var result count
 	query := `
 SELECT COUNT(*) AS &count.count
-FROM   v_machine_is_controller
-WHERE  machine_uuid = $entityUUID.uuid
+FROM v_machine_is_controller
+WHERE machine_uuid = $entityUUID.uuid
 `
 	queryStmt, err := st.Prepare(query, entityUUID{}, result)
 	if err != nil {
@@ -327,10 +327,10 @@ func (st *State) IsMachineManuallyProvisioned(ctx context.Context, mName machine
 
 	var result count
 	query := `
-SELECT     COUNT(m.uuid) AS &count.count
-FROM       machine AS m
-JOIN  machine_manual AS mm ON m.uuid = mm.machine_uuid
-WHERE      m.uuid = $entityUUID.uuid
+SELECT COUNT(m.uuid) AS &count.count
+FROM machine AS m
+JOIN machine_manual AS mm ON m.uuid = mm.machine_uuid
+WHERE m.uuid = $entityUUID.uuid
 `
 	queryStmt, err := st.Prepare(query, entityUUID{}, count{})
 	if err != nil {
@@ -367,12 +367,12 @@ func (st *State) GetMachineLifeAndIsManuallyProvisioned(ctx context.Context, mNa
 
 	machineNameParam := machineName{Name: mName.String()}
 	query := `
-SELECT     m.life_id AS &machineLifeAndManual.life_id,
+SELECT m.life_id AS &machineLifeAndManual.life_id,
            COUNT(mm.machine_uuid) AS &machineLifeAndManual.is_manual
-FROM       machine AS m
-LEFT JOIN  machine_manual AS mm ON m.uuid = mm.machine_uuid
-WHERE      m.name = $machineName.name
-GROUP BY   m.uuid
+FROM machine AS m
+LEFT JOIN machine_manual AS mm ON m.uuid = mm.machine_uuid
+WHERE m.name = $machineName.name
+GROUP BY m.uuid
 `
 	queryStmt, err := st.Prepare(query, machineNameParam, machineLifeAndManual{})
 	if err != nil {
@@ -429,22 +429,22 @@ WITH model_storage_net_node AS (
     FROM storage_filesystem_attachment AS sfa
     WHERE sfa.provision_scope_id = $reprovisionEligibilityParams.model_scope_id
 )
-SELECT     m.life_id AS &reprovisionEligibility.life_id,
+SELECT m.life_id AS &reprovisionEligibility.life_id,
            COUNT(mpc.machine_uuid) AS &reprovisionEligibility.is_container,
            COUNT(mic.machine_uuid) AS &reprovisionEligibility.is_controller,
            COUNT(mm.machine_uuid) AS &reprovisionEligibility.is_manual,
            COUNT(mp.machine_uuid) AS &reprovisionEligibility.has_containers,
            COUNT(msn.net_node_uuid) AS &reprovisionEligibility.has_model_storage,
            COUNT(mr.machine_name) AS &reprovisionEligibility.has_reprovision
-FROM       machine AS m
-LEFT JOIN  machine_parent AS mpc ON m.uuid = mpc.machine_uuid
-LEFT JOIN  v_machine_is_controller AS mic ON m.uuid = mic.machine_uuid
-LEFT JOIN  machine_manual AS mm ON m.uuid = mm.machine_uuid
-LEFT JOIN  machine_parent AS mp ON m.uuid = mp.parent_uuid
-LEFT JOIN  model_storage_net_node AS msn ON m.net_node_uuid = msn.net_node_uuid
-LEFT JOIN  machine_reprovision AS mr ON m.name = mr.machine_name
-WHERE      m.name = $reprovisionEligibilityParams.name
-GROUP BY   m.uuid
+FROM machine AS m
+LEFT JOIN machine_parent AS mpc ON m.uuid = mpc.machine_uuid
+LEFT JOIN v_machine_is_controller AS mic ON m.uuid = mic.machine_uuid
+LEFT JOIN machine_manual AS mm ON m.uuid = mm.machine_uuid
+LEFT JOIN machine_parent AS mp ON m.uuid = mp.parent_uuid
+LEFT JOIN model_storage_net_node AS msn ON m.net_node_uuid = msn.net_node_uuid
+LEFT JOIN machine_reprovision AS mr ON m.name = mr.machine_name
+WHERE m.name = $reprovisionEligibilityParams.name
+GROUP BY m.uuid
 `
 	queryStmt, err := st.Prepare(query, params, reprovisionEligibility{})
 	if err != nil {
@@ -501,11 +501,11 @@ func (st *State) IsMachineAgentPresent(ctx context.Context, mName machine.Name) 
 
 	machineNameParam := machineName{Name: mName.String()}
 	query := `
-SELECT     COUNT(mapr.machine_uuid) AS &count.count
-FROM       machine AS m
-LEFT JOIN  machine_agent_presence AS mapr ON m.uuid = mapr.machine_uuid
-WHERE      m.name = $machineName.name
-GROUP BY   m.uuid
+SELECT COUNT(mapr.machine_uuid) AS &count.count
+FROM machine AS m
+LEFT JOIN machine_agent_presence AS mapr ON m.uuid = mapr.machine_uuid
+WHERE m.name = $machineName.name
+GROUP BY m.uuid
 `
 	queryStmt, err := st.Prepare(query, machineNameParam, count{})
 	if err != nil {
@@ -684,8 +684,8 @@ func (st *State) ShouldKeepInstance(ctx context.Context, mName machine.Name) (bo
 	result := keepInstance{}
 	query := `
 SELECT &keepInstance.keep_instance
-FROM   machine
-WHERE  name = $machineName.name`
+FROM machine
+WHERE name = $machineName.name`
 	queryStmt, err := st.Prepare(query, machineNameParam, result)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -722,8 +722,8 @@ func (st *State) SetKeepInstance(ctx context.Context, mName machine.Name, keep b
 	machineNameParam := machineName{Name: mName.String()}
 	machineExistsQuery := `
 SELECT &entityUUID.uuid
-FROM   machine
-WHERE  name = $machineName.name`
+FROM machine
+WHERE name = $machineName.name`
 	machineExistsStmt, err := st.Prepare(machineExistsQuery, machineUUID, machineNameParam)
 	if err != nil {
 		return errors.Capture(err)
@@ -733,8 +733,8 @@ WHERE  name = $machineName.name`
 	keepInstanceParam := keepInstance{KeepInstance: keep}
 	keepInstanceQuery := `
 UPDATE machine
-SET    keep_instance = $keepInstance.keep_instance
-WHERE  name = $machineName.name`
+SET keep_instance = $keepInstance.keep_instance
+WHERE name = $machineName.name`
 	keepInstanceStmt, err := st.Prepare(keepInstanceQuery, keepInstanceParam, machineNameParam)
 	if err != nil {
 		return errors.Capture(err)
@@ -772,8 +772,8 @@ func (st *State) GetNamesForUUIDs(ctx context.Context, machineUUIDs []string) (m
 
 	stmt, err := st.Prepare(`
 SELECT &nameAndUUID.*
-FROM   machine
-WHERE  machine.uuid IN ($mUUIDs[:])`, nameAndUUID{}, uuids)
+FROM machine
+WHERE machine.uuid IN ($mUUIDs[:])`, nameAndUUID{}, uuids)
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -804,12 +804,12 @@ func (st *State) GetAllProvisionedMachineInstanceID(ctx context.Context) (map[ma
 	}
 
 	query := `
-SELECT    m.name AS &machineInstance.machine_name,
+SELECT m.name AS &machineInstance.machine_name,
           mci.instance_id AS &machineInstance.instance_id
-FROM      machine AS m
-JOIN      machine_cloud_instance AS mci ON m.uuid = mci.machine_uuid
-WHERE     mci.instance_id IS NOT NULL AND mci.instance_id != ''
-AND       (
+FROM machine AS m
+JOIN machine_cloud_instance AS mci ON m.uuid = mci.machine_uuid
+WHERE mci.instance_id IS NOT NULL AND mci.instance_id != ''
+AND (
             SELECT COUNT(mp.machine_uuid) AS cc
             FROM machine_parent AS mp
             WHERE mp.machine_uuid = m.uuid
@@ -872,8 +872,8 @@ func (st *State) SetMachineHostname(ctx context.Context, mUUID string, hostname 
 	}
 	updateQuery := `
 UPDATE machine
-SET    hostname = $machineHostName.hostname, agent_started_at = $machineHostName.agent_started_at
-WHERE  uuid = $entityUUID.uuid`
+SET hostname = $machineHostName.hostname, agent_started_at = $machineHostName.agent_started_at
+WHERE uuid = $entityUUID.uuid`
 	updateStmt, err := st.Prepare(updateQuery, currentMachineUUID, currentMachineHostName)
 	if err != nil {
 		return errors.Capture(err)
@@ -956,8 +956,8 @@ func (st *State) GetMachineContainers(ctx context.Context, mUUID string) ([]stri
 
 	existsQry := `
 SELECT &entityUUID.uuid
-FROM   machine
-WHERE  uuid = $entityUUID.uuid`
+FROM machine
+WHERE uuid = $entityUUID.uuid`
 	existsStmt, err := st.Prepare(existsQry, ident)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1372,14 +1372,14 @@ func (st *State) SetSSHHostKeys(ctx context.Context, mUUID string, sshHostKeys [
 
 	removePreviousKeysStmt, err := st.Prepare(`
 DELETE FROM machine_ssh_host_key
-WHERE  machine_uuid = $entityUUID.uuid`, machineUUID)
+WHERE machine_uuid = $entityUUID.uuid`, machineUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
 
 	setSSHHostKeyStmt, err := st.Prepare(`
 INSERT INTO machine_ssh_host_key (*)
-VALUES      ($sshHostKey.*)`, sshHostKey{})
+VALUES ($sshHostKey.*)`, sshHostKey{})
 	if err != nil {
 		return errors.Capture(err)
 	}

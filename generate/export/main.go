@@ -299,7 +299,7 @@ func newExportTable(tableName, structName string, columns []column) exportTable 
 			`t.%q IS NULL AS &%s.%s_is_null`,
 			col.Name, table.NullTypeName, col.Name))
 	}
-	table.Query = fmt.Sprintf("SELECT &%s.*,\n       %s\nFROM   %q AS t",
+	table.Query = fmt.Sprintf("SELECT &%s.*,\n       %s\nFROM %q AS t",
 		structName, strings.Join(nullProjections, ",\n       "), tableName)
 	return table
 }
@@ -375,7 +375,7 @@ func getTableNames(ctx context.Context, runner *txnRunner) ([]string, error) {
 	err := runner.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		tableNames = nil
 
-		rows, err := tx.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table'")
+		rows, err := tx.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table'")
 		if err != nil {
 			return err
 		}

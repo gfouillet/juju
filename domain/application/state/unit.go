@@ -51,9 +51,9 @@ func (st *State) checkUnitExists(
 
 	checkStmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   unit
-WHERE  uuid = $entityUUID.uuid
-	`,
+FROM unit
+WHERE uuid = $entityUUID.uuid
+`,
 		uuidInput,
 	)
 	if err != nil {
@@ -344,9 +344,9 @@ func (st *State) GetUnitMachineName(ctx context.Context, unitUUID string) (strin
 	}
 	stmt, err := st.Prepare(`
 SELECT (m.name) AS (&unitMachineName.*)
-FROM   unit AS u
-JOIN   machine AS m ON u.net_node_uuid = m.net_node_uuid
-WHERE  u.uuid = $unitMachineName.unit_uuid
+FROM unit AS u
+JOIN machine AS m ON u.net_node_uuid = m.net_node_uuid
+WHERE u.uuid = $unitMachineName.unit_uuid
 `, arg)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -408,9 +408,9 @@ func (st *State) getUnitMachineUUID(ctx context.Context, tx *sqlair.TX, unitUUID
 	}
 	stmt, err := st.Prepare(`
 SELECT (m.uuid) AS (&unitMachineUUID.*)
-FROM   unit AS u
-JOIN   machine AS m ON u.net_node_uuid = m.net_node_uuid
-WHERE  u.uuid = $unitMachineUUID.unit_uuid
+FROM unit AS u
+JOIN machine AS m ON u.net_node_uuid = m.net_node_uuid
+WHERE u.uuid = $unitMachineUUID.unit_uuid
 `, arg)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -432,8 +432,8 @@ func (st *State) getNonDeadUnitNetNodeByUnitName(ctx context.Context, tx *sqlair
 	}
 	stmt, err := st.Prepare(`
 SELECT &nameWithNetNodeAndLife.*
-FROM   unit
-WHERE  name = $nameWithNetNodeAndLife.name
+FROM unit
+WHERE name = $nameWithNetNodeAndLife.name
 `, val)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -573,10 +573,10 @@ func (st *State) GetUnitPrincipal(
 
 	stmt, err := st.Prepare(`
 SELECT principal.name AS &principal.principal_unit_name
-FROM   unit AS principal
-JOIN   unit_principal AS up ON principal.uuid = up.principal_uuid
-JOIN   unit AS sub ON up.unit_uuid = sub.uuid
-WHERE  sub.name = $principal.subordinate_unit_name
+FROM unit AS principal
+JOIN unit_principal AS up ON principal.uuid = up.principal_uuid
+JOIN unit AS sub ON up.unit_uuid = sub.uuid
+WHERE sub.name = $principal.subordinate_unit_name
 `, arg)
 	if err != nil {
 		return "", false, errors.Capture(err)
@@ -617,10 +617,10 @@ func (st *State) IsSubordinateApplication(
 
 	stmt, err := st.Prepare(`
 SELECT subordinate AS &getSubordinate.subordinate
-FROM   charm_metadata cm
-JOIN   charm c ON c.uuid = cm.charm_uuid
-JOIN   application a ON a.charm_uuid = c.uuid
-WHERE  a.uuid = $getSubordinate.application_uuid
+FROM charm_metadata cm
+JOIN charm c ON c.uuid = cm.charm_uuid
+JOIN application a ON a.charm_uuid = c.uuid
+WHERE a.uuid = $getSubordinate.application_uuid
 `, subordinate)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -660,10 +660,10 @@ func (st *State) GetUnitSubordinates(ctx context.Context, unitName coreunit.Name
 	pName := principalName{Name: unitName}
 	stmt, err := st.Prepare(`
 SELECT sub.name AS &subName.*
-FROM   unit AS sub
-JOIN   unit_principal AS up ON sub.uuid = up.unit_uuid
-JOIN   unit AS principal ON up.principal_uuid = principal.uuid
-WHERE  principal.name = $principalName.name
+FROM unit AS sub
+JOIN unit_principal AS up ON sub.uuid = up.unit_uuid
+JOIN unit AS principal ON up.principal_uuid = principal.uuid
+WHERE principal.name = $principalName.name
 `, pName, subName{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -767,8 +767,8 @@ func (st *State) getUnitUUIDByName(
 
 	query, err := st.Prepare(`
 SELECT &unitUUID.*
-FROM   unit
-WHERE  name = $unitName.name
+FROM unit
+WHERE name = $unitName.name
 `, unitUUID{}, unitName)
 	if err != nil {
 		return "", errors.Errorf("preparing query: %w", err)
@@ -1222,13 +1222,13 @@ func (st *State) GetUnitStorageRefreshArgs(
 
 	unitStmt, err := st.Prepare(`
 SELECT &unitNetNodeWithCharmAndMachine.* FROM (
-	SELECT    u.uuid,
+	SELECT u.uuid,
 	          u.net_node_uuid,
-	          u.charm_uuid, 
+	          u.charm_uuid,
 	          m.uuid AS machine_uuid
-	FROM      unit u
+	FROM unit u
 	LEFT JOIN machine m ON u.net_node_uuid = m.net_node_uuid
-	WHERE     u.uuid = $unitUUID.uuid
+	WHERE u.uuid = $unitUUID.uuid
 )
 `, unitUUID, unitNetNodeWithCharmAndMachine{})
 	if err != nil {
@@ -1244,12 +1244,12 @@ SELECT &storageDirective.* FROM (
            cm.name AS charm_metadata_name,
            csk.kind AS charm_storage_kind,
            cs.count_max AS count_max
-    FROM   unit_storage_directive usd
-    JOIN   charm_storage cs ON cs.charm_uuid = usd.charm_uuid AND
+    FROM unit_storage_directive usd
+    JOIN charm_storage cs ON cs.charm_uuid = usd.charm_uuid AND
                                cs.name = usd.storage_name
-    JOIN   charm_metadata cm ON cm.charm_uuid = usd.charm_uuid
-    JOIN   charm_storage_kind csk ON csk.id = cs.storage_kind_id
-    WHERE  usd.unit_uuid = $unitUUID.uuid AND
+    JOIN charm_metadata cm ON cm.charm_uuid = usd.charm_uuid
+    JOIN charm_storage_kind csk ON csk.id = cs.storage_kind_id
+    WHERE usd.unit_uuid = $unitUUID.uuid AND
            usd.charm_uuid = $charmUUID.charm_uuid
 )`, unitUUID, charmUUID, storageDirective{})
 	if err != nil {
@@ -1338,8 +1338,8 @@ func (st *State) UpdateUnitCharm(
 
 	unitStmt, err := st.Prepare(`
 SELECT &unitLifeWithCharm.*
-FROM   unit u
-WHERE  u.uuid = $unitUUID.uuid
+FROM unit u
+WHERE u.uuid = $unitUUID.uuid
 `, unitUUID, unitLifeWithCharm{})
 	if err != nil {
 		return errors.Capture(err)
@@ -1347,8 +1347,8 @@ WHERE  u.uuid = $unitUUID.uuid
 
 	updateUnitCharmStmt, err := st.Prepare(`
 UPDATE unit
-SET    charm_uuid = $charmUUID.charm_uuid
-WHERE  uuid = $unitUUID.uuid
+SET charm_uuid = $charmUUID.charm_uuid
+WHERE uuid = $unitUUID.uuid
 `, unitUUID, targetCharmUUID)
 	if err != nil {
 		return errors.Capture(err)
@@ -1359,9 +1359,9 @@ DELETE FROM unit_resource
 WHERE unit_resource.unit_uuid = $unitUUID.uuid
 AND NOT EXISTS (
     SELECT 1
-    FROM   resource AS r
-    WHERE  r.uuid = unit_resource.resource_uuid
-    AND    r.charm_uuid = $charmUUID.charm_uuid
+    FROM resource AS r
+    WHERE r.uuid = unit_resource.resource_uuid
+    AND r.charm_uuid = $charmUUID.charm_uuid
 )
 `, unitUUID, targetCharmUUID)
 	if err != nil {
@@ -1370,7 +1370,7 @@ AND NOT EXISTS (
 
 	deleteStorageDirectiveStmt, err := st.Prepare(`
 DELETE FROM unit_storage_directive
-WHERE       unit_uuid = $unitUUID.uuid AND
+WHERE unit_uuid = $unitUUID.uuid AND
             charm_uuid = $charmUUID.charm_uuid
 `, unitUUID, charmUUID{})
 	if err != nil {
@@ -1539,8 +1539,8 @@ func (st *State) GetMachineUUIDAndNetNodeForName(
 
 	q := `
 SELECT &machineUUIDWithNetNode.*
-FROM   machine
-WHERE  name = $machineName.name
+FROM machine
+WHERE name = $machineName.name
 `
 
 	stmt, err := st.Prepare(q, nameInput, dbVal)
@@ -1775,8 +1775,8 @@ func (st *State) GetUnitUUIDAndNetNodeForName(
 
 	stmt, err := st.Prepare(`
 SELECT &unitUUIDAndNetNode.*
-FROM   unit
-WHERE  name = $unitName.name
+FROM unit
+WHERE name = $unitName.name
 `,
 		input, dbVal,
 	)
@@ -1937,9 +1937,9 @@ func (st *State) GetUnitNamesWithPrincipalForMachine(
 	stmt, err := st.Prepare(`
 SELECT u.name AS &unitWithPrincipal.name,
        p.name AS &unitWithPrincipal.principal_unit_name
-FROM      unit           AS u
+FROM unit AS u
 LEFT JOIN unit_principal AS up ON u.uuid = up.unit_uuid
-LEFT JOIN unit           AS p ON up.principal_uuid = p.uuid
+LEFT JOIN unit AS p ON up.principal_uuid = p.uuid
 WHERE u.net_node_uuid = $netNodeUUID.uuid
 `, unitWithPrincipal{}, netNodeUUID)
 	if err != nil {
@@ -2002,9 +2002,9 @@ func (st *State) GetUnitWorkloadVersion(ctx context.Context, unitName coreunit.N
 
 	query, err := st.Prepare(`
 SELECT &unitWorkloadVersion.version
-FROM   unit_workload_version
-WHERE  unit_uuid = $unitWorkloadVersion.unit_uuid
-	`, unitWorkloadVersion{})
+FROM unit_workload_version
+WHERE unit_uuid = $unitWorkloadVersion.unit_uuid
+`, unitWorkloadVersion{})
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -2161,13 +2161,13 @@ func (st *State) GetUnitK8sPodInfo(ctx context.Context, name coreunit.Name) (app
 
 	unitName := unitName{Name: name.String()}
 	infoQuery := `
-SELECT    k.provider_id AS &unitK8sPodInfo.provider_id,
+SELECT k.provider_id AS &unitK8sPodInfo.provider_id,
           ip.address_value AS &unitK8sPodInfo.address
-FROM      unit AS u
+FROM unit AS u
 LEFT JOIN k8s_pod AS k ON u.uuid = k.unit_uuid
 LEFT JOIN link_layer_device lld ON lld.net_node_uuid = u.net_node_uuid
 LEFT JOIN ip_address ip ON ip.device_uuid = lld.uuid
-WHERE     u.name = $unitName.name`
+WHERE u.name = $unitName.name`
 	infoStmt, err := st.Prepare(infoQuery, unitK8sPodInfo{}, unitName)
 	if err != nil {
 		return application.K8sPodInfo{}, errors.Capture(err)
@@ -2175,9 +2175,9 @@ WHERE     u.name = $unitName.name`
 
 	portsQuery := `
 SELECT &k8sPodPort.*
-FROM   unit AS u
-JOIN   k8s_pod_port AS kp ON kp.unit_uuid = u.uuid
-WHERE  u.name = $unitName.name`
+FROM unit AS u
+JOIN k8s_pod_port AS kp ON kp.unit_uuid = u.uuid
+WHERE u.name = $unitName.name`
 	portsStmt, err := st.Prepare(portsQuery, k8sPodPort{}, unitName)
 	if err != nil {
 		return application.K8sPodInfo{}, errors.Capture(err)
@@ -2269,8 +2269,8 @@ func (st *State) GetUnitNetNodeUUID(ctx context.Context, uuid coreunit.UUID) (st
 	ident := unitUUID{UnitUUID: uuid.String()}
 	stmt, err := st.Prepare(`
 SELECT &unitNetNodeUUID.*
-FROM   unit u
-WHERE  u.uuid = $unitUUID.uuid
+FROM unit u
+WHERE u.uuid = $unitUUID.uuid
 `, unitNetNodeUUID{}, ident)
 	if err != nil {
 		return "", errors.Capture(err)

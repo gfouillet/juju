@@ -51,7 +51,7 @@ func (s *stateSuite) TestGetDisabledUsers(c *tc.C) {
 
 	_, err = s.DB().ExecContext(c.Context(),
 		`INSERT INTO user_authentication (user_uuid, disabled) VALUES (?, TRUE)
-		 ON CONFLICT(user_uuid) DO UPDATE SET disabled = TRUE`, s.userUUID)
+		 ON CONFLICT (user_uuid) DO UPDATE SET disabled = TRUE`, s.userUUID)
 	c.Assert(err, tc.ErrorIsNil)
 
 	disabled, err = st.GetDisabledUsers(c.Context(), []string{s.userName.Name(), "nonexistent-user"})

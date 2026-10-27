@@ -1680,7 +1680,7 @@ VALUES (?, 'testcharm', ?, 1, ?, 1, ?, 1024)
 			`
 INSERT INTO storage_attachment (uuid, storage_instance_uuid, unit_uuid, life_id)
 VALUES (?, ?, ?, 0)
-			`,
+`,
 			saUUID.String(), siUUID.String(), unitUUID.String(),
 		)
 		c.Assert(err, tc.ErrorIsNil)
@@ -1691,7 +1691,7 @@ VALUES (?, ?, ?, 0)
 			`
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, ?)
-			`,
+`,
 			fsUUID.String(), strconv.Itoa(id), indeterminateProvisioningScope(),
 		)
 		c.Assert(err, tc.ErrorIsNil)
@@ -1701,7 +1701,7 @@ VALUES (?, ?, 0, ?)
 			`
 INSERT INTO storage_instance_filesystem (storage_instance_uuid, storage_filesystem_uuid)
 VALUES (?, ?)
-			`,
+`,
 			siUUID.String(), fsUUID.String(),
 		)
 		c.Assert(err, tc.ErrorIsNil)
@@ -1712,7 +1712,7 @@ VALUES (?, ?)
 			`
 INSERT INTO storage_filesystem_attachment (uuid, storage_filesystem_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES (?, ?, ?, 0, ?)
-			`,
+`,
 			fsaUUID.String(), fsUUID.String(), unitNetNodeUUID.String(), indeterminateProvisioningScope(),
 		)
 		c.Assert(err, tc.ErrorIsNil)
@@ -1723,7 +1723,7 @@ VALUES (?, ?, ?, 0, ?)
 			`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, ?)
-			`,
+`,
 			volUUID.String(), strconv.Itoa(id), indeterminateProvisioningScope(),
 		)
 		c.Assert(err, tc.ErrorIsNil)
@@ -1733,7 +1733,7 @@ VALUES (?, ?, 0, ?)
 			`
 INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid)
 VALUES (?, ?)
-			`,
+`,
 			siUUID.String(), volUUID.String(),
 		)
 		c.Assert(err, tc.ErrorIsNil)
@@ -1744,7 +1744,7 @@ VALUES (?, ?)
 			`
 INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES (?, ?, ?, 0, ?)
-			`,
+`,
 			vaUUID.String(), volUUID.String(), unitNetNodeUUID.String(), indeterminateProvisioningScope(),
 		)
 		c.Assert(err, tc.ErrorIsNil)
@@ -1755,7 +1755,7 @@ VALUES (?, ?, ?, 0, ?)
 			`
 INSERT INTO storage_volume_attachment_plan (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES (?, ?, ?, 0, ?)
-			`,
+`,
 			vapUUID.String(), volUUID.String(), unitNetNodeUUID.String(), indeterminateProvisioningScope(),
 		)
 		c.Assert(err, tc.ErrorIsNil)

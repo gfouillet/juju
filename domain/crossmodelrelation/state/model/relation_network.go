@@ -114,8 +114,8 @@ func (st *State) GetRelationNetworkIngress(ctx context.Context, relationUUID str
 
 	selectStmt, err := st.Prepare(`
 SELECT &cidr.*
-FROM   relation_network_ingress
-WHERE  relation_uuid = $uuid.uuid
+FROM relation_network_ingress
+WHERE relation_uuid = $uuid.uuid
 `, cidr{}, uuid{})
 	if err != nil {
 		return nil, errors.Errorf("preparing select relation network ingress query: %w", err)
@@ -162,8 +162,8 @@ func (st *State) GetRelationNetworkEgress(ctx context.Context, relationUUID stri
 
 	selectStmt, err := st.Prepare(`
 SELECT &cidr.*
-FROM   relation_network_egress
-WHERE  relation_uuid = $uuid.uuid
+FROM relation_network_egress
+WHERE relation_uuid = $uuid.uuid
 `, cidr{}, uuid{})
 	if err != nil {
 		return nil, errors.Errorf("preparing select relation network egress query: %w", err)
@@ -304,11 +304,11 @@ SELECT u.uuid AS &unitAddress.unit_uuid,
        ua.scope_name,
        ua.space_uuid,
        ua.cidr) AS (&unitAddress.*)
-FROM   relation_unit AS ru
-JOIN   relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
-JOIN   unit AS u ON ru.unit_uuid = u.uuid
-JOIN   v_all_unit_address AS ua ON u.uuid = ua.unit_uuid
-WHERE  re.relation_uuid = $uuid.uuid
+FROM relation_unit AS ru
+JOIN relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
+JOIN unit AS u ON ru.unit_uuid = u.uuid
+JOIN v_all_unit_address AS ua ON u.uuid = ua.unit_uuid
+WHERE re.relation_uuid = $uuid.uuid
 `, unitAddress{}, uuid{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -327,8 +327,8 @@ WHERE  re.relation_uuid = $uuid.uuid
 func (st *State) getRelationEgressSubnets(ctx context.Context, tx *sqlair.TX, relationUUID string) ([]string, error) {
 	relationEgressStmt, err := st.Prepare(`
 SELECT &cidr.*
-FROM   relation_network_egress
-WHERE  relation_uuid = $uuid.uuid
+FROM relation_network_egress
+WHERE relation_uuid = $uuid.uuid
 `, cidr{}, uuid{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -354,7 +354,7 @@ func (st *State) getEgressSubnetModelConfig(ctx context.Context, tx *sqlair.TX) 
 	}
 	modelConfigStmt, err := st.Prepare(`
 SELECT &modelConfigValue.value
-FROM   model_config
+FROM model_config
 WHERE  key = $modelConfigKey.key
 `, modelConfigValue{}, egressSubnetsConfigKey)
 	if err != nil {

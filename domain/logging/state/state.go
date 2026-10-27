@@ -144,7 +144,7 @@ func (st *State) IsLokiEnabled(ctx context.Context) (bool, error) {
 
 	stmt, err := st.Prepare(`
 WITH loki_check AS (
-    SELECT EXISTS (
+    SELECT EXISTS(
         SELECT 1
         FROM logging_loki_config
         WHERE endpoint != ''

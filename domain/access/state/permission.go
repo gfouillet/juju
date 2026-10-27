@@ -234,15 +234,15 @@ func (st *PermissionState) ReadUserAccessForTarget(ctx context.Context, subject 
 	}
 
 	readQuery := `
-SELECT  (u.uuid, u.name, u.display_name, u.external, u.created_at, u.disabled) AS (&dbPermissionUser.*),
+SELECT (u.uuid, u.name, u.display_name, u.external, u.created_at, u.disabled) AS (&dbPermissionUser.*),
         creator.name AS &dbPermissionUser.created_by_name,
         (p.*) AS (&dbPermission.*)
-FROM    v_user_auth u
+FROM v_user_auth u
         JOIN user AS creator ON u.created_by_uuid = creator.uuid
-        LEFT JOIN v_permission p ON u.uuid = p.grant_to AND p.grant_on = $dbPermission.grant_on 
-WHERE   u.name = $dbPermissionUser.name
-AND     u.disabled = false
-AND     u.removed = false
+        LEFT JOIN v_permission p ON u.uuid = p.grant_to AND p.grant_on = $dbPermission.grant_on
+WHERE u.name = $dbPermissionUser.name
+AND u.disabled = false
+AND u.removed = false
 `
 
 	readStmt, err := st.Prepare(readQuery, user, perm)
@@ -303,11 +303,11 @@ func (st *PermissionState) ReadUserAccessLevelForTarget(ctx context.Context, sub
 	}
 
 	readQuery := `
-SELECT  (p.access_type, p.uuid) AS (&dbPermission.*),
+SELECT (p.access_type, p.uuid) AS (&dbPermission.*),
         (u.disabled, u.removed) AS (&dbUserActive.*)
-FROM    v_user_auth u
+FROM v_user_auth u
         LEFT JOIN v_permission p ON u.uuid = p.grant_to AND p.grant_on = $dbPermission.grant_on
-WHERE   u.name = $dbPermissionUser.name
+WHERE u.name = $dbPermissionUser.name
 `
 
 	readStmt, err := st.Prepare(readQuery, user, perm, dbUserActive{})
@@ -407,12 +407,12 @@ SELECT (u.uuid, u.name, u.display_name, u.external, u.created_at, u.disabled) AS
        p.grant_to AS &dbPermission.grant_to,
        pat.type AS &dbPermission.access_type,
        pot.type AS &dbPermission.object_type
-FROM   v_user_auth u
+FROM v_user_auth u
        JOIN user AS creator ON u.created_by_uuid = creator.uuid
        LEFT JOIN permission p ON u.uuid = p.grant_to
        LEFT JOIN permission_access_type pat ON p.access_type_id = pat.id
        LEFT JOIN permission_object_type pot ON p.object_type_id = pot.id
-WHERE  u.removed = false
+WHERE u.removed = false
        AND u.name = $userName.name
 `
 
@@ -472,17 +472,17 @@ func (st *PermissionState) ReadAllUserAccessForTarget(ctx context.Context, targe
 	grantOn := dbPermission{GrantOn: target.Key}
 
 	query := `
-SELECT  (u.uuid, u.name, u.display_name, u.external, u.created_at, u.disabled) AS (&dbPermissionUser.*),
+SELECT (u.uuid, u.name, u.display_name, u.external, u.created_at, u.disabled) AS (&dbPermissionUser.*),
         creator.name AS &dbPermissionUser.created_by_name,
         (p.*) AS (&dbPermission.*),
         (ee.*) AS (&dbEveryoneExternal.*)
-FROM    v_user_auth u
+FROM v_user_auth u
         JOIN user AS creator ON u.created_by_uuid = creator.uuid
-        LEFT JOIN v_permission p ON u.uuid = p.grant_to AND p.grant_on = $dbPermission.grant_on 
+        LEFT JOIN v_permission p ON u.uuid = p.grant_to AND p.grant_on = $dbPermission.grant_on
         LEFT JOIN v_everyone_external ee ON ee.grant_on = $dbPermission.grant_on
-WHERE   u.disabled = false
-AND     u.removed = false
-AND     (p.uuid IS NOT NULL) OR (u.external AND ee.uuid IS NOT NULL)
+WHERE u.disabled = false
+AND u.removed = false
+AND (p.uuid IS NOT NULL) OR (u.external AND ee.uuid IS NOT NULL)
 `
 	stmt, err := st.Prepare(query, grantOn, dbPermissionUser{}, dbEveryoneExternal{})
 	if err != nil {
@@ -559,12 +559,12 @@ func (st *PermissionState) ReadAllAccessForUserAndObjectType(
 SELECT (p.*) AS (&dbPermission.*),
        (u.uuid, u.name, u.display_name, u.external, u.created_at, u.disabled) AS (&dbPermissionUser.*),
        creator.name AS &dbPermissionUser.created_by_name
-FROM   v_user_auth u
+FROM v_user_auth u
        JOIN user AS creator ON u.created_by_uuid = creator.uuid
        LEFT JOIN %s p ON u.uuid = p.grant_to
-WHERE  u.name = $userName.name
-AND    u.disabled = false
-AND    u.removed = false
+WHERE u.name = $userName.name
+AND u.disabled = false
+AND u.removed = false
 `, view)
 
 	uName := userName{Name: subject.Name()}
@@ -630,21 +630,21 @@ func (st *PermissionState) AllModelAccessForOwner(ctx context.Context, owner use
 
 	query := `
 SELECT DISTINCT cc.name AS &ownerModelAccess.cred_name,
-       c.name           AS &ownerModelAccess.cloud_name,
-       m.name           AS &ownerModelAccess.model_name,
-       m.qualifier      AS &ownerModelAccess.model_qualifier,
-       pat.type         AS &ownerModelAccess.access_type
-FROM   model AS m
-       JOIN cloud_credential AS cc  ON m.cloud_credential_uuid = cc.uuid
-       JOIN cloud             AS c  ON cc.cloud_uuid = c.uuid
-       JOIN user              AS co ON cc.owner_uuid = co.uuid
-       JOIN permission        AS p  ON m.uuid = p.grant_on
+       c.name AS &ownerModelAccess.cloud_name,
+       m.name AS &ownerModelAccess.model_name,
+       m.qualifier AS &ownerModelAccess.model_qualifier,
+       pat.type AS &ownerModelAccess.access_type
+FROM model AS m
+       JOIN cloud_credential AS cc ON m.cloud_credential_uuid = cc.uuid
+       JOIN cloud AS c ON cc.cloud_uuid = c.uuid
+       JOIN user AS co ON cc.owner_uuid = co.uuid
+       JOIN permission AS p ON m.uuid = p.grant_on
        JOIN permission_access_type AS pat ON p.access_type_id = pat.id
-       JOIN user              AS u  ON p.grant_to = u.uuid
-WHERE  co.name = $input.owner_name
-AND    m.activated = TRUE
-AND    u.name    = $input.owner_name
-AND    u.removed = FALSE
+       JOIN user AS u ON p.grant_to = u.uuid
+WHERE co.name = $input.owner_name
+AND m.activated = TRUE
+AND u.name = $input.owner_name
+AND u.removed = FALSE
 `
 	readStmt, err := st.Prepare(query, input{}, ownerModelAccess{})
 	if err != nil {
@@ -756,9 +756,9 @@ func (st *PermissionState) findUserByName(ctx context.Context, tx *sqlair.TX, na
 	getUserQuery := `
 SELECT (u.uuid, u.name, u.display_name, u.external, u.created_at, u.disabled) AS (&dbPermissionUser.*),
        creator.name AS &dbPermissionUser.created_by_name
-FROM   v_user_auth u
+FROM v_user_auth u
        JOIN user AS creator ON u.created_by_uuid = creator.uuid
-WHERE  u.removed = false
+WHERE u.removed = false
        AND u.name = $userName.name`
 
 	selectUserStmt, err := st.Prepare(getUserQuery, dbPermissionUser{}, uName)
@@ -784,21 +784,21 @@ func targetExists(ctx context.Context, tx *sqlair.TX, target corepermission.ID) 
 	switch target.ObjectType {
 	case coredatabase.ControllerNS:
 		targetExists = `
-SELECT  uuid AS &M.found
-FROM    controller
-WHERE   uuid = $M.grant_on
+SELECT uuid AS &M.found
+FROM controller
+WHERE uuid = $M.grant_on
 `
 	case corepermission.Model:
 		targetExists = `
-SELECT  uuid AS &M.found
-FROM    model
-WHERE   uuid = $M.grant_on
+SELECT uuid AS &M.found
+FROM model
+WHERE uuid = $M.grant_on
 `
 	case corepermission.Cloud:
 		targetExists = `
-SELECT  name AS &M.found
-FROM    cloud
-WHERE   name = $M.grant_on
+SELECT name AS &M.found
+FROM cloud
+WHERE name = $M.grant_on
 `
 	case corepermission.Offer:
 		return nil
@@ -844,10 +844,10 @@ func (st *PermissionState) getUserUUIDs(
 
 	stmt, err := st.Prepare(`
 SELECT &nameAndUUID.*
-FROM   v_user_auth AS u
-WHERE  u.name IN ($names[:])
-AND    u.disabled = false
-AND    u.removed = false
+FROM v_user_auth AS u
+WHERE u.name IN ($names[:])
+AND u.disabled = false
+AND u.removed = false
 `, nameAndUUID{}, names{})
 
 	if err != nil {
@@ -873,13 +873,13 @@ func (st *PermissionState) grantPermission(ctx context.Context, tx *sqlair.TX, s
 	}
 
 	readQuery := `
-SELECT  p.access_type AS &permInOut.*
-FROM    v_permission p
+SELECT p.access_type AS &permInOut.*
+FROM v_permission p
         LEFT JOIN v_user_auth u ON u.uuid = p.grant_to
-WHERE   u.name = $permInOut.name
-AND     u.disabled = false
-AND     u.removed = false
-AND     p.grant_on = $permInOut.grant_on
+WHERE u.name = $permInOut.name
+AND u.disabled = false
+AND u.removed = false
+AND p.grant_on = $permInOut.grant_on
 `
 	readStmt, err := st.Prepare(readQuery, inOut)
 	if err != nil {
@@ -927,14 +927,14 @@ func (st *PermissionState) checkPotentiallyOrhpanedModel(ctx context.Context, tx
 	user := userUUID{UUID: revokedUserUUID}
 	checkAdminStmt, err := st.Prepare(`
 SELECT ua.uuid AS &userUUID.uuid
-FROM   v_user_auth ua
-JOIN   permission p ON ua.uuid = p.grant_to
-WHERE  p.grant_on=$dbModelUUID.uuid
+FROM v_user_auth ua
+JOIN permission p ON ua.uuid = p.grant_to
+WHERE p.grant_on = $dbModelUUID.uuid
 -- admin permission
-AND    p.access_type_id = 3
-AND    ua.disabled = false
-AND    ua.removed = false
-AND    ua.uuid <> $userUUID.uuid
+AND p.access_type_id = 3
+AND ua.disabled = false
+AND ua.removed = false
+AND ua.uuid <> $userUUID.uuid
 `, user, model)
 	if err != nil {
 		return errors.Capture(err)
@@ -979,11 +979,11 @@ func (st *PermissionState) deletePermission(ctx context.Context, tx *sqlair.TX, 
 	// deleted.
 	deletePermission := `
 DELETE FROM permission
-WHERE  grant_on = $permInOut.grant_on
-AND    grant_to IN (
+WHERE grant_on = $permInOut.grant_on
+AND grant_to IN (
        SELECT uuid
-       FROM   user
-       WHERE  name = $permInOut.name
+       FROM user
+       WHERE name = $permInOut.name
 )
 `
 	deletePermissionStmt, err := st.Prepare(deletePermission, permInOut{})
@@ -1005,18 +1005,18 @@ AND    grant_to IN (
 func (st *PermissionState) updatePermission(ctx context.Context, tx *sqlair.TX, subjectName, grantOn, access string) error {
 	updateQuery := `
 UPDATE permission
-SET    access_type_id = (
+SET access_type_id = (
            SELECT id
-           FROM   permission_access_type
-           WHERE  type = $permInOut.access_type
+           FROM permission_access_type
+           WHERE type = $permInOut.access_type
        )
-WHERE  grant_on = $permInOut.grant_on
-AND    grant_to IN (
+WHERE grant_on = $permInOut.grant_on
+AND grant_to IN (
            SELECT uuid
-           FROM   v_user_auth
-           WHERE  name = $permInOut.name
-           AND    removed = false
-           AND    disabled = false
+           FROM v_user_auth
+           WHERE name = $permInOut.name
+           AND removed = false
+           AND disabled = false
        )
 `
 	updateQueryStmt, err := st.Prepare(updateQuery, permInOut{})
@@ -1043,13 +1043,13 @@ func (st *PermissionState) baseExternalAccessForTarget(ctx context.Context, tx *
 		GrantOn: target.Key,
 	}
 	readQuery := `
-SELECT  (p.*) AS (&dbPermission.*)
-FROM    v_user_auth u
-        JOIN v_permission p ON u.uuid = p.grant_to AND p.grant_on = $dbPermission.grant_on 
-WHERE   u.name = $dbPermissionUser.name
-AND     u.disabled = false
-AND     u.removed = false
-	`
+SELECT (p.*) AS (&dbPermission.*)
+FROM v_user_auth u
+        JOIN v_permission p ON u.uuid = p.grant_to AND p.grant_on = $dbPermission.grant_on
+WHERE u.name = $dbPermissionUser.name
+AND u.disabled = false
+AND u.removed = false
+`
 	readStmt, err := st.Prepare(readQuery, user, perm)
 	if err != nil {
 		return dbPermission{}, errors.Capture(err)
@@ -1068,13 +1068,13 @@ func (st *PermissionState) baseExternalAccess(ctx context.Context, tx *sqlair.TX
 	var perms []dbPermission
 
 	readQuery := `
-SELECT  (p.*) AS (&dbPermission.*)
-FROM    v_user_auth u
-        JOIN v_permission p ON u.uuid = p.grant_to 
-WHERE   u.name = $dbPermissionUser.name
-AND     u.disabled = false
-AND     u.removed = false
-	`
+SELECT (p.*) AS (&dbPermission.*)
+FROM v_user_auth u
+        JOIN v_permission p ON u.uuid = p.grant_to
+WHERE u.name = $dbPermissionUser.name
+AND u.disabled = false
+AND u.removed = false
+`
 	readStmt, err := st.Prepare(readQuery, user, dbPermission{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1172,14 +1172,14 @@ SELECT $dbPermission.uuid,
        ot.id,
        u.uuid,
        $dbPermission.grant_on
-FROM   v_user_auth u,
+FROM v_user_auth u,
        permission_access_type at,
        permission_object_type ot
-WHERE  u.uuid = $dbPermission.grant_to
-AND    u.disabled = false
-AND    u.removed = false
-AND    at.type = $dbPermission.access_type
-AND    ot.type = $dbPermission.object_type
+WHERE u.uuid = $dbPermission.grant_to
+AND u.disabled = false
+AND u.removed = false
+AND at.type = $dbPermission.access_type
+AND ot.type = $dbPermission.object_type
 `
 
 	insertPermissionStmt, err := sqlair.Prepare(newPermission, dbPermission{})

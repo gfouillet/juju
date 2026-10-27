@@ -182,9 +182,9 @@ func (s *provisionerIntegrationSuite) TestGetProvisioningInfoWithEndpointBinding
 
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "3", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	defaultSpace := s.addSpace(c, "default")
@@ -223,9 +223,9 @@ func (s *provisionerIntegrationSuite) TestGetProvisioningInfoWithNetworkTopology
 
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "4", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	// Create a space with a subnet and AZ, bind an app endpoint to it.
@@ -262,16 +262,16 @@ func (s *provisionerIntegrationSuite) TestGetProvisioningInfoWithRootDisk(c *tc.
 
 	// Add constraint with root-disk-source.
 	consUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO "constraint" (uuid, root_disk_source) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO "constraint" (uuid, root_disk_source) VALUES (?, ?)`,
 		consUUID, "ebs-fast")
-	s.runQuery(c, `INSERT INTO machine_constraint (machine_uuid, constraint_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO machine_constraint (machine_uuid, constraint_uuid) VALUES (?, ?)`,
 		machineUUID, consUUID)
 
 	// Add storage pool.
 	poolUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO storage_pool (uuid, name, type) VALUES (?,?,?)`,
+	s.runQuery(c, `INSERT INTO storage_pool (uuid, name, type) VALUES (?, ?, ?)`,
 		poolUUID, "ebs-fast", "ebs")
-	s.runQuery(c, `INSERT INTO storage_pool_attribute (storage_pool_uuid, "key", value) VALUES (?,?,?)`,
+	s.runQuery(c, `INSERT INTO storage_pool_attribute (storage_pool_uuid, "key", value) VALUES (?, ?, ?)`,
 		poolUUID, "volume-type", "gp3")
 
 	shared := s.sharedInfo(c)
@@ -311,9 +311,9 @@ func (s *provisionerIntegrationSuite) TestGetProvisioningInfoControllerMachine(c
 
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "0", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	// Create a controller application with a unit on this machine.
@@ -414,7 +414,7 @@ func (s *provisionerIntegrationSuite) addNetNode(c *tc.C) string {
 func (s *provisionerIntegrationSuite) addMachineWithPlatform(c *tc.C, name, osName, channel string) string {
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, name, life.Alive, netNodeUUID)
 
 	var osID int
@@ -423,84 +423,84 @@ func (s *provisionerIntegrationSuite) addMachineWithPlatform(c *tc.C, name, osNa
 	})
 	c.Assert(err, tc.ErrorIsNil)
 
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, ?, ?, ?)`,
 		machineUUID, osID, channel, 0)
 	return machineUUID
 }
 
 func (s *provisionerIntegrationSuite) addMachinePlacement(c *tc.C, machineUUID, directive string) {
-	s.runQuery(c, `INSERT INTO machine_placement (machine_uuid, scope_id, directive) VALUES (?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine_placement (machine_uuid, scope_id, directive) VALUES (?, ?, ?)`,
 		machineUUID, 0, directive)
 }
 
 func (s *provisionerIntegrationSuite) addConstraint(c *tc.C, machineUUID, arch string, mem int64) string {
 	consUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO "constraint" (uuid, arch, mem) VALUES (?,?,?)`,
+	s.runQuery(c, `INSERT INTO "constraint" (uuid, arch, mem) VALUES (?, ?, ?)`,
 		consUUID, arch, mem)
-	s.runQuery(c, `INSERT INTO machine_constraint (machine_uuid, constraint_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO machine_constraint (machine_uuid, constraint_uuid) VALUES (?, ?)`,
 		machineUUID, consUUID)
 	return consUUID
 }
 
 func (s *provisionerIntegrationSuite) addSpace(c *tc.C, name string) string {
 	spaceUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO space (uuid, name) VALUES (?,?)`, spaceUUID, name)
+	s.runQuery(c, `INSERT INTO space (uuid, name) VALUES (?, ?)`, spaceUUID, name)
 	return spaceUUID
 }
 
 func (s *provisionerIntegrationSuite) addSubnet(c *tc.C, spaceUUID, cidr string) string {
 	subnetUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO subnet (uuid, cidr, space_uuid) VALUES (?,?,?)`,
+	s.runQuery(c, `INSERT INTO subnet (uuid, cidr, space_uuid) VALUES (?, ?, ?)`,
 		subnetUUID, cidr, spaceUUID)
 	return subnetUUID
 }
 
 func (s *provisionerIntegrationSuite) addProviderSubnet(c *tc.C, subnetUUID, providerID string) {
-	s.runQuery(c, `INSERT INTO provider_subnet (subnet_uuid, provider_id) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO provider_subnet (subnet_uuid, provider_id) VALUES (?, ?)`,
 		subnetUUID, providerID)
 }
 
 func (s *provisionerIntegrationSuite) addProviderSpace(c *tc.C, spaceUUID, providerID string) {
-	s.runQuery(c, `INSERT INTO provider_space (space_uuid, provider_id) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO provider_space (space_uuid, provider_id) VALUES (?, ?)`,
 		spaceUUID, providerID)
 }
 
 func (s *provisionerIntegrationSuite) addAvailabilityZone(c *tc.C, subnetUUID, azName string) {
 	azUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT OR IGNORE INTO availability_zone (uuid, name) VALUES (?,?)`, azUUID, azName)
+	s.runQuery(c, `INSERT OR IGNORE INTO availability_zone (uuid, name) VALUES (?, ?)`, azUUID, azName)
 	var actualUUID string
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `SELECT uuid FROM availability_zone WHERE name = ?`, azName).Scan(&actualUUID)
 	})
 	c.Assert(err, tc.ErrorIsNil)
-	s.runQuery(c, `INSERT INTO availability_zone_subnet (availability_zone_uuid, subnet_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO availability_zone_subnet (availability_zone_uuid, subnet_uuid) VALUES (?, ?)`,
 		actualUUID, subnetUUID)
 }
 
 func (s *provisionerIntegrationSuite) addCharm(c *tc.C, name string) string {
 	charmUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO charm (uuid, source_id, reference_name, revision) VALUES (?,1,?,0)`,
+	s.runQuery(c, `INSERT INTO charm (uuid, source_id, reference_name, revision) VALUES (?, 1, ?, 0)`,
 		charmUUID, name)
 	return charmUUID
 }
 
 func (s *provisionerIntegrationSuite) addApplication(c *tc.C, name, charmUUID, spaceUUID string) string {
 	appUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO application (uuid, name, life_id, charm_uuid, space_uuid) VALUES (?,?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO application (uuid, name, life_id, charm_uuid, space_uuid) VALUES (?, ?, ?, ?, ?)`,
 		appUUID, name, life.Alive, charmUUID, spaceUUID)
 	return appUUID
 }
 
 func (s *provisionerIntegrationSuite) addUnit(c *tc.C, name, appUUID, charmUUID, netNodeUUID string) string {
 	unitUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO unit (uuid, name, life_id, application_uuid, net_node_uuid, charm_uuid) VALUES (?,?,?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO unit (uuid, name, life_id, application_uuid, net_node_uuid, charm_uuid) VALUES (?, ?, ?, ?, ?, ?)`,
 		unitUUID, name, life.Alive, appUUID, netNodeUUID, charmUUID)
 	return unitUUID
 }
 
 func (s *provisionerIntegrationSuite) addCharmRelation(c *tc.C, charmUUID, name string) string {
 	relUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO charm_relation (uuid, charm_uuid, name, role_id, scope_id) VALUES (?,?,?,0,0)`,
+	s.runQuery(c, `INSERT INTO charm_relation (uuid, charm_uuid, name, role_id, scope_id) VALUES (?, ?, ?, 0, 0)`,
 		relUUID, charmUUID, name)
 	return relUUID
 }
@@ -508,10 +508,10 @@ func (s *provisionerIntegrationSuite) addCharmRelation(c *tc.C, charmUUID, name 
 func (s *provisionerIntegrationSuite) addApplicationEndpoint(c *tc.C, appUUID, charmRelUUID string, spaceUUID *string) {
 	epUUID := uuid.MustNewUUID().String()
 	if spaceUUID != nil {
-		s.runQuery(c, `INSERT INTO application_endpoint (uuid, application_uuid, space_uuid, charm_relation_uuid) VALUES (?,?,?,?)`,
+		s.runQuery(c, `INSERT INTO application_endpoint (uuid, application_uuid, space_uuid, charm_relation_uuid) VALUES (?, ?, ?, ?)`,
 			epUUID, appUUID, *spaceUUID, charmRelUUID)
 	} else {
-		s.runQuery(c, `INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid) VALUES (?,?,?)`,
+		s.runQuery(c, `INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid) VALUES (?, ?, ?)`,
 			epUUID, appUUID, charmRelUUID)
 	}
 }
@@ -522,7 +522,7 @@ func (s *provisionerIntegrationSuite) addApplicationController(c *tc.C, appUUID 
 
 func (s *provisionerIntegrationSuite) addModelInfo(c *tc.C, name, cloudType, cloudRegion string) {
 	modelUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type, cloud_region) VALUES (?,?,?,?,?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type, cloud_region) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		modelUUID, "ctrl-uuid", name, "", "iaas", "aws", cloudType, cloudRegion)
 }
 

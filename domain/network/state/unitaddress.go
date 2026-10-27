@@ -38,7 +38,7 @@ func (st *State) GetUnitAndK8sServiceAddresses(ctx context.Context, uuid coreuni
 	queryUnitPublicAddressesStmt, err := st.Prepare(`
 SELECT &SpaceAddress.*
 FROM v_all_unit_address AS ua
-WHERE     ua.unit_uuid = $entityUUID.uuid
+WHERE ua.unit_uuid = $entityUUID.uuid
 `, SpaceAddress{}, entityUUID{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -95,13 +95,13 @@ func (st *State) GetControllerAPIAddresses(
 	queryUnitAPIAddressesStmt, err := st.Prepare(`
 WITH unit_net_node AS (
     SELECT u.net_node_uuid,
-           EXISTS (
+           EXISTS(
                SELECT 1
-               FROM   k8s_service AS ks
-               WHERE  ks.application_uuid = u.application_uuid
+               FROM k8s_service AS ks
+               WHERE ks.application_uuid = u.application_uuid
            ) AS is_caas
-    FROM   unit AS u
-    WHERE  u.uuid = $entityUUID.uuid
+    FROM unit AS u
+    WHERE u.uuid = $entityUUID.uuid
 )
 SELECT ipa.address_value AS &controllerAPIAddress.address_value,
        iact.name AS &controllerAPIAddress.config_type_name,
@@ -115,19 +115,19 @@ SELECT ipa.address_value AS &controllerAPIAddress.address_value,
        sn.space_uuid AS &controllerAPIAddress.space_uuid,
        sn.cidr AS &controllerAPIAddress.cidr,
        lld.device_type_id AS &controllerAPIAddress.device_type_id
-FROM   unit_net_node AS unn
-JOIN   ip_address AS ipa ON unn.net_node_uuid = ipa.net_node_uuid
-JOIN   link_layer_device AS lld
+FROM unit_net_node AS unn
+JOIN ip_address AS ipa ON unn.net_node_uuid = ipa.net_node_uuid
+JOIN link_layer_device AS lld
        ON ipa.device_uuid = lld.uuid
        AND unn.net_node_uuid = lld.net_node_uuid
-JOIN   link_layer_device_type AS lldt ON lld.device_type_id = lldt.id
-JOIN   ip_address_config_type AS iact ON ipa.config_type_id = iact.id
-JOIN   ip_address_type AS iat ON ipa.type_id = iat.id
-JOIN   ip_address_origin AS iao ON ipa.origin_id = iao.id
-JOIN   ip_address_scope AS ias ON ipa.scope_id = ias.id
+JOIN link_layer_device_type AS lldt ON lld.device_type_id = lldt.id
+JOIN ip_address_config_type AS iact ON ipa.config_type_id = iact.id
+JOIN ip_address_type AS iat ON ipa.type_id = iat.id
+JOIN ip_address_origin AS iao ON ipa.origin_id = iao.id
+JOIN ip_address_scope AS ias ON ipa.scope_id = ias.id
 LEFT JOIN subnet AS sn ON ipa.subnet_uuid = sn.uuid
-WHERE  lldt.name != $apiAddressFilter.loopback_device_type
-AND    (unn.is_caas = 1
+WHERE lldt.name != $apiAddressFilter.loopback_device_type
+AND (unn.is_caas = 1
         OR ias.name != $apiAddressFilter.scope_name)
 `, controllerAPIAddress{}, entityUUID{}, apiAddressFilter{})
 	if err != nil {
@@ -170,12 +170,12 @@ func (st *State) GetUnitAddresses(ctx context.Context, uuid coreunit.UUID) (core
 	var address []SpaceAddress
 	ident := entityUUID{UUID: uuid.String()}
 	queryUnitPublicAddressesStmt, err := st.Prepare(`
-SELECT    &SpaceAddress.*
-FROM      unit u
-JOIN      link_layer_device AS lld ON u.net_node_uuid = lld.net_node_uuid
-JOIN      v_ip_address_with_names AS ipa ON lld.uuid = ipa.device_uuid
+SELECT &SpaceAddress.*
+FROM unit u
+JOIN link_layer_device AS lld ON u.net_node_uuid = lld.net_node_uuid
+JOIN v_ip_address_with_names AS ipa ON lld.uuid = ipa.device_uuid
 LEFT JOIN subnet AS sn ON ipa.subnet_uuid = sn.uuid
-WHERE     u.uuid = $entityUUID.uuid
+WHERE u.uuid = $entityUUID.uuid
 `, SpaceAddress{}, entityUUID{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -211,9 +211,9 @@ func (st *State) GetControllerUnitUUIDByName(ctx context.Context, name string) (
 
 	query, err := st.Prepare(`
 SELECT u.uuid AS &entityUUID.*
-FROM   unit AS u
-JOIN   application_controller AS ac ON u.application_uuid = ac.application_uuid
-WHERE  u.name = $unitName.name
+FROM unit AS u
+JOIN application_controller AS ac ON u.application_uuid = ac.application_uuid
+WHERE u.name = $unitName.name
 `, entityUUID{}, unitName{})
 	if err != nil {
 		return "", errors.Errorf("preparing query: %w", err)
@@ -270,8 +270,8 @@ func (st *State) getUnitUUIDByName(
 
 	query, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   unit
-WHERE  name = $unitName.name
+FROM unit
+WHERE name = $unitName.name
 `, entityUUID{}, unitName)
 	if err != nil {
 		return "", errors.Errorf("preparing query: %w", err)

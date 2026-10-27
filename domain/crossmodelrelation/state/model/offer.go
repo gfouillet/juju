@@ -35,8 +35,8 @@ func (st *State) CreateOffer(
 
 	applicationLifeStmt, err := st.Prepare(`
 SELECT life_id AS &lifeID.life_id
-FROM   application
-WHERE  uuid = $uuid.uuid
+FROM application
+WHERE uuid = $uuid.uuid
 `, uuid{}, lifeID{})
 	if err != nil {
 		return errors.Errorf("preparing application life query: %w", err)
@@ -101,10 +101,10 @@ func (st *State) ValidateApplicationAndEndpointsForOffer(
 	// types. scope_id is container scope, which is not allowed to be offered.
 	stmt, err := st.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   application_endpoint AS ae
-JOIN   charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
-AND    ae.uuid IN ($uuids[:])
-AND    cr.scope_id == 1
+FROM application_endpoint AS ae
+JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
+AND ae.uuid IN ($uuids[:])
+AND cr.scope_id == 1
 `, uuids{}, countResult{})
 	if err != nil {
 		return "", errors.Errorf("preparing application and endpoint validation query: %w", err)

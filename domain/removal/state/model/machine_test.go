@@ -286,21 +286,21 @@ VALUES ('storage-attachment-uuid', 'instance-uuid', ?, 0)`
 		}
 
 		fs := `
-INSERT INTO storage_filesystem(uuid, filesystem_id, life_id, provision_scope_id)
+INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES ('filesystem-uuid', 'filesystem-id', 0, 1)`
 		if _, err := tx.ExecContext(ctx, fs); err != nil {
 			return err
 		}
 
 		mfs := `
-INSERT INTO machine_filesystem(machine_uuid, filesystem_uuid)
+INSERT INTO machine_filesystem (machine_uuid, filesystem_uuid)
 VALUES (?, 'filesystem-uuid')`
 		if _, err := tx.ExecContext(ctx, mfs, machineUUID.String()); err != nil {
 			return err
 		}
 
 		fsa := `
-INSERT INTO storage_filesystem_attachment(uuid, storage_filesystem_uuid, net_node_uuid, life_id, provision_scope_id)
+INSERT INTO storage_filesystem_attachment (uuid, storage_filesystem_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES ('filesystem-attachment-uuid', 'filesystem-uuid', ?, 0, 1)`
 		if _, err := tx.ExecContext(ctx, fsa, netNodeUUID); err != nil {
 			return err
@@ -389,28 +389,28 @@ VALUES ('storage-attachment-uuid', 'instance-uuid', ?, 0)`
 		}
 
 		vol := `
-INSERT INTO storage_volume(uuid, volume_id, life_id, provision_scope_id)
+INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES ('volume-uuid', 'volume-id', 0, 1)`
 		if _, err := tx.ExecContext(ctx, vol); err != nil {
 			return err
 		}
 
 		mv := `
-INSERT INTO machine_volume(machine_uuid, volume_uuid)
+INSERT INTO machine_volume (machine_uuid, volume_uuid)
 VALUES (?, 'volume-uuid')`
 		if _, err := tx.ExecContext(ctx, mv, machineUUID.String()); err != nil {
 			return err
 		}
 
 		vola := `
-iNSERT INTO storage_volume_attachment(uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
+iNSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES ('volume-attachment-uuid', 'volume-uuid', ?, 0, 1)`
 		if _, err := tx.ExecContext(ctx, vola, netNodeUUID); err != nil {
 			return err
 		}
 
 		volap := `
-iNSERT INTO storage_volume_attachment_plan(uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
+iNSERT INTO storage_volume_attachment_plan (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES ('volume-attachment-plan-uuid', 'volume-uuid', ?, 0, 1)`
 		if _, err := tx.ExecContext(ctx, volap, netNodeUUID); err != nil {
 			return err
@@ -505,21 +505,21 @@ VALUES ('storage-attachment-uuid', 'instance-uuid', ?, 0)`
 		}
 
 		fs := `
-INSERT INTO storage_filesystem(uuid, filesystem_id, life_id, provision_scope_id)
+INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES ('filesystem-uuid', 'filesystem-id', 0, 1)`
 		if _, err := tx.ExecContext(ctx, fs); err != nil {
 			return err
 		}
 
 		mfs := `
-INSERT INTO machine_filesystem(machine_uuid, filesystem_uuid)
+INSERT INTO machine_filesystem (machine_uuid, filesystem_uuid)
 VALUES (?, 'filesystem-uuid')`
 		if _, err := tx.ExecContext(ctx, mfs, machineUUID.String()); err != nil {
 			return err
 		}
 
 		fsa := `
-iNSERT INTO storage_filesystem_attachment(uuid, storage_filesystem_uuid, net_node_uuid, life_id, provision_scope_id)
+iNSERT INTO storage_filesystem_attachment (uuid, storage_filesystem_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES ('filesystem-attachment-uuid', 'filesystem-uuid', ?, 0, 1)`
 		if _, err := tx.ExecContext(ctx, fsa, netNodeUUID); err != nil {
 			return err
@@ -533,21 +533,21 @@ VALUES ('instance-uuid', 'filesystem-uuid')`
 		}
 
 		vol := `
-INSERT INTO storage_volume(uuid, volume_id, life_id, provision_scope_id)
+INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES ('volume-uuid', 'volume-id', 0, 0)`
 		if _, err := tx.ExecContext(ctx, vol); err != nil {
 			return err
 		}
 
 		mv := `
-INSERT INTO machine_volume(machine_uuid, volume_uuid)
+INSERT INTO machine_volume (machine_uuid, volume_uuid)
 VALUES (?, 'volume-uuid')`
 		if _, err := tx.ExecContext(ctx, mv, machineUUID.String()); err != nil {
 			return err
 		}
 
 		vola := `
-iNSERT INTO storage_volume_attachment(uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
+iNSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES ('volume-attachment-uuid', 'volume-uuid', ?, 0, 0)`
 		if _, err := tx.ExecContext(ctx, vola, netNodeUUID); err != nil {
 			return err
@@ -648,21 +648,21 @@ VALUES ('storage-attachment-uuid', 'instance-uuid', ?, 0)`
 		}
 
 		fs := `
-INSERT INTO storage_filesystem(uuid, filesystem_id, life_id, provision_scope_id)
+INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES ('filesystem-uuid', 'filesystem-id', 0, 1)`
 		if _, err := tx.ExecContext(ctx, fs); err != nil {
 			return err
 		}
 
 		mfs := `
-INSERT INTO machine_filesystem(machine_uuid, filesystem_uuid)
+INSERT INTO machine_filesystem (machine_uuid, filesystem_uuid)
 VALUES (?, 'filesystem-uuid')`
 		if _, err := tx.ExecContext(ctx, mfs, machineUUID.String()); err != nil {
 			return err
 		}
 
 		fsa := `
-iNSERT INTO storage_filesystem_attachment(uuid, storage_filesystem_uuid, net_node_uuid, life_id, provision_scope_id)
+iNSERT INTO storage_filesystem_attachment (uuid, storage_filesystem_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES ('filesystem-attachment-uuid', 'filesystem-uuid', ?, 0, 1)`
 		if _, err := tx.ExecContext(ctx, fsa, netNodeUUID); err != nil {
 			return err
@@ -676,7 +676,7 @@ VALUES ('instance-uuid', 'filesystem-uuid')`
 		}
 
 		vol := `
-INSERT INTO storage_volume(uuid, volume_id, life_id, provision_scope_id)
+INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES ('volume-uuid', 'volume-id', 0, 0)`
 		if _, err := tx.ExecContext(ctx, vol); err != nil {
 			return err
@@ -685,7 +685,7 @@ VALUES ('volume-uuid', 'volume-id', 0, 0)`
 		// N.B. no machine volume is created.
 
 		vola := `
-iNSERT INTO storage_volume_attachment(uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
+iNSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES ('volume-attachment-uuid', 'volume-uuid', ?, 0, 0)`
 		if _, err := tx.ExecContext(ctx, vola, netNodeUUID); err != nil {
 			return err
@@ -779,14 +779,14 @@ VALUES ('storage-attachment-uuid', 'instance-uuid', ?, 0)`
 		}
 
 		fs := `
-INSERT INTO storage_filesystem(uuid, filesystem_id, life_id, provision_scope_id)
+INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES ('filesystem-uuid', 'filesystem-id', 0, 1)`
 		if _, err := tx.ExecContext(ctx, fs); err != nil {
 			return err
 		}
 
 		fsa := `
-iNSERT INTO storage_filesystem_attachment(uuid, storage_filesystem_uuid, net_node_uuid, life_id, provision_scope_id)
+iNSERT INTO storage_filesystem_attachment (uuid, storage_filesystem_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES ('filesystem-attachment-uuid', 'filesystem-uuid', ?, 0, 1)`
 		if _, err := tx.ExecContext(ctx, fsa, netNodeUUID); err != nil {
 			return err
@@ -800,14 +800,14 @@ VALUES ('instance-uuid', 'filesystem-uuid')`
 		}
 
 		vol := `
-INSERT INTO storage_volume(uuid, volume_id, life_id, provision_scope_id)
+INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES ('volume-uuid', 'volume-id', 0, 0)`
 		if _, err := tx.ExecContext(ctx, vol); err != nil {
 			return err
 		}
 
 		vola := `
-iNSERT INTO storage_volume_attachment(uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
+iNSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id)
 VALUES ('volume-attachment-uuid', 'volume-uuid', ?, 0, 0)`
 		if _, err := tx.ExecContext(ctx, vola, netNodeUUID); err != nil {
 			return err
@@ -1192,8 +1192,8 @@ func (s *machineSuite) TestMachineRemovalNotExistsSuccess(c *tc.C) {
 	// We rely on the worker to handle that fact.
 	row := s.DB().QueryRow(`
 SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, "removal-uuid",
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, "removal-uuid",
 	)
 
 	var (
@@ -2500,13 +2500,13 @@ func (s *machineSuite) createMachineFilesystem(
 	txn := func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id) VALUES (?, ?, ?, ?)
-		`, fsUUID, "0", 0, 0)
+`, fsUUID, "0", 0, 0)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO machine_filesystem (machine_uuid, filesystem_uuid) VALUES (?, ?)
-		`, machineUUID, fsUUID)
+`, machineUUID, fsUUID)
 		if err != nil {
 			return err
 		}
@@ -2524,13 +2524,13 @@ func (s *machineSuite) createMachineVolume(
 	txn := func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id) VALUES (?, ?, ?, ?)
-		`, volUUID, "0", 0, 0)
+`, volUUID, "0", 0, 0)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO machine_volume (machine_uuid, volume_uuid) VALUES (?, ?)
-		`, machineUUID, volUUID)
+`, machineUUID, volUUID)
 		if err != nil {
 			return err
 		}
@@ -2550,7 +2550,7 @@ func (s *machineSuite) createAttachedVolume(
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, ?, ?)
-		`, volUUID, "1", 0, 0)
+`, volUUID, "1", 0, 0)
 		if err != nil {
 			return err
 		}
@@ -2558,7 +2558,7 @@ VALUES (?, ?, ?, ?)
 INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, life_id,
                                        provision_scope_id, net_node_uuid)
 VALUES (?, ?, ?, ?, (SELECT net_node_uuid FROM machine WHERE uuid = ?))
-		`, vaUUID, volUUID, 0, 0, machineUUID)
+`, vaUUID, volUUID, 0, 0, machineUUID)
 		if err != nil {
 			return err
 		}
@@ -2578,7 +2578,7 @@ func (s *machineSuite) createAttachedFilesystem(
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES (?, ?, ?, ?)
-		`, fsUUID, "1", 0, 0)
+`, fsUUID, "1", 0, 0)
 		if err != nil {
 			return err
 		}
@@ -2587,7 +2587,7 @@ INSERT INTO storage_filesystem_attachment (uuid, storage_filesystem_uuid,
                                           life_id, provision_scope_id,
                                           net_node_uuid)
 VALUES (?, ?, ?, ?, (SELECT net_node_uuid FROM machine WHERE uuid = ?))
-		`, faUUID, fsUUID, 0, 0, machineUUID)
+`, faUUID, fsUUID, 0, 0, machineUUID)
 		if err != nil {
 			return err
 		}

@@ -109,7 +109,7 @@ INSERT INTO net_node (uuid) VALUES (?)
 
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO application (uuid, name, life_id, charm_uuid, space_uuid)
-VALUES (?, ?, ?, ?, ?),(?, ?, ?, ?, ?)`,
+VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`,
 			s.constants.fakeApplicationUUID1, s.constants.fakeApplicationName1, life.Alive, fakeCharmUUID, network.AlphaSpaceId,
 			s.constants.fakeApplicationUUID2, s.constants.fakeApplicationName2, life.Alive, fakeCharmUUID, network.AlphaSpaceId)
 		if err != nil {
@@ -118,7 +118,7 @@ VALUES (?, ?, ?, ?, ?),(?, ?, ?, ?, ?)`,
 
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO unit (uuid, name, life_id, application_uuid, charm_uuid, net_node_uuid)
-VALUES (?, ?, ?, ?, ?, ?),(?, ?, ?, ?, ?, ?),(?, ?, ?, ?, ?, ?)`,
+VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)`,
 			s.constants.fakeUnitUUID1, s.constants.fakeUnitName1, life.Alive, s.constants.fakeApplicationUUID1, fakeCharmUUID, fakeNetNodeUUID,
 			s.constants.fakeUnitUUID2, s.constants.fakeUnitName2, life.Alive, s.constants.fakeApplicationUUID1, fakeCharmUUID, fakeNetNodeUUID,
 			s.constants.fakeUnitUUID3, s.constants.fakeUnitName3, life.Alive, s.constants.fakeApplicationUUID1, fakeCharmUUID, fakeNetNodeUUID,
@@ -286,13 +286,13 @@ func (s *resourceSuite) TestDeleteApplicationResourcesErrorRemainingObjectStoreD
 		}
 		// Insert some data linked to the resource
 		if _, err := tx.Exec(`
-INSERT INTO object_store_metadata (uuid, sha_256, sha_384,size)
-VALUES ('store-uuid','','',0)`); err != nil {
+INSERT INTO object_store_metadata (uuid, sha_256, sha_384, size)
+VALUES ('store-uuid', '', '', 0)`); err != nil {
 			return errors.Capture(err)
 		}
 		if _, err := tx.Exec(`
 INSERT INTO resource_file_store (resource_uuid, store_uuid)
-VALUES (?,'store-uuid')`, input.UUID); err != nil {
+VALUES (?, 'store-uuid')`, input.UUID); err != nil {
 			return errors.Capture(err)
 		}
 		return
@@ -336,12 +336,12 @@ func (s *resourceSuite) TestDeleteApplicationResourcesErrorRemainingImageStoreDa
 		// Insert some data linked to the resource
 		if _, err := tx.Exec(`
 INSERT INTO resource_container_image_metadata_store (storage_key, registry_path)
-VALUES ('store-uuid','')`); err != nil {
+VALUES ('store-uuid', '')`); err != nil {
 			return errors.Capture(err)
 		}
 		if _, err := tx.Exec(`
 INSERT INTO resource_image_store (resource_uuid, store_storage_key)
-VALUES (?,'store-uuid')`, input.UUID); err != nil {
+VALUES (?, 'store-uuid')`, input.UUID); err != nil {
 			return errors.Capture(err)
 		}
 		return
@@ -897,8 +897,8 @@ func (s *resourceSuite) TestSetRepositoryResource(c *tc.C) {
 
 		// add the new charm
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO charm (uuid, reference_name, architecture_id, revision) VALUES (?, 'app',0, 1)
-	`, newCharmUUID)
+INSERT INTO charm (uuid, reference_name, architecture_id, revision) VALUES (?, 'app', 0, 1)
+`, newCharmUUID)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -1014,10 +1014,10 @@ VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
 	var linkedResourceUUIDs []string
 	rows, err := s.DB().QueryContext(c.Context(), `
 SELECT r.uuid
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 1`, s.constants.fakeApplicationUUID1)
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 1`, s.constants.fakeApplicationUUID1)
 	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
@@ -1136,9 +1136,9 @@ WHERE resource_uuid = ?`, resID).Scan(&foundStorageKey, &foundSize, &foundHash)
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT rrb.name, rrbt.name AS type
-FROM   resource_retrieved_by rrb
-JOIN   resource_retrieved_by_type rrbt ON rrb.retrieved_by_type_id = rrbt.id
-WHERE  resource_uuid = ?`, resID).Scan(&foundRetrievedBy, &foundRetrievedByType)
+FROM resource_retrieved_by rrb
+JOIN resource_retrieved_by_type rrbt ON rrb.retrieved_by_type_id = rrbt.id
+WHERE resource_uuid = ?`, resID).Scan(&foundRetrievedBy, &foundRetrievedByType)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(foundRetrievedByType, tc.Equals, string(retrievedByType))
@@ -1192,9 +1192,9 @@ WHERE resource_uuid = ?`, resID).Scan(&foundStoreUUID, &foundSize, &foundHash)
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT rrb.name, rrbt.name AS type
-FROM   resource_retrieved_by rrb
-JOIN   resource_retrieved_by_type rrbt ON rrb.retrieved_by_type_id = rrbt.id
-WHERE  resource_uuid = ?`, resID).Scan(&foundRetrievedBy, &foundRetrievedByType)
+FROM resource_retrieved_by rrb
+JOIN resource_retrieved_by_type rrbt ON rrb.retrieved_by_type_id = rrbt.id
+WHERE resource_uuid = ?`, resID).Scan(&foundRetrievedBy, &foundRetrievedByType)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(foundRetrievedByType, tc.Equals, string(retrievedByType))
@@ -1511,9 +1511,9 @@ func (s *resourceSuite) TestRecordStoredResourceWithRetrievedByNotSet(c *tc.C) {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT rrb.name, rrbt.name AS type
-FROM   resource_retrieved_by rrb
-JOIN   resource_retrieved_by_type rrbt ON rrb.retrieved_by_type_id = rrbt.id
-WHERE  resource_uuid = ?`, resourceUUID.String()).Scan(&retrievedBy, &retrievedByType)
+FROM resource_retrieved_by rrb
+JOIN resource_retrieved_by_type rrbt ON rrb.retrieved_by_type_id = rrbt.id
+WHERE resource_uuid = ?`, resourceUUID.String()).Scan(&retrievedBy, &retrievedByType)
 	})
 	c.Assert(err, tc.ErrorIs, sql.ErrNoRows)
 }
@@ -1608,7 +1608,7 @@ func (s *resourceSuite) TestSetUnitResourceUnsetExisting(c *tc.C) {
 
 		rows, err := tx.Query(`
 SELECT added_at, resource_uuid FROM unit_resource
-WHERE  unit_uuid = ?`, s.constants.fakeUnitUUID1)
+WHERE unit_uuid = ?`, s.constants.fakeUnitUUID1)
 		if err != nil {
 			return err
 		}
@@ -1673,14 +1673,14 @@ func (s *resourceSuite) TestSetUnitResourceReplacesResourceFromDifferentCharm(c 
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT resource_uuid, charm_resource_name
-FROM   unit_resource
-WHERE  unit_uuid = ?`, s.constants.fakeUnitUUID1).Scan(&resourceUUID, &name); err != nil {
+FROM unit_resource
+WHERE unit_uuid = ?`, s.constants.fakeUnitUUID1).Scan(&resourceUUID, &name); err != nil {
 			return err
 		}
 		return tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM   unit_resource
-WHERE  unit_uuid = ?`, s.constants.fakeUnitUUID1).Scan(&count)
+FROM unit_resource
+WHERE unit_uuid = ?`, s.constants.fakeUnitUUID1).Scan(&count)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(resourceUUID, tc.Equals, newResource.UUID)
@@ -1767,14 +1767,14 @@ func (s *resourceSuite) TestSetUnitResourceUnsetExistingOtherUnits(c *tc.C) {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRow(`
 SELECT added_at, resource_uuid FROM unit_resource
-WHERE  unit_uuid = ?`, s.constants.fakeUnitUUID1).Scan(&unit1AddedAt, &unit1ResUUID)
+WHERE unit_uuid = ?`, s.constants.fakeUnitUUID1).Scan(&unit1AddedAt, &unit1ResUUID)
 		if err != nil {
 			return err
 		}
 		// Check the second unit is unaffected
 		return tx.QueryRow(`
 SELECT added_at, resource_uuid FROM unit_resource
-WHERE  unit_uuid = ?`, s.constants.fakeUnitUUID2).Scan(&unit2AddedAt, &unit2ResUUID)
+WHERE unit_uuid = ?`, s.constants.fakeUnitUUID2).Scan(&unit2AddedAt, &unit2ResUUID)
 	})
 	c.Check(err, tc.ErrorIsNil, tc.Commentf("(Assert) cannot check unit_resource table: %v", errors.ErrorStack(err)))
 	c.Check(unit1ResUUID, tc.Equals, resID2)
@@ -2431,10 +2431,10 @@ func (s *resourceSuite) getPendingResource(c *tc.C, resID string) (pendingResour
 	retVal := pendingResourceTest{}
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
-SELECT r.uuid, r.charm_uuid, r.charm_resource_name, IFNULL(r.revision , 0) , rot.name
-FROM   resource r
-JOIN   resource_origin_type rot ON r.origin_type_id = rot.id
-WHERE  r.uuid = ?`, resID).Scan(&retVal.UUID, &retVal.CharmUUID, &retVal.Name, &retVal.Revision, &retVal.OriginType)
+SELECT r.uuid, r.charm_uuid, r.charm_resource_name, IFNULL(r.revision, 0), rot.name
+FROM resource r
+JOIN resource_origin_type rot ON r.origin_type_id = rot.id
+WHERE r.uuid = ?`, resID).Scan(&retVal.UUID, &retVal.CharmUUID, &retVal.Name, &retVal.Revision, &retVal.OriginType)
 	})
 
 	return retVal, err
@@ -2456,8 +2456,8 @@ func (s *resourceSuite) checkPendingApplication(c *tc.C, resID, expectedAppName 
 		// fetch resources
 		return tx.QueryRow(`
 SELECT application_name
-FROM   pending_application_resource
-WHERE  resource_uuid = ?`,
+FROM pending_application_resource
+WHERE resource_uuid = ?`,
 			resID,
 		).Scan(&obtainedAppName)
 	})
@@ -2470,8 +2470,8 @@ func (s *resourceSuite) checkResourceFileStore(c *tc.C, resID coreresource.UUID,
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT store_uuid
-FROM   resource_file_store
-WHERE  resource_uuid = ?`, resID).Scan(&foundStoreUUID)
+FROM resource_file_store
+WHERE resource_uuid = ?`, resID).Scan(&foundStoreUUID)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(foundStoreUUID, tc.Equals, expectedStoreUUID)
@@ -2482,8 +2482,8 @@ func (s *resourceSuite) checkResourceImageStore(c *tc.C, resID coreresource.UUID
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT store_storage_key
-FROM   resource_image_store
-WHERE  resource_uuid = ?`, resID).Scan(&foundStorageKey)
+FROM resource_image_store
+WHERE resource_uuid = ?`, resID).Scan(&foundStorageKey)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(foundStorageKey, tc.Equals, expectedStorageKey)
@@ -2577,8 +2577,8 @@ func (s *resourceSuite) checkApplicationResourceUpdated(c *tc.C, appID, expected
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT uuid, origin_type
-FROM   v_application_resource
-WHERE  application_uuid = ?
+FROM v_application_resource
+WHERE application_uuid = ?
 `, appID).Scan(&foundUUID, &foundOrigin)
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -3149,12 +3149,12 @@ func (s *resourceSuite) checkResourceSet(
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT uuid, created_at
-FROM   resource
-WHERE  charm_resource_name = ?
-AND    charm_uuid = ?
-AND    COALESCE(revision, '') = COALESCE(?, '') -- Revision may be NULL
-AND    origin_type_id = ?
-AND    state_id = 0 -- "available"
+FROM resource
+WHERE charm_resource_name = ?
+AND charm_uuid = ?
+AND COALESCE(revision, '') = COALESCE(?, '') -- Revision may be NULL
+AND origin_type_id = ?
+AND state_id = 0 -- "available"
 `, res.Name, charmUUID, NullableRevision(res.Revision), OriginTypeID(res.Origin.String())).Scan(
 			&uuid, &createdAt,
 		)

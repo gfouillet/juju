@@ -77,13 +77,13 @@ func (s *unitStateSuite) assertContainerAddressValues(
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `
 
-SELECT cc.provider_id, lld.name, a.address_value, a.type_id, a.origin_id,a.scope_id,a.config_type_id,s.cidr
+SELECT cc.provider_id, lld.name, a.address_value, a.type_id, a.origin_id, a.scope_id, a.config_type_id, s.cidr
 FROM k8s_pod AS cc
 JOIN unit AS u ON cc.unit_uuid = u.uuid
 JOIN link_layer_device AS lld ON lld.net_node_uuid = u.net_node_uuid
 JOIN ip_address AS a ON a.device_uuid = lld.uuid
 JOIN subnet AS s ON a.subnet_uuid = s.uuid
-WHERE u.name=?`,
+WHERE u.name = ?`,
 
 			unitName).Scan(
 			&gotProviderID,
@@ -121,7 +121,7 @@ SELECT ccp.port
 FROM k8s_pod cc
 JOIN unit u ON cc.unit_uuid = u.uuid
 JOIN k8s_pod_port ccp ON ccp.unit_uuid = cc.unit_uuid
-WHERE u.name=?`,
+WHERE u.name = ?`,
 
 			unitName)
 		if err != nil {
@@ -188,7 +188,7 @@ func (s *unitStateSuite) TestUpdateCAASUnitK8sPod(c *tc.C) {
 
 SELECT provider_id FROM k8s_pod cc
 JOIN unit u ON cc.unit_uuid = u.uuid
-WHERE u.name=?`,
+WHERE u.name = ?`,
 
 			unitNames[0].String()).Scan(&providerId)
 		if err != nil {
@@ -325,10 +325,10 @@ func (s *unitStateSuite) TestRegisterCAASUnitWithFQDN(c *tc.C) {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT fa.address, fa.scope_id, 1
-FROM   fqdn_address AS fa
-JOIN   net_node_fqdn_address AS nnfa ON nnfa.address_uuid = fa.uuid
-JOIN   unit AS u ON u.net_node_uuid = nnfa.net_node_uuid
-WHERE  u.name = ?`, "bar/0").Scan(&gotAddress, &gotScopeID, &gotLinked)
+FROM fqdn_address AS fa
+JOIN net_node_fqdn_address AS nnfa ON nnfa.address_uuid = fa.uuid
+JOIN unit AS u ON u.net_node_uuid = nnfa.net_node_uuid
+WHERE u.name = ?`, "bar/0").Scan(&gotAddress, &gotScopeID, &gotLinked)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(gotAddress, tc.Equals, fqdn)
@@ -404,10 +404,10 @@ func (s *unitStateSuite) TestUpdateCAASUnitSetsFQDN(c *tc.C) {
 		err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 			return tx.QueryRowContext(ctx, `
 SELECT fa.address, fa.scope_id, count(*)
-FROM   fqdn_address AS fa
-JOIN   net_node_fqdn_address AS nnfa ON nnfa.address_uuid = fa.uuid
-JOIN   unit AS un ON un.net_node_uuid = nnfa.net_node_uuid
-WHERE  un.name = ?`, unitNames[0].String()).Scan(&gotAddress, &gotScopeID, &gotCount)
+FROM fqdn_address AS fa
+JOIN net_node_fqdn_address AS nnfa ON nnfa.address_uuid = fa.uuid
+JOIN unit AS un ON un.net_node_uuid = nnfa.net_node_uuid
+WHERE un.name = ?`, unitNames[0].String()).Scan(&gotAddress, &gotScopeID, &gotCount)
 		})
 		c.Assert(err, tc.ErrorIsNil)
 		c.Check(gotAddress, tc.Equals, fqdn)
@@ -556,7 +556,7 @@ func (s *unitStateSuite) TestRegisterCAASUnitAlreadyExists(c *tc.C) {
 		err = tx.QueryRowContext(ctx, `
 SELECT provider_id FROM k8s_pod cc
 JOIN unit u ON cc.unit_uuid = u.uuid
-WHERE u.name=?`,
+WHERE u.name = ?`,
 			"foo/0").Scan(&providerId)
 		if err != nil {
 			return err
@@ -564,7 +564,7 @@ WHERE u.name=?`,
 
 		err = tx.QueryRowContext(ctx, `
 SELECT password_hash FROM unit
-WHERE unit.name=?`,
+WHERE unit.name = ?`,
 			"foo/0").Scan(&passwordHash)
 
 		return nil
@@ -788,7 +788,7 @@ func (s *unitStateSuite) TestAddIAASUnits(c *tc.C) {
 
 	var unitUUID string
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", unitName).Scan(&unitUUID)
+		err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", unitName).Scan(&unitUUID)
 		if err != nil {
 			return err
 		}
@@ -849,7 +849,7 @@ func (s *unitStateSuite) TestAddIAASUnitWithSpaceConstraint(c *tc.C) {
 
 	var unitUUID string
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", unitName).Scan(&unitUUID)
+		err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", unitName).Scan(&unitUUID)
 		if err != nil {
 			return err
 		}
@@ -898,7 +898,7 @@ func (s *unitStateSuite) TestAddCAASUnits(c *tc.C) {
 
 	var unitUUID string
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", unitName).Scan(&unitUUID)
+		err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", unitName).Scan(&unitUUID)
 		if err != nil {
 			return err
 		}
@@ -1076,7 +1076,7 @@ func (s *unitStateSuite) TestUpdateUnitCharm(c *tc.C) {
 
 	var gotUUID string
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT charm_uuid FROM unit WHERE uuid=?", unitUUID).Scan(&gotUUID)
+		err := tx.QueryRowContext(ctx, "SELECT charm_uuid FROM unit WHERE uuid = ?", unitUUID).Scan(&gotUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1248,9 +1248,9 @@ VALUES ('stale-resource', ?, 'stale', ?),
 	var mismatchedResourceCount int
 	rows, err := s.DB().QueryContext(c.Context(), `
 SELECT unit_uuid, charm_resource_name
-FROM   unit_resource
+FROM unit_resource
 ORDER BY unit_uuid, charm_resource_name
-	`)
+`)
 	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
@@ -1262,11 +1262,11 @@ ORDER BY unit_uuid, charm_resource_name
 	c.Assert(rows.Err(), tc.ErrorIsNil)
 	err = s.DB().QueryRowContext(c.Context(), `
 SELECT COUNT(*)
-FROM   unit_resource AS ur
-JOIN   resource AS r ON r.uuid = ur.resource_uuid
-JOIN   unit AS u ON u.uuid = ur.unit_uuid
-WHERE  ur.unit_uuid = ?
-AND    r.charm_uuid != u.charm_uuid
+FROM unit_resource AS ur
+JOIN resource AS r ON r.uuid = ur.resource_uuid
+JOIN unit AS u ON u.uuid = ur.unit_uuid
+WHERE ur.unit_uuid = ?
+AND r.charm_uuid != u.charm_uuid
 `, updatedUnitUUID.String()).Scan(&mismatchedResourceCount)
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(resourcesByUnit, tc.DeepEquals, map[string][]string{
@@ -1296,7 +1296,7 @@ func (s *unitStateSuite) TestUpdateUnitCharmWithNewStorage(c *tc.C) {
 	var currentCharm string
 	err := s.DB().QueryRowContext(
 		c.Context(),
-		"SELECT charm_uuid FROM unit WHERE uuid=?",
+		"SELECT charm_uuid FROM unit WHERE uuid = ?",
 		unitUUID.String(),
 	).Scan(&currentCharm)
 	c.Assert(err, tc.ErrorIsNil)
@@ -1399,7 +1399,7 @@ func (s *unitStateSuite) TestUpdateUnitCharmWithNewStorage(c *tc.C) {
 	var oldDirectiveCount int
 	err = s.DB().QueryRowContext(
 		c.Context(),
-		"SELECT count(*) FROM unit_storage_directive WHERE unit_uuid=? AND charm_uuid=?",
+		"SELECT count(*) FROM unit_storage_directive WHERE unit_uuid = ? AND charm_uuid = ?",
 		unitUUID.String(),
 		currentCharm,
 	).Scan(&oldDirectiveCount)
@@ -1431,7 +1431,7 @@ func (s *unitStateSuite) TestUpdateUnitCharmWithNewStorage(c *tc.C) {
 		`SELECT count(*)
 			 FROM storage_instance si
 			 JOIN storage_unit_owner suo ON suo.storage_instance_uuid = si.uuid
-			 WHERE suo.unit_uuid=? AND si.storage_name='st2'`,
+			 WHERE suo.unit_uuid = ? AND si.storage_name = 'st2'`,
 		unitUUID.String(),
 	).Scan(&st2InstanceCount)
 	c.Assert(err, tc.ErrorIsNil)
@@ -1460,7 +1460,7 @@ func (s *unitStateSuite) TestGetUnitStorageRefreshArgsNoStorageDirectives(c *tc.
 	// Retrieve the current charm UUID and net node UUID for the unit.
 	var currentCharmUUID, netNodeUUID string
 	err := s.DB().QueryRowContext(c.Context(),
-		"SELECT charm_uuid, net_node_uuid FROM unit WHERE uuid=?",
+		"SELECT charm_uuid, net_node_uuid FROM unit WHERE uuid = ?",
 		unitUUID.String(),
 	).Scan(&currentCharmUUID, &netNodeUUID)
 	c.Assert(err, tc.ErrorIsNil)
@@ -1507,7 +1507,7 @@ func (s *unitStateSuite) TestGetUnitStorageRefreshArgs(c *tc.C) {
 	// Retrieve the current charm UUID and net node UUID for the unit.
 	var currentCharmUUID, netNodeUUID string
 	err := s.DB().QueryRowContext(c.Context(),
-		"SELECT charm_uuid, net_node_uuid FROM unit WHERE uuid=?",
+		"SELECT charm_uuid, net_node_uuid FROM unit WHERE uuid = ?",
 		unitUUID.String(),
 	).Scan(&currentCharmUUID, &netNodeUUID)
 	c.Assert(err, tc.ErrorIsNil)
@@ -2045,7 +2045,7 @@ func (s *unitStateSuite) TestGetUnitMachineNameIsDead(c *tc.C) {
 func (s *unitStateSuite) assertApplicationWorkloadVersion(c *tc.C, appID coreapplication.UUID, expected string) {
 	var version string
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT version FROM application_workload_version WHERE application_uuid=?", appID).Scan(&version)
+		err := tx.QueryRowContext(ctx, "SELECT version FROM application_workload_version WHERE application_uuid = ?", appID).Scan(&version)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -2285,7 +2285,7 @@ func (s *unitStateSuite) TestGetMachineUUIDAndNetNodeForName(c *tc.C) {
 				`
 INSERT INTO machine (uuid, name, net_node_uuid, life_id)
 VALUES (?, ?, ?, 1)
-			`,
+`,
 				machineUUID.String(), "10", netNodeUUID.String(),
 			)
 			return err
@@ -2377,7 +2377,7 @@ func (s *unitStateSuite) TestGetUnitNetNodeUUID(c *tc.C) {
 
 	var netNodeUUID string
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT net_node_uuid FROM unit WHERE uuid=?", unitUUID.String()).Scan(&netNodeUUID)
+		err := tx.QueryRowContext(ctx, "SELECT net_node_uuid FROM unit WHERE uuid = ?", unitUUID.String()).Scan(&netNodeUUID)
 		if err != nil {
 			return err
 		}
@@ -3212,7 +3212,7 @@ func (s *unitStateSuite) getUnitStorageDirectivesForCharm(
 			ctx,
 			`SELECT storage_name, storage_pool_uuid, size_mib, count
 			 FROM unit_storage_directive
-			 WHERE unit_uuid=? AND charm_uuid=?
+			 WHERE unit_uuid = ? AND charm_uuid = ?
 			 ORDER BY storage_name`,
 			unitUUID,
 			charmUUID,

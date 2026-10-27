@@ -38,9 +38,9 @@ INSERT INTO net_node (uuid) VALUES ($service.net_node_uuid)`, service{})
 	}
 
 	insertServiceStmt, err := st.Prepare(`
-INSERT INTO k8s_service (uuid, application_uuid, net_node_uuid,provider_id) 
-SELECT 
-    $service.uuid, 
+INSERT INTO k8s_service (uuid, application_uuid, net_node_uuid, provider_id)
+SELECT
+    $service.uuid,
     a.uuid AS application_uuid,
     $service.net_node_uuid,
     $service.provider_id

@@ -21,8 +21,8 @@ func (st *State) ResourceExists(ctx context.Context, resourceUUID string) (bool,
 	resourceID := entityUUID{UUID: resourceUUID}
 	stmt, err := st.Prepare(`
 SELECT uuid AS &entityUUID.uuid
-FROM   resource
-WHERE  uuid = $entityUUID.uuid
+FROM resource
+WHERE uuid = $entityUUID.uuid
 `, resourceID)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -56,22 +56,22 @@ func (st *State) DeleteResourceIfUnused(ctx context.Context, resourceUUID string
 	resourceID := entityUUID{UUID: resourceUUID}
 	selectUnusedStmt, err := st.Prepare(`
 SELECT r.uuid AS &entityUUID.uuid
-FROM   resource AS r
-WHERE  r.uuid = $entityUUID.uuid
-AND    NOT EXISTS (
+FROM resource AS r
+WHERE r.uuid = $entityUUID.uuid
+AND NOT EXISTS (
     SELECT 1
-    FROM   application_resource AS ar
-    WHERE  ar.resource_uuid = r.uuid
+    FROM application_resource AS ar
+    WHERE ar.resource_uuid = r.uuid
 )
-AND    NOT EXISTS (
+AND NOT EXISTS (
     SELECT 1
-    FROM   pending_application_resource AS par
-    WHERE  par.resource_uuid = r.uuid
+    FROM pending_application_resource AS par
+    WHERE par.resource_uuid = r.uuid
 )
-AND    NOT EXISTS (
+AND NOT EXISTS (
     SELECT 1
-    FROM   unit_resource AS ur
-    WHERE  ur.resource_uuid = r.uuid
+    FROM unit_resource AS ur
+    WHERE ur.resource_uuid = r.uuid
 )
 `, resourceID)
 	if err != nil {
@@ -80,8 +80,8 @@ AND    NOT EXISTS (
 
 	resourceExistsStmt, err := st.Prepare(`
 SELECT uuid AS &entityUUID.uuid
-FROM   resource
-WHERE  uuid = $entityUUID.uuid
+FROM resource
+WHERE uuid = $entityUUID.uuid
 `, resourceID)
 	if err != nil {
 		return false, errors.Capture(err)

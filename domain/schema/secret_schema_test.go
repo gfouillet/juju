@@ -56,7 +56,7 @@ func (s *secretSchemaSuite) TestModelChangeLogTriggersForSecretTables(c *tc.C) {
 	secretURI := coresecrets.NewURI()
 	s.assertExecSQL(c, `INSERT INTO secret (id) VALUES (?);`, secretURI.ID)
 	s.assertExecSQL(c, `
-INSERT INTO secret_metadata (secret_id, version, description, rotate_policy_id, create_time, update_time) 
+INSERT INTO secret_metadata (secret_id, version, description, rotate_policy_id, create_time, update_time)
 VALUES (?, 1, 'mySecret', 0, ?, ?);`,
 		secretURI.ID, now, now)
 	s.assertExecSQL(c, `UPDATE secret_metadata SET auto_prune = true WHERE secret_id = ?;`, secretURI.ID)
@@ -72,7 +72,7 @@ VALUES (?, 1, 'mySecret', 0, ?, ?);`,
 	s.assertChangeLogCount(c, 4, tableSecretRotation, 0)
 
 	s.assertExecSQL(c, `
-INSERT INTO secret_metadata (secret_id, version, description, rotate_policy_id,create_time,update_time) 
+INSERT INTO secret_metadata (secret_id, version, description, rotate_policy_id, create_time, update_time)
 VALUES (?, 1, 'mySecret', 0, ?, ?);`, secretURI.ID, now, now)
 	s.assertExecSQL(c, `INSERT INTO secret_rotation (secret_id, next_rotation_time) VALUES (?, datetime('now', '+1 day'));`, secretURI.ID)
 	s.assertExecSQL(c, `UPDATE secret_rotation SET next_rotation_time = datetime('now', '+2 day') WHERE secret_id = ?;`, secretURI.ID)
@@ -89,7 +89,7 @@ VALUES (?, 1, 'mySecret', 0, ?, ?);`, secretURI.ID, now, now)
 	s.assertChangeLogCount(c, 4, tableSecretRevisionObsolete, 0)
 
 	s.assertExecSQL(c, `
-INSERT INTO secret_revision (uuid, secret_id, revision, create_time, update_time) 
+INSERT INTO secret_revision (uuid, secret_id, revision, create_time, update_time)
 VALUES (?, ?, 1, ?, ?);`,
 		revisionUUID, secretURI.ID, now, now)
 	s.assertExecSQL(c, `INSERT INTO secret_revision_obsolete (revision_uuid) VALUES (?);`, revisionUUID)

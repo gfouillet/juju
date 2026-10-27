@@ -120,9 +120,9 @@ func (s *State) GetThirdPartyOffererModels(ctx context.Context) ([]modelmigratio
 
 	stmt, err := s.Prepare(`
 SELECT DISTINCT (offerer_controller_uuid, offerer_model_uuid) AS (&offererModel.*)
-FROM   application_remote_offerer
-WHERE  offerer_controller_uuid IS NOT NULL
-AND    offerer_controller_uuid != (SELECT controller_uuid FROM model)
+FROM application_remote_offerer
+WHERE offerer_controller_uuid IS NOT NULL
+AND offerer_controller_uuid != (SELECT controller_uuid FROM model)
 `, offererModel{})
 	if err != nil {
 		return nil, errors.Errorf("preparing retrieve offerer models statement: %w", err)
@@ -160,14 +160,14 @@ func (s *State) GetMigrationAgents(ctx context.Context) (modelmigrationinternal.
 
 	modelTypeStmt, err := s.Prepare(`
 SELECT &modelType.*
-FROM   model
+FROM model
 `, modelType{})
 	if err != nil {
 		return modelmigrationinternal.MigrationAgents{}, errors.Capture(err)
 	}
 	machineStmt, err := s.Prepare(`
 SELECT &agentName.name
-FROM   machine
+FROM machine
 `, agentName{})
 	if err != nil {
 		return modelmigrationinternal.MigrationAgents{}, errors.Capture(err)
@@ -176,9 +176,9 @@ FROM   machine
 	// CMR-source charm (charm_source.source_id = 2) and run no agent.
 	unitStmt, err := s.Prepare(`
 SELECT &agentName.name
-FROM   unit AS u
-JOIN   charm AS c ON c.uuid = u.charm_uuid
-WHERE  c.source_id < 2
+FROM unit AS u
+JOIN charm AS c ON c.uuid = u.charm_uuid
+WHERE c.source_id < 2
 `, agentName{})
 	if err != nil {
 		return modelmigrationinternal.MigrationAgents{}, errors.Capture(err)
@@ -249,8 +249,8 @@ func (s *State) IsModelImporting(ctx context.Context) (bool, error) {
 	arg := entityUUID{UUID: s.modelUUID.String()}
 	stmt, err := s.Prepare(`
 SELECT COUNT(*) AS &importGateCount.count
-FROM   model_migrating
-WHERE  model_uuid = $entityUUID.uuid
+FROM model_migrating
+WHERE model_uuid = $entityUUID.uuid
 `, arg, importGateCount{})
 	if err != nil {
 		return false, errors.Errorf("preparing importing status statement: %w", err)
@@ -281,7 +281,7 @@ func (s *State) DeleteModelImportingStatus(ctx context.Context) error {
 	stmt, err := s.Prepare(`
 DELETE FROM model_migrating
 WHERE model_uuid = $entityUUID.uuid
-	`, modelUUIDArg)
+`, modelUUIDArg)
 	if err != nil {
 		return errors.Errorf("preparing delete importing status statement: %w", err)
 	}
@@ -336,8 +336,8 @@ func (s *State) SetModelTargetAgentVersion(
 		PreviousVersion: preCondition}
 	setAgentVersionStmt, err := s.Prepare(`
 UPDATE agent_version
-SET    target_version = $setAgentVersionTarget.target_version
-WHERE  target_version = $setAgentVersionTarget.previous_version
+SET target_version = $setAgentVersionTarget.target_version
+WHERE target_version = $setAgentVersionTarget.previous_version
 `,
 		toVersionInput,
 	)

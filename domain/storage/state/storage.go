@@ -99,7 +99,7 @@ func (st *State) getStorageResourceTagInfoForModel(
 
 	resourceTagStmt, err := st.Prepare(`
 SELECT value AS &modelResourceTagInfo.resource_tags
-FROM   model_config
+FROM model_config
 WHERE  key = $modelConfigKey.key
 `,
 		dbVal, modelConfigKeyInput)

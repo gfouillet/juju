@@ -43,13 +43,13 @@ func (st *State) GetUnitRelationEndpointName(
 	}
 	stmt, err := st.Prepare(`
 SELECT cr.name AS &endpointName.name
-FROM   unit AS u
-JOIN   application_endpoint AS ae ON ae.application_uuid = u.application_uuid
-JOIN   relation_endpoint AS re
+FROM unit AS u
+JOIN application_endpoint AS ae ON ae.application_uuid = u.application_uuid
+JOIN relation_endpoint AS re
        ON re.endpoint_uuid = ae.uuid
-JOIN   charm_relation AS cr ON cr.uuid = ae.charm_relation_uuid
-WHERE  re.relation_uuid = $relationUnit.relation_uuid
-AND    u.uuid = $relationUnit.unit_uuid
+JOIN charm_relation AS cr ON cr.uuid = ae.charm_relation_uuid
+WHERE re.relation_uuid = $relationUnit.relation_uuid
+AND u.uuid = $relationUnit.unit_uuid
 `, endpointName{}, relationUnit{})
 	if err != nil {
 		return "", errors.Errorf("preparing relation endpoint name statement: %w", err)
@@ -103,24 +103,24 @@ WITH endpoint_binding AS (
     SELECT ae.application_uuid,
            cr.name,
            ae.space_uuid
-    FROM   application_endpoint AS ae
-    JOIN   charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
+    FROM application_endpoint AS ae
+    JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
     UNION ALL
     SELECT aee.application_uuid,
            ceb.name,
            aee.space_uuid
-    FROM   application_extra_endpoint AS aee
-    JOIN   charm_extra_binding AS ceb
+    FROM application_extra_endpoint AS aee
+    JOIN charm_extra_binding AS ceb
            ON aee.charm_extra_binding_uuid = ceb.uuid
 ),
 endpoint_space AS (
     SELECT eb.name AS endpoint_name,
            IFNULL(eb.space_uuid, a.space_uuid) AS space_uuid
-    FROM   endpoint_binding AS eb
-    JOIN   unit AS u ON eb.application_uuid = u.application_uuid
-    JOIN   application AS a ON u.application_uuid = a.uuid
-    WHERE  u.uuid = $entityUUID.uuid
-    AND    eb.name IN ($names[:])
+    FROM endpoint_binding AS eb
+    JOIN unit AS u ON eb.application_uuid = u.application_uuid
+    JOIN application AS a ON u.application_uuid = a.uuid
+    WHERE u.uuid = $entityUUID.uuid
+    AND eb.name IN ($names[:])
 ),
 ingress_candidate AS (
     SELECT es.endpoint_name,
@@ -130,15 +130,15 @@ ingress_candidate AS (
            urn.origin_id,
            urn.is_secondary,
            urn.device_type_id
-    FROM   endpoint_space AS es
-    JOIN   v_unit_relation_network AS urn
+    FROM endpoint_space AS es
+    JOIN v_unit_relation_network AS urn
            ON urn.unit_uuid = $entityUUID.uuid
           AND urn.space_uuid = es.space_uuid
 ),
 best_rank AS (
     SELECT endpoint_name, MIN(scope_rank) AS scope_rank
-    FROM   ingress_candidate
-    WHERE  scope_rank IS NOT NULL
+    FROM ingress_candidate
+    WHERE scope_rank IS NOT NULL
     GROUP BY endpoint_name
 ),
 selected_ingress AS (
@@ -148,16 +148,16 @@ selected_ingress AS (
            ic.origin_id,
            ic.is_secondary,
            ic.device_type_id
-    FROM   ingress_candidate AS ic
-    JOIN   best_rank USING (endpoint_name, scope_rank)
+    FROM ingress_candidate AS ic
+    JOIN best_rank USING (endpoint_name, scope_rank)
 ),
 lld AS (
     SELECT lld.uuid,
            lld.name,
            lld.mac_address,
            lldt.name AS device_type
-    FROM   link_layer_device AS lld
-    JOIN   link_layer_device_type AS lldt ON lld.device_type_id = lldt.id
+    FROM link_layer_device AS lld
+    JOIN link_layer_device_type AS lldt ON lld.device_type_id = lldt.id
 ),
 endpoint_address AS (
     SELECT es.endpoint_name,
@@ -176,18 +176,18 @@ endpoint_address AS (
            si.origin_id AS ingress_origin_id,
            si.is_secondary AS ingress_is_secondary,
            si.device_type_id AS ingress_device_type_id
-    FROM   endpoint_space AS es
-    JOIN   v_unit_relation_network AS urn
+    FROM endpoint_space AS es
+    JOIN v_unit_relation_network AS urn
            ON urn.unit_uuid = $entityUUID.uuid
           AND urn.space_uuid = es.space_uuid
-    JOIN   lld ON urn.device_uuid = lld.uuid
+    JOIN lld ON urn.device_uuid = lld.uuid
     LEFT JOIN selected_ingress AS si
            ON si.endpoint_name = es.endpoint_name
           AND si.device_uuid = urn.device_uuid
           AND si.address_value = urn.address_value
 )
 SELECT &endpointNetworkInfoRow.*
-FROM   endpoint_address
+FROM endpoint_address
 ORDER BY endpoint_name,
          CASE WHEN ingress_address_value IS NULL THEN 1 ELSE 0 END,
          ingress_device_type_id,
@@ -263,11 +263,11 @@ func (st *State) GetUnitFQDNs(ctx context.Context, unitUUID string) ([]string, e
 	ident := entityUUID{UUID: unitUUID}
 	stmt, err := st.Prepare(`
 SELECT fqa.address AS &fqdnAddress.address
-FROM   unit AS u
-JOIN   net_node_fqdn_address AS nnfa
+FROM unit AS u
+JOIN net_node_fqdn_address AS nnfa
        ON nnfa.net_node_uuid = u.net_node_uuid
-JOIN   fqdn_address AS fqa ON fqa.uuid = nnfa.address_uuid
-WHERE  u.uuid = $entityUUID.uuid
+JOIN fqdn_address AS fqa ON fqa.uuid = nnfa.address_uuid
+WHERE u.uuid = $entityUUID.uuid
 ORDER BY fqa.address
 `, fqdnAddress{}, entityUUID{})
 	if err != nil {
@@ -320,13 +320,13 @@ WITH candidate AS (
            urn.origin_id,
            urn.is_secondary,
            urn.device_type_id
-    FROM   v_unit_relation_network AS urn
-    WHERE  urn.unit_uuid = $entityUUID.uuid
+    FROM v_unit_relation_network AS urn
+    WHERE urn.unit_uuid = $entityUUID.uuid
 ),
 best_rank AS (
     SELECT MIN(scope_rank) AS scope_rank
-    FROM   candidate
-    WHERE  scope_rank IS NOT NULL
+    FROM candidate
+    WHERE scope_rank IS NOT NULL
 ),
 selected_ingress AS (
     SELECT c.address_value,
@@ -334,16 +334,16 @@ selected_ingress AS (
            c.origin_id,
            c.is_secondary,
            c.device_type_id
-    FROM   candidate AS c
-    JOIN   best_rank USING (scope_rank)
+    FROM candidate AS c
+    JOIN best_rank USING (scope_rank)
 ),
 lld AS (
     SELECT lld.uuid,
            lld.name,
            lld.mac_address,
            lldt.name AS device_type
-    FROM   link_layer_device AS lld
-    JOIN   link_layer_device_type AS lldt ON lld.device_type_id = lldt.id
+    FROM link_layer_device AS lld
+    JOIN link_layer_device_type AS lldt ON lld.device_type_id = lldt.id
 ),
 unit_address AS (
     SELECT urn.address_value,
@@ -361,15 +361,15 @@ unit_address AS (
            si.origin_id AS ingress_origin_id,
            si.is_secondary AS ingress_is_secondary,
            si.device_type_id AS ingress_device_type_id
-    FROM   v_unit_relation_network AS urn
-    JOIN   lld ON urn.device_uuid = lld.uuid
+    FROM v_unit_relation_network AS urn
+    JOIN lld ON urn.device_uuid = lld.uuid
     LEFT JOIN selected_ingress AS si
            ON si.device_uuid = urn.device_uuid
           AND si.address_value = urn.address_value
-    WHERE  urn.unit_uuid = $entityUUID.uuid
+    WHERE urn.unit_uuid = $entityUUID.uuid
 )
 SELECT &unitNetworkInfoRow.*
-FROM   unit_address
+FROM unit_address
 ORDER BY CASE WHEN ingress_address_value IS NULL THEN 1 ELSE 0 END,
          ingress_device_type_id,
          ingress_is_secondary, /* primary (0) before secondary (1) */
@@ -428,7 +428,7 @@ func (st *State) GetModelEgressSubnets(ctx context.Context) ([]string, error) {
 	egressSubnetsConfig := modelConfigEntry{Key: config.EgressSubnets}
 	stmt, err := st.Prepare(`
 SELECT &modelConfigEntry.value
-FROM   model_config
+FROM model_config
 WHERE  key = $modelConfigEntry.key
 `, modelConfigEntry{})
 	if err != nil {

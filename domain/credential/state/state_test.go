@@ -468,9 +468,9 @@ func (s *credentialSuite) TestModelsUsingCloudCredential(c *tc.C) {
 		result, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, name, qualifier, life_id, model_type_id, activated, cloud_uuid, cloud_credential_uuid)
 SELECT ?, ?, ?, 0, 0, true,
-	(SELECT uuid FROM cloud WHERE cloud.name="stratus"),
-	(SELECT uuid FROM cloud_credential cc WHERE cc.name="foobar")
-			`,
+	(SELECT uuid FROM cloud WHERE cloud.name = "stratus"),
+	(SELECT uuid FROM cloud_credential cc WHERE cc.name = "foobar")
+`,
 			modelUUID, name, "prod",
 		)
 		if err != nil {
@@ -601,9 +601,9 @@ func (s *credentialSuite) TestInvalidateModelCloudCredential(c *tc.C) {
 		result, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, name, qualifier, life_id, model_type_id, activated, cloud_uuid, cloud_credential_uuid)
 SELECT ?, ?, ?, 0, 0, true,
-	(SELECT uuid FROM cloud WHERE cloud.name="stratus"),
-	(SELECT uuid FROM cloud_credential cc WHERE cc.name="foobar")
-			`,
+	(SELECT uuid FROM cloud WHERE cloud.name = "stratus"),
+	(SELECT uuid FROM cloud_credential cc WHERE cc.name = "foobar")
+`,
 			modelUUID, name, "prod",
 		)
 		if err != nil {
@@ -661,7 +661,7 @@ func (s *credentialSuite) TestInvalidateModelCloudCredentialNotSet(c *tc.C) {
 		result, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, name, qualifier, life_id, model_type_id, activated, cloud_uuid, cloud_credential_uuid)
 SELECT ?, ?, ?, 0, 0, true,
-	(SELECT uuid FROM cloud WHERE cloud.name="stratus"),
+	(SELECT uuid FROM cloud WHERE cloud.name = "stratus"),
 	NULL
 `,
 			modelUUID, name, "prod",
@@ -714,7 +714,7 @@ func (s *credentialSuite) TestGetModelCredentialStatusNotSet(c *tc.C) {
 		result, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, name, qualifier, life_id, model_type_id, activated, cloud_uuid, cloud_credential_uuid)
 SELECT ?, ?, ?, 0, 0, true,
-	(SELECT uuid FROM cloud WHERE cloud.name="stratus"),
+	(SELECT uuid FROM cloud WHERE cloud.name = "stratus"),
 	NULL`,
 			modelUUID, name, "prod",
 		)
@@ -756,9 +756,9 @@ func (s *credentialSuite) TestGetModelCredentialValid(c *tc.C) {
 		result, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, name, qualifier, life_id, model_type_id, activated, cloud_uuid, cloud_credential_uuid)
 SELECT ?, ?, ?, 0, 0, true,
-	(SELECT uuid FROM cloud WHERE cloud.name="stratus"),
-	(SELECT uuid FROM cloud_credential cc WHERE cc.name="foobar")
-			`,
+	(SELECT uuid FROM cloud WHERE cloud.name = "stratus"),
+	(SELECT uuid FROM cloud_credential cc WHERE cc.name = "foobar")
+`,
 			modelUUID, name, "prod",
 		)
 		if err != nil {
@@ -805,9 +805,9 @@ func (s *credentialSuite) TestGetModelCredentialInvalid(c *tc.C) {
 		result, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, name, qualifier, life_id, model_type_id, activated, cloud_uuid, cloud_credential_uuid)
 SELECT ?, ?, ?, 0, 0, true,
-	(SELECT uuid FROM cloud WHERE cloud.name="stratus"),
-	(SELECT uuid FROM cloud_credential cc WHERE cc.name="foobar")
-			`,
+	(SELECT uuid FROM cloud WHERE cloud.name = "stratus"),
+	(SELECT uuid FROM cloud_credential cc WHERE cc.name = "foobar")
+`,
 			modelUUID, name, "prod",
 		)
 		if err != nil {

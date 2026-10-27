@@ -33,8 +33,8 @@ func (s *State) CheckCloudRegion(
 	arg := cloudArg{CloudName: cloudName, RegionName: regionName}
 	cloudStmt, err := s.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   cloud AS c
-WHERE  c.name = $cloudArg.cloud_name
+FROM cloud AS c
+WHERE c.name = $cloudArg.cloud_name
 LIMIT 1
 `, countResult{}, arg)
 	if err != nil {
@@ -42,10 +42,10 @@ LIMIT 1
 	}
 	regionStmt, err := s.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   cloud_region AS cr
-JOIN   cloud AS c ON cr.cloud_uuid = c.uuid
-WHERE  c.name = $cloudArg.cloud_name
-AND    cr.name = $cloudArg.region_name
+FROM cloud_region AS cr
+JOIN cloud AS c ON cr.cloud_uuid = c.uuid
+WHERE c.name = $cloudArg.cloud_name
+AND cr.name = $cloudArg.region_name
 LIMIT 1
 `, countResult{}, arg)
 	if err != nil {
@@ -89,10 +89,10 @@ func (s *State) GetDisabledUsers(ctx context.Context, names []string) ([]string,
 
 	stmt, err := s.Prepare(`
 SELECT vua.name AS &nameArg.name
-FROM   v_user_auth AS vua
-WHERE  vua.name IN ($nameList[:])
-AND    vua.removed = FALSE
-AND    COALESCE(vua.disabled, FALSE) = TRUE
+FROM v_user_auth AS vua
+WHERE vua.name IN ($nameList[:])
+AND vua.removed = FALSE
+AND COALESCE(vua.disabled, FALSE) = TRUE
 ORDER BY vua.name
 `, nameArg{}, nameList{})
 	if err != nil {
@@ -131,10 +131,10 @@ func (s *State) GetCredentialRevoked(
 	var result credentialRevoked
 	stmt, err := s.Prepare(`
 SELECT COALESCE(vcc.revoked, FALSE) AS &credentialRevoked.revoked
-FROM   v_cloud_credential AS vcc
-WHERE  vcc.cloud_name = $credentialKeyArg.cloud_name
-AND    vcc.owner_name = $credentialKeyArg.owner_name
-AND    vcc.name = $credentialKeyArg.name
+FROM v_cloud_credential AS vcc
+WHERE vcc.cloud_name = $credentialKeyArg.cloud_name
+AND vcc.owner_name = $credentialKeyArg.owner_name
+AND vcc.name = $credentialKeyArg.name
 LIMIT 1
 `, result, arg)
 	if err != nil {
@@ -172,8 +172,8 @@ func (s *State) SecretBackendExists(ctx context.Context, name string) (bool, err
 	arg := nameArg{Name: name}
 	stmt, err := s.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   secret_backend AS sb
-WHERE  sb.name = $nameArg.name
+FROM secret_backend AS sb
+WHERE sb.name = $nameArg.name
 LIMIT 1
 `, countResult{}, arg)
 	if err != nil {
@@ -207,8 +207,8 @@ func (s *State) CheckImportModelCollision(
 	nameArg := modelNameQualifierArg{Name: name, Qualifier: qualifier}
 	importStmt, err := s.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   model_migration_import AS mmi
-WHERE  mmi.model_uuid = $modelUUIDArg.model_uuid
+FROM model_migration_import AS mmi
+WHERE mmi.model_uuid = $modelUUIDArg.model_uuid
 LIMIT 1
 `, countResult{}, modelArg)
 	if err != nil {
@@ -216,8 +216,8 @@ LIMIT 1
 	}
 	modelStmt, err := s.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   model AS m
-WHERE  m.uuid = $modelUUIDArg.model_uuid
+FROM model AS m
+WHERE m.uuid = $modelUUIDArg.model_uuid
 LIMIT 1
 `, countResult{}, modelArg)
 	if err != nil {
@@ -225,8 +225,8 @@ LIMIT 1
 	}
 	namespaceStmt, err := s.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   model_namespace AS mn
-WHERE  mn.model_uuid = $modelUUIDArg.model_uuid
+FROM model_namespace AS mn
+WHERE mn.model_uuid = $modelUUIDArg.model_uuid
 LIMIT 1
 `, countResult{}, modelArg)
 	if err != nil {
@@ -234,9 +234,9 @@ LIMIT 1
 	}
 	nameStmt, err := s.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   model AS m
-WHERE  m.name = $modelNameQualifierArg.name
-AND    m.qualifier = $modelNameQualifierArg.qualifier
+FROM model AS m
+WHERE m.name = $modelNameQualifierArg.name
+AND m.qualifier = $modelNameQualifierArg.qualifier
 LIMIT 1
 `, countResult{}, nameArg)
 	if err != nil {
@@ -305,9 +305,9 @@ func (s *State) getImportClaim(
 SELECT mmi.source_migration_uuid AS &importClaimRow.source_migration_uuid,
        mmipt.type AS &importClaimRow.phase_type,
 	       mmi.updated_at AS &importClaimRow.updated_at
-FROM   model_migration_import AS mmi
-JOIN   model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
-WHERE  mmi.model_uuid = $modelUUIDArg.model_uuid
+FROM model_migration_import AS mmi
+JOIN model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
+WHERE mmi.model_uuid = $modelUUIDArg.model_uuid
 LIMIT 1
 `, row, arg)
 	if err != nil {
@@ -351,17 +351,17 @@ func (s *State) GetConflictingCloudImageMetadata(
 	}
 
 	stmt, err := s.Prepare(`
-SELECT cim.stream            AS &cloudImageRow.stream,
-       cim.region            AS &cloudImageRow.region,
-       cim.version           AS &cloudImageRow.version,
-       cim.virt_type         AS &cloudImageRow.virt_type,
+SELECT cim.stream AS &cloudImageRow.stream,
+       cim.region AS &cloudImageRow.region,
+       cim.version AS &cloudImageRow.version,
+       cim.virt_type AS &cloudImageRow.virt_type,
        cim.root_storage_type AS &cloudImageRow.root_storage_type,
-       cim.source            AS &cloudImageRow.source,
-       cim.image_id          AS &cloudImageRow.image_id,
-       a.name                AS &cloudImageRow.arch
-FROM   cloud_image_metadata AS cim
-JOIN   architecture AS a ON cim.architecture_id = a.id
-WHERE  cim.source = 'custom'
+       cim.source AS &cloudImageRow.source,
+       cim.image_id AS &cloudImageRow.image_id,
+       a.name AS &cloudImageRow.arch
+FROM cloud_image_metadata AS cim
+JOIN architecture AS a ON cim.architecture_id = a.id
+WHERE cim.source = 'custom'
 `, cloudImageRow{})
 	if err != nil {
 		return nil, errors.Capture(err)

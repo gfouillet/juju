@@ -139,7 +139,7 @@ func (s *baseSuite) newMachineVolume(c *tc.C) (domainstorage.VolumeUUID, string)
 	_, err := s.DB().Exec(`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 1)
-	`,
+`,
 		vsUUID.String(), vsID)
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -184,7 +184,7 @@ func (s *baseSuite) newModelFilesystem(c *tc.C) (
 	_, err := s.DB().Exec(`
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 0)
-	`,
+`,
 		fsUUID.String(), fsID)
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -235,7 +235,7 @@ func (s *baseSuite) newModelVolume(c *tc.C) (domainstorage.VolumeUUID, string) {
 	_, err := s.DB().Exec(`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 0)
-	`,
+`,
 		vsUUID.String(), vsID)
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -328,7 +328,7 @@ func (s *baseSuite) newStorageInstanceForCharmWithPool(
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().Exec(`
-INSERT INTO storage_instance(uuid, charm_name, storage_name, storage_id,
+INSERT INTO storage_instance (uuid, charm_name, storage_name, storage_id,
                              life_id, requested_size_mib, storage_pool_uuid,
                              storage_kind_id)
 VALUES (?, ?, ?, ?, 0, 100, ?, 1)
@@ -359,7 +359,7 @@ func (s *baseSuite) newStorageInstanceBlockKindForCharmWithPool(
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().Exec(`
-INSERT INTO storage_instance(uuid, charm_name, storage_name, storage_id,
+INSERT INTO storage_instance (uuid, charm_name, storage_name, storage_id,
                              life_id, requested_size_mib, storage_pool_uuid,
                              storage_kind_id)
 VALUES (?, ?, ?, ?, 0, 100, ?, 0)
@@ -474,7 +474,7 @@ func (s *baseSuite) newStorageOwner(
 	c *tc.C, storageInstanceUUID domainstorage.StorageInstanceUUID, ownerUUID coreunit.UUID,
 ) {
 	_, err := s.DB().Exec(`
-INSERT INTO storage_unit_owner(unit_uuid, storage_instance_uuid)
+INSERT INTO storage_unit_owner (unit_uuid, storage_instance_uuid)
 VALUES (?, ?)`, ownerUUID.String(), storageInstanceUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 }

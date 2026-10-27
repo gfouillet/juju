@@ -882,9 +882,9 @@ SELECT uuid, name FROM application WHERE name LIKE 'remote-%' AND name != ?`, of
 	err = runner.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT sruc.unit_name
-FROM   secret_remote_unit_consumer AS sruc
-JOIN   application app ON app.name = substr(sruc.unit_name, 1, instr(sruc.unit_name, '/')-1)
-WHERE  sruc.secret_id = ? AND app.uuid = ?`, secretID, syntheticUUID).Scan(&consumerUnit)
+FROM secret_remote_unit_consumer AS sruc
+JOIN application app ON app.name = substr(sruc.unit_name, 1, instr(sruc.unit_name, '/') - 1)
+WHERE sruc.secret_id = ? AND app.uuid = ?`, secretID, syntheticUUID).Scan(&consumerUnit)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(consumerUnit, tc.Equals, syntheticName+"/0")

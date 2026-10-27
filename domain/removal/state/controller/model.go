@@ -28,8 +28,8 @@ func (st *State) ModelExists(ctx context.Context, mUUID string) (bool, error) {
 	modelUUID := entityUUID{UUID: mUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   model
-WHERE  uuid = $entityUUID.uuid`, modelUUID)
+FROM model
+WHERE uuid = $entityUUID.uuid`, modelUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing model exists query: %w", err)
 	}
@@ -154,8 +154,8 @@ func (st *State) MarkMigratingModelAsDead(ctx context.Context, mUUID, updatedAt 
 	abort := migrationImportAbort{ModelUUID: mUUID, UpdatedAt: updatedAt}
 	markDeadStmt, err := st.Prepare(`
 UPDATE model
-SET    life_id = 2
-WHERE  uuid = $entityUUID.uuid`, modelUUID)
+SET life_id = 2
+WHERE uuid = $entityUUID.uuid`, modelUUID)
 	if err != nil {
 		return errors.Errorf("preparing migrating model life update: %w", err)
 	}
@@ -168,10 +168,10 @@ importing_phase AS (
     SELECT id FROM model_migration_import_phase_type WHERE type = 'importing'
 )
 UPDATE model_migration_import
-SET    phase_type_id = (SELECT id FROM aborting_phase),
-       updated_at    = $migrationImportAbort.updated_at
-WHERE  model_uuid = $migrationImportAbort.model_uuid
-AND    phase_type_id = (SELECT id FROM importing_phase)`, abort)
+SET phase_type_id = (SELECT id FROM aborting_phase),
+       updated_at = $migrationImportAbort.updated_at
+WHERE model_uuid = $migrationImportAbort.model_uuid
+AND phase_type_id = (SELECT id FROM importing_phase)`, abort)
 	if err != nil {
 		return errors.Errorf("preparing import claim abort transition: %w", err)
 	}
@@ -213,9 +213,9 @@ func (st *State) MarkModelAsDead(ctx context.Context, mUUID string) error {
 	modelUUID := entityUUID{UUID: mUUID}
 	updateStmt, err := st.Prepare(`
 UPDATE model
-SET    life_id = 2
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 1`, modelUUID)
+SET life_id = 2
+WHERE uuid = $entityUUID.uuid
+AND life_id = 1`, modelUUID)
 	if err != nil {
 		return errors.Errorf("preparing model life update: %w", err)
 	}
@@ -248,7 +248,7 @@ func (st *State) DeleteModel(ctx context.Context, mUUID string) error {
 
 	// Prepare query for deleting model row.
 	deleteModelStmt, err := st.Prepare(`
-DELETE FROM model 
+DELETE FROM model
 WHERE uuid = $entityUUID.uuid;
 `, modelUUIDParam)
 	if err != nil {
@@ -327,7 +327,7 @@ func (st *State) GetModelUUIDs(ctx context.Context) ([]string, error) {
 
 	stmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   model;
+FROM model;
 `, entityUUID{})
 	if err != nil {
 		return nil, errors.Errorf("preparing get model UUIDs query: %w", err)
@@ -357,8 +357,8 @@ func (st *State) getModelLife(ctx context.Context, tx *sqlair.TX, mUUID string) 
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   model
-WHERE  uuid = $entityUUID.uuid;`, model, modelUUID)
+FROM model
+WHERE uuid = $entityUUID.uuid;`, model, modelUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing model life query: %w", err)
 	}
@@ -377,8 +377,8 @@ func (st *State) isModelMigrating(ctx context.Context, tx *sqlair.TX, mUUID stri
 	modelUUID := entityUUID{UUID: mUUID}
 	checkStmt, err := st.Prepare(`
 SELECT COUNT(uuid) AS &count.count
-FROM   model_migration_import
-WHERE  model_uuid = $entityUUID.uuid;`, modelUUID, count{})
+FROM model_migration_import
+WHERE model_uuid = $entityUUID.uuid;`, modelUUID, count{})
 	if err != nil {
 		return false, errors.Errorf("preparing is migrating model query: %w", err)
 	}
@@ -400,9 +400,9 @@ func (st *State) migratingImportPhase(ctx context.Context, tx *sqlair.TX, mUUID 
 	modelUUID := entityUUID{UUID: mUUID}
 	stmt, err := st.Prepare(`
 SELECT mmipt.type AS &migrationImportPhase.phase
-FROM   model_migration_import AS mmi
-JOIN   model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
-WHERE  mmi.model_uuid = $entityUUID.uuid;`, modelUUID, migrationImportPhase{})
+FROM model_migration_import AS mmi
+JOIN model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
+WHERE mmi.model_uuid = $entityUUID.uuid;`, modelUUID, migrationImportPhase{})
 	if err != nil {
 		return false, "", errors.Errorf("preparing migrating import phase query: %w", err)
 	}

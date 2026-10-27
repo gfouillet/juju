@@ -197,8 +197,8 @@ SELECT uuid AS &operationResult.uuid,
        enqueued_at AS &operationResult.enqueued_at,
        started_at AS &operationResult.started_at,
        completed_at AS &operationResult.completed_at
-FROM   operation
-WHERE  operation_id = $operationID.operation_id
+FROM operation
+WHERE operation_id = $operationID.operation_id
 `
 	var op operationResult
 	stmt, err := st.Prepare(query, operationResult{}, ident)

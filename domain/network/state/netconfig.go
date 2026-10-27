@@ -33,8 +33,8 @@ func (st *State) IsMachineUnmanaged(ctx context.Context, machineUUID string) (bo
 
 	stmt, err := st.Prepare(`
 SELECT machine_uuid AS &entityUUID.uuid
-FROM   machine_manual
-WHERE  machine_uuid = $entityUUID.uuid`, mUUID)
+FROM machine_manual
+WHERE machine_uuid = $entityUUID.uuid`, mUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing manual machine statement: %w", err)
 	}
@@ -254,7 +254,7 @@ func (st *State) updateDNSSearchDomains(
 		return nil
 	}
 
-	stmt, err = st.Prepare("INSERT INTO link_layer_device_dns_domain(*) VALUES ($dnsSearchDomainRow.*)", rows[0])
+	stmt, err = st.Prepare("INSERT INTO link_layer_device_dns_domain (*) VALUES ($dnsSearchDomainRow.*)", rows[0])
 	if err != nil {
 		return errors.Errorf("preparing DNS search domain insert statement: %w", err)
 	}
@@ -283,7 +283,7 @@ func (st *State) updateDNSAddresses(ctx context.Context, tx *sqlair.TX, rows []d
 		return nil
 	}
 
-	stmt, err = st.Prepare("INSERT INTO link_layer_device_dns_address(*) VALUES ($dnsAddressRow.*)", rows[0])
+	stmt, err = st.Prepare("INSERT INTO link_layer_device_dns_address (*) VALUES ($dnsAddressRow.*)", rows[0])
 	if err != nil {
 		return errors.Errorf("preparing DNS address insert statement: %w", err)
 	}
@@ -583,10 +583,10 @@ func (st *State) deleteAddressesNotObserved(
 	retainedAddressUUIDs := uuids(transform.Slice(retainedAddresses, func(a ipAddressDML) string { return a.UUID }))
 
 	addrDML := `
-DELETE FROM ip_address 
-WHERE  net_node_uuid = $entityUUID.uuid
-AND    uuid NOT IN ($uuids[:])
-AND    origin_id = 0`
+DELETE FROM ip_address
+WHERE net_node_uuid = $entityUUID.uuid
+AND uuid NOT IN ($uuids[:])
+AND origin_id = 0`
 
 	addrStmt, err := st.Prepare(addrDML, nUUID, retainedAddressUUIDs)
 	if err != nil {
@@ -611,13 +611,13 @@ func (st *State) deleteDevicesNotObserved(
 
 	devSQL := `
 SELECT d.uuid AS &entityUUID.uuid
-FROM   link_layer_device d
+FROM link_layer_device d
        LEFT JOIN provider_link_layer_device p ON d.uuid = p.device_uuid
        LEFT JOIN ip_address a ON d.uuid = a.device_uuid
-WHERE  d.net_node_uuid = $entityUUID.uuid
-AND    p.device_uuid IS NULL
-AND    a.device_uuid IS NULL
-AND    d.uuid NOT IN ($uuids[:])`
+WHERE d.net_node_uuid = $entityUUID.uuid
+AND p.device_uuid IS NULL
+AND a.device_uuid IS NULL
+AND d.uuid NOT IN ($uuids[:])`
 
 	devStmt, err := st.Prepare(devSQL, nUUID, retainedDevices)
 	if err != nil {
@@ -642,8 +642,8 @@ AND    d.uuid NOT IN ($uuids[:])`
 	// - their child devices are also being deleted.
 	parentSQL := `
 SELECT &linkLayerDeviceParent.*
-FROM   link_layer_device_parent
-WHERE  parent_uuid IN ($uuids[:])`
+FROM link_layer_device_parent
+WHERE parent_uuid IN ($uuids[:])`
 
 	parentStmt, err := st.Prepare(parentSQL, linkLayerDeviceParent{}, uuids(deletionCandidates))
 	if err != nil {

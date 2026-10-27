@@ -336,8 +336,8 @@ func insertMachineInstance(
 	if hc.AvailabilityZone != nil && *hc.AvailabilityZone != "" {
 		retrieveAZUUID := `
 SELECT &availabilityZoneName.uuid
-FROM   availability_zone
-WHERE  availability_zone.name = $availabilityZoneName.name
+FROM availability_zone
+WHERE availability_zone.name = $availabilityZoneName.name
 `
 
 		azName := availabilityZoneName{Name: *hc.AvailabilityZone}
@@ -548,12 +548,12 @@ VALUES ($machinePlacement.*);
 // We prepare these statements globally to avoid having them prepared inside
 // a transaction.
 var (
-	insertConstraintStmt         = sqlair.MustPrepare(`INSERT INTO "constraint"(*) VALUES ($setConstraint.*)`, setConstraint{})
-	insertConstraintTagsStmt     = sqlair.MustPrepare(`INSERT INTO constraint_tag(*) VALUES ($setConstraintTag.*)`, setConstraintTag{})
-	insertConstraintSpacesStmt   = sqlair.MustPrepare(`INSERT INTO constraint_space(*) VALUES ($setConstraintSpace.*)`, setConstraintSpace{})
-	insertConstraintZonesStmt    = sqlair.MustPrepare(`INSERT INTO constraint_zone(*) VALUES ($setConstraintZone.*)`, setConstraintZone{})
+	insertConstraintStmt         = sqlair.MustPrepare(`INSERT INTO "constraint" (*) VALUES ($setConstraint.*)`, setConstraint{})
+	insertConstraintTagsStmt     = sqlair.MustPrepare(`INSERT INTO constraint_tag (*) VALUES ($setConstraintTag.*)`, setConstraintTag{})
+	insertConstraintSpacesStmt   = sqlair.MustPrepare(`INSERT INTO constraint_space (*) VALUES ($setConstraintSpace.*)`, setConstraintSpace{})
+	insertConstraintZonesStmt    = sqlair.MustPrepare(`INSERT INTO constraint_zone (*) VALUES ($setConstraintZone.*)`, setConstraintZone{})
 	selectContainerTypeIDStmt    = sqlair.MustPrepare(`SELECT &containerTypeID.id FROM container_type WHERE value = $containerTypeVal.value`, containerTypeID{}, containerTypeVal{})
-	insertMachineConstraintsStmt = sqlair.MustPrepare(`INSERT INTO machine_constraint(*) VALUES ($setMachineConstraint.*)`, setMachineConstraint{})
+	insertMachineConstraintsStmt = sqlair.MustPrepare(`INSERT INTO machine_constraint (*) VALUES ($setMachineConstraint.*)`, setMachineConstraint{})
 	selectSpaceStmt              = sqlair.MustPrepare(`SELECT &entityUUID.uuid FROM space WHERE name = $entityName.name`, entityUUID{}, entityName{})
 )
 
@@ -766,9 +766,9 @@ func validateMachineSatisfiesConstraints(
 	cons constraints.Constraints,
 ) error {
 	query := `
-SELECT    &instanceDataResult.arch
-FROM      v_hardware_characteristics AS v
-WHERE     v.machine_uuid = $instanceDataResult.machine_uuid`
+SELECT &instanceDataResult.arch
+FROM v_hardware_characteristics AS v
+WHERE v.machine_uuid = $instanceDataResult.machine_uuid`
 	instanceData := instanceDataResult{
 		MachineUUID: machineUUID,
 	}

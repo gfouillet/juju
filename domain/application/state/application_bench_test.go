@@ -79,7 +79,7 @@ func newApplicationBenchmarkState(
 	b.Cleanup(func() { _ = db.Close() })
 	db.SetMaxOpenConns(1)
 
-	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
 		b.Fatal(err)
 	}
 
@@ -316,8 +316,8 @@ func (st *State) setApplicationConstraintsWithStatePrepare(
 
 	selectConstraintUUIDQuery := `
 SELECT &constraintUUID.*
-FROM   application_constraint
-WHERE  application_uuid = $applicationUUID.application_uuid
+FROM application_constraint
+WHERE application_uuid = $applicationUUID.application_uuid
 `
 	selectConstraintUUIDStmt, err := st.Prepare(selectConstraintUUIDQuery, constraintUUID{}, applicationUUID{})
 	if err != nil {
@@ -355,14 +355,14 @@ WHERE  application_uuid = $applicationUUID.application_uuid
 	}
 
 	insertConstraintsQuery := `
-INSERT INTO "constraint"(*)
+INSERT INTO "constraint" (*)
 VALUES ($setConstraint.*)
 ON CONFLICT (uuid) DO UPDATE SET
     arch = excluded.arch,
     cpu_cores = excluded.cpu_cores,
     cpu_power = excluded.cpu_power,
     mem = excluded.mem,
-    root_disk= excluded.root_disk,
+    root_disk = excluded.root_disk,
     root_disk_source = excluded.root_disk_source,
     instance_role = excluded.instance_role,
     instance_type = excluded.instance_type,
@@ -378,26 +378,26 @@ ON CONFLICT (uuid) DO UPDATE SET
 		return errors.Errorf("preparing insert constraints query: %w", err)
 	}
 
-	insertConstraintTagsQuery := `INSERT INTO constraint_tag(*) VALUES ($setConstraintTag.*)`
+	insertConstraintTagsQuery := `INSERT INTO constraint_tag (*) VALUES ($setConstraintTag.*)`
 	insertConstraintTagsStmt, err := st.Prepare(insertConstraintTagsQuery, setConstraintTag{})
 	if err != nil {
 		return errors.Errorf("preparing insert constraint tags query: %w", err)
 	}
 
-	insertConstraintSpacesQuery := `INSERT INTO constraint_space(*) VALUES ($setConstraintSpace.*)`
+	insertConstraintSpacesQuery := `INSERT INTO constraint_space (*) VALUES ($setConstraintSpace.*)`
 	insertConstraintSpacesStmt, err := st.Prepare(insertConstraintSpacesQuery, setConstraintSpace{})
 	if err != nil {
 		return errors.Capture(err)
 	}
 
-	insertConstraintZonesQuery := `INSERT INTO constraint_zone(*) VALUES ($setConstraintZone.*)`
+	insertConstraintZonesQuery := `INSERT INTO constraint_zone (*) VALUES ($setConstraintZone.*)`
 	insertConstraintZonesStmt, err := st.Prepare(insertConstraintZonesQuery, setConstraintZone{})
 	if err != nil {
 		return errors.Capture(err)
 	}
 
 	insertAppConstraintsQuery := `
-INSERT INTO application_constraint(*)
+INSERT INTO application_constraint (*)
 VALUES ($setApplicationConstraint.*)
 ON CONFLICT (application_uuid) DO NOTHING
 `

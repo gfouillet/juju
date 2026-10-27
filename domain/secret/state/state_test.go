@@ -53,7 +53,7 @@ func (s *stateSuite) setupModel(c *tc.C) string {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, 'test', 'prod', 'iaas', 'fluffy', 'ec2')
-		`, modelUUID.String(), coretesting.ControllerTag.Id())
+`, modelUUID.String(), coretesting.ControllerTag.Id())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -949,7 +949,7 @@ VALUES (?, ?, 0);
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO charm_metadata (charm_uuid, name)
 VALUES (?, ?);
-		`, charmUUID, appName)
+`, charmUUID, appName)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -1746,7 +1746,7 @@ func (s *stateSuite) TestSaveSecretConsumerUnitNotExists(c *tc.C) {
 func (s *stateSuite) saveSecretConsumer(c *tc.C, uri *coresecrets.URI, label string, revision int, consumerUUID string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO secret_unit_consumer(secret_id, unit_uuid, label, source_model_uuid, current_revision)
+INSERT INTO secret_unit_consumer (secret_id, unit_uuid, label, source_model_uuid, current_revision)
 VALUES (?, ?, ?, ?, ?)`, uri.ID, consumerUUID, label, uri.SourceUUID, revision)
 		return err
 	})
@@ -1755,14 +1755,14 @@ VALUES (?, ?, ?, ?, ?)`, uri.ID, consumerUUID, label, uri.SourceUUID, revision)
 
 func (s *stateSuite) updateRemoteSecretRevision(c *tc.C, uri *coresecrets.URI, latestRevision int, appUUID string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO secret (id) VALUES (?) ON CONFLICT(id) DO NOTHING`, uri.ID)
+		_, err := tx.ExecContext(ctx, `INSERT INTO secret (id) VALUES (?) ON CONFLICT (id) DO NOTHING`, uri.ID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO secret_reference (secret_id, latest_revision, owner_application_uuid, updated_at) VALUES (?, ?, ?, ?)
-ON CONFLICT(secret_id) DO UPDATE SET
-    latest_revision=excluded.latest_revision
+ON CONFLICT (secret_id) DO UPDATE SET
+    latest_revision = excluded.latest_revision
 `, uri.ID, latestRevision, appUUID, time.Now().UTC())
 		return err
 	})
@@ -1773,8 +1773,8 @@ func (s *stateSuite) saveSecretRemoteConsumer(c *tc.C, uri *coresecrets.URI, uni
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO secret_remote_unit_consumer (secret_id, unit_name, current_revision) VALUES (?, ?, ?)
-ON CONFLICT(secret_id, unit_name) DO UPDATE SET
-    current_revision=excluded.current_revision
+ON CONFLICT (secret_id, unit_name) DO UPDATE SET
+    current_revision = excluded.current_revision
 `,
 			uri.ID, unitName, currentRevision)
 		return err
@@ -1853,12 +1853,12 @@ func (s *stateSuite) TestGetSecretConsumerMigrated(c *tc.C) {
 	uri := coresecrets.NewURI().WithSource("some-other-model")
 
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO secret (id) VALUES (?) ON CONFLICT(id) DO NOTHING`, uri.ID)
+		_, err := tx.ExecContext(ctx, `INSERT INTO secret (id) VALUES (?) ON CONFLICT (id) DO NOTHING`, uri.ID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO secret_reference (secret_id, latest_revision, owner_application_uuid, updated_at, migrated) 
+INSERT INTO secret_reference (secret_id, latest_revision, owner_application_uuid, updated_at, migrated)
 VALUES (?, ?, ?, ?, ?)`, uri.ID, 666, appUUID, time.Now().UTC(), true)
 		return err
 	})
@@ -2733,7 +2733,7 @@ func (s *stateSuite) TestUpdateSecretNoRotate(c *tc.C) {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		row := tx.QueryRowContext(ctx, `
 SELECT count(*) FROM secret_rotation WHERE secret_id = ?
-		`, uri.ID)
+`, uri.ID)
 		if err := row.Scan(&count); err != nil {
 			return err
 		}
@@ -2922,7 +2922,7 @@ func (s *stateSuite) addRelation(c *tc.C) corerelation.UUID {
 	relationUUID := tc.Must(c, corerelation.NewUUID)
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO relation (uuid, life_id, relation_id, scope_id) 
+INSERT INTO relation (uuid, life_id, relation_id, scope_id)
 VALUES (?, 0, ?, 0)
 `, relationUUID, s.relationCount)
 		return err
@@ -2947,7 +2947,7 @@ func (s *stateSuite) addApplicationEndpoint(c *tc.C, applicationUUID string,
 	applicationEndpointUUID := uuid.MustNewUUID().String()
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid,space_uuid)
+INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid, space_uuid)
 VALUES (?, ?, ?, ?)
 `, applicationEndpointUUID, applicationUUID, charmRelationUUID, network.AlphaSpaceId)
 		return err

@@ -94,7 +94,7 @@ VALUES (?, ?, ?, ?)
 // addAgentBinaryStore.
 func (s *controllerStateSuite) addAgentBinaryStore(c *tc.C, version semversion.Number, architecture domainagentbinary.Architecture, storeUUID objectstore.UUID) {
 	_, err := s.DB().Exec(`
-INSERT INTO agent_binary_store(version, architecture_id, object_store_uuid) VALUES(?, ?, ?)
+INSERT INTO agent_binary_store (version, architecture_id, object_store_uuid) VALUES (?, ?, ?)
 `, version.String(), int(architecture), storeUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 }

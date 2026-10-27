@@ -172,7 +172,7 @@ func (st *State) ensureUnitStateRecord(ctx context.Context, tx *sqlair.TX, id en
 		return errors.Errorf("preparing state row query: %w", err)
 	}
 
-	q = "INSERT INTO unit_state(unit_uuid) values ($entityUUID.uuid)"
+	q = "INSERT INTO unit_state (unit_uuid) values ($entityUUID.uuid)"
 	insertStmt, err := st.Prepare(q, id)
 	if err != nil {
 		return errors.Errorf("preparing state insert query: %w", err)
@@ -249,7 +249,7 @@ func (st *State) setUnitStateCharm(ctx context.Context, tx *sqlair.TX, id entity
 
 	keyVals := makeUnitCharmStateKeyVals(id, state)
 	if len(keyVals) != 0 {
-		q = "INSERT INTO unit_state_charm(*) VALUES ($unitCharmStateKeyVal.*)"
+		q = "INSERT INTO unit_state_charm (*) VALUES ($unitCharmStateKeyVal.*)"
 		iStmt, err := st.Prepare(q, keyVals[0])
 		if err != nil {
 			return errors.Errorf("preparing charm state insert query: %w", err)
@@ -291,8 +291,8 @@ func (st *State) setUnitStateRelation(ctx context.Context, tx *sqlair.TX, id ent
 	// commit action to indicate that the unit is still in such relations.
 	q = `
 SELECT r.relation_id AS &unitRelationStateKeyVal.key
-FROM   relation AS r
-WHERE  r.relation_id IN ($relationIDs[:])`
+FROM relation AS r
+WHERE r.relation_id IN ($relationIDs[:])`
 	rStmt, err := st.Prepare(q, ids, unitRelationStateKeyVal{})
 	if err != nil {
 		return errors.Errorf("preparing relation existence query: %w", err)
@@ -313,7 +313,7 @@ WHERE  r.relation_id IN ($relationIDs[:])`
 		keyVals[i].Value = state[keyVals[i].Key]
 	}
 
-	q = "INSERT INTO unit_state_relation(*) VALUES ($unitRelationStateKeyVal.*)"
+	q = "INSERT INTO unit_state_relation (*) VALUES ($unitRelationStateKeyVal.*)"
 	iStmt, err := st.Prepare(q, unitRelationStateKeyVal{})
 	if err != nil {
 		return errors.Errorf("preparing relation state insert query: %w", err)

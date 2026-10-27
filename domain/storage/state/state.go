@@ -26,7 +26,7 @@ func (s *State) checkUnitExists(
 
 	entityUUIDInput := entityUUID{UUID: uuid.String()}
 	stmt, err := s.Prepare(
-		"SELECT &entityUUID.* FROM unit WHERE  uuid = $entityUUID.uuid",
+		"SELECT &entityUUID.* FROM unit WHERE uuid = $entityUUID.uuid",
 		entityUUIDInput,
 	)
 	if err != nil {

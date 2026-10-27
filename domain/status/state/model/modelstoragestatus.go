@@ -50,14 +50,14 @@ WITH filesystems AS (
            CAST(NULL AS TEXT) AS v_provider_id,
            bsv.provision_scope_id AS v_scope,
            CAST(NULL AS TEXT) AS v_status
-    FROM       storage_filesystem AS sf
-    LEFT JOIN  storage_filesystem_status AS sfs ON sfs.filesystem_uuid = sf.uuid
-    LEFT JOIN  storage_filesystem_status_value AS sfsv ON sfsv.id = sfs.status_id
-    LEFT JOIN  storage_instance_filesystem AS sif ON sif.storage_filesystem_uuid = sf.uuid
-    LEFT JOIN  storage_instance_volume AS siv ON siv.storage_instance_uuid = sif.storage_instance_uuid
-    LEFT JOIN  storage_volume AS bsv ON bsv.uuid = siv.storage_volume_uuid
-    AND        bsv.life_id < 2
-    WHERE      sf.life_id < 2
+    FROM storage_filesystem AS sf
+    LEFT JOIN storage_filesystem_status AS sfs ON sfs.filesystem_uuid = sf.uuid
+    LEFT JOIN storage_filesystem_status_value AS sfsv ON sfsv.id = sfs.status_id
+    LEFT JOIN storage_instance_filesystem AS sif ON sif.storage_filesystem_uuid = sf.uuid
+    LEFT JOIN storage_instance_volume AS siv ON siv.storage_instance_uuid = sif.storage_instance_uuid
+    LEFT JOIN storage_volume AS bsv ON bsv.uuid = siv.storage_volume_uuid
+    AND bsv.life_id < 2
+    WHERE sf.life_id < 2
 ), volumes AS (
     SELECT CAST(NULL AS TEXT) AS fs_id,
            CAST(NULL AS TEXT) AS fs_provider_id,
@@ -67,10 +67,10 @@ WITH filesystems AS (
            sv.provider_id AS v_provider_id,
            sv.provision_scope_id AS v_scope,
            svsv.status AS v_status
-    FROM       storage_volume AS sv
-    LEFT JOIN  storage_volume_status AS svs ON svs.volume_uuid = sv.uuid
-    LEFT JOIN  storage_volume_status_value AS svsv ON svsv.id = svs.status_id
-    WHERE      sv.life_id < 2
+    FROM storage_volume AS sv
+    LEFT JOIN storage_volume_status AS svs ON svs.volume_uuid = sv.uuid
+    LEFT JOIN storage_volume_status_value AS svsv ON svsv.id = svs.status_id
+    WHERE sv.life_id < 2
 )
 SELECT fs_id AS &modelStorageStatusRow.filesystem_id,
        fs_provider_id AS &modelStorageStatusRow.filesystem_provider_id,

@@ -1761,8 +1761,8 @@ func (s *volumeSuite) changeVolumeLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_volume
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid.String())
 	c.Assert(err, tc.ErrorIsNil)
@@ -1775,8 +1775,8 @@ func (s *volumeSuite) changeVolumeAttachmentLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_volume_attachment
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid.String())
 	c.Assert(err, tc.ErrorIsNil)
@@ -1791,8 +1791,8 @@ func (s *volumeSuite) changeVolumeAttachmentPlanLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_volume_attachment_plan
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -1806,8 +1806,8 @@ func (s *volumeSuite) setVolumeProviderID(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_volume
-SET    provider_id = ?
-WHERE  uuid = ?
+SET provider_id = ?
+WHERE uuid = ?
 `,
 		providerID, volUUID.String(),
 	)

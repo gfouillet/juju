@@ -81,8 +81,8 @@ func (st *State) getTaskUUIDsByUnitUUID(ctx context.Context, tx *sqlair.TX, unit
 
 	stmt, err := st.Prepare(`
 SELECT task_uuid AS &task.uuid
-FROM   operation_unit_task
-WHERE  unit_uuid = $unit.uuid;`, task{}, unit{})
+FROM operation_unit_task
+WHERE unit_uuid = $unit.uuid;`, task{}, unit{})
 
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -106,8 +106,8 @@ func (st *State) getTaskUUIDsByMachineUUID(ctx context.Context, tx *sqlair.TX, m
 
 	stmt, err := st.Prepare(`
 SELECT task_uuid AS &task.uuid
-FROM   operation_machine_task
-WHERE  machine_uuid = $machine.uuid;`, task{}, machine{})
+FROM operation_machine_task
+WHERE machine_uuid = $machine.uuid;`, task{}, machine{})
 
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -134,8 +134,8 @@ func (st *State) getOperationByTaskUUIDs(ctx context.Context, tx *sqlair.TX, tas
 
 	stmt, err := st.Prepare(`
 SELECT DISTINCT operation_uuid AS &operation.uuid
-FROM   operation_task
-WHERE  uuid IN ($uuids[:])`, operation{}, tasks)
+FROM operation_task
+WHERE uuid IN ($uuids[:])`, operation{}, tasks)
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -161,7 +161,7 @@ func (st *State) filterEmptyOperationUUIDs(ctx context.Context, tx *sqlair.TX, o
 	stmt, err := st.Prepare(`
 SELECT DISTINCT o.uuid AS &operation.uuid
 FROM operation AS o
-LEFT JOIN operation_task AS ot ON o.uuid = ot.operation_uuid 
+LEFT JOIN operation_task AS ot ON o.uuid = ot.operation_uuid
 WHERE o.uuid IN ($uuids[:])
 AND ot.uuid IS NULL`, operation{}, uuids{})
 	if err != nil {

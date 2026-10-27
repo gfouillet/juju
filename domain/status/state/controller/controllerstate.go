@@ -92,7 +92,7 @@ func (s *ControllerState) GetControllerNodeIDs(ctx context.Context) ([]status.Co
 	}
 
 	stmt, err := s.Prepare(`
-SELECT &controllerID.* 
+SELECT &controllerID.*
 FROM controller_node
 WHERE life_id < 2
 `, controllerID{})

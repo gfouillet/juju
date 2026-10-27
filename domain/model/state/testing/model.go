@@ -36,7 +36,7 @@ func CreateInternalSecretBackend(c *tc.C, runner database.TxnRunner) {
 			INSERT INTO secret_backend (uuid, name, backend_type_id)
 			VALUES (?, ?, ?)
 			ON CONFLICT (name) DO NOTHING
-		`, backendUUID.String(), juju.BackendName, 0)
+`, backendUUID.String(), juju.BackendName, 0)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -55,7 +55,7 @@ func CreateKubernetesSecretBackend(c *tc.C, runner database.TxnRunner) {
 			INSERT INTO secret_backend (uuid, name, backend_type_id)
 			VALUES (?, ?, ?)
 			ON CONFLICT (name) DO NOTHING
-		`, backendUUID.String(), kubernetes.BackendName, 1)
+`, backendUUID.String(), kubernetes.BackendName, 1)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -95,7 +95,7 @@ func CreateTestModel(
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, userUUID.String(), userName.Name(), userName.Name(), false, false, userUUID, time.Now())
+`, userUUID.String(), userName.Name(), userName.Name(), false, false, userUUID, time.Now())
 		if err != nil {
 			return err
 		}
@@ -103,7 +103,7 @@ func CreateTestModel(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO user_authentication (user_uuid, disabled)
 			VALUES (?, ?)
-		`, userUUID.String(), false)
+`, userUUID.String(), false)
 		if err != nil {
 			return err
 		}
@@ -112,7 +112,7 @@ func CreateTestModel(
 			INSERT INTO cloud_type (id, type)
 			VALUES (-1, "dummy")
 			ON CONFLICT (id) DO NOTHING
-		`)
+`)
 		if err != nil {
 			return err
 		}
@@ -120,7 +120,7 @@ func CreateTestModel(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify)
 			VALUES (?, ?, -1, "", true)
-		`, cloudUUID.String(), name)
+`, cloudUUID.String(), name)
 		if err != nil {
 			return err
 		}
@@ -128,7 +128,7 @@ func CreateTestModel(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_region (uuid, name, cloud_uuid)
 			VALUES (?, ?, ?)
-		`, cloudRegionUUID.String(), regionName, cloudUUID.String())
+`, cloudRegionUUID.String(), regionName, cloudUUID.String())
 		if err != nil {
 			return err
 		}
@@ -136,7 +136,7 @@ func CreateTestModel(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_auth_type (cloud_uuid, auth_type_id)
 			VALUES (?, 0), (?, 2)
-		`, cloudUUID.String(), cloudUUID.String())
+`, cloudUUID.String(), cloudUUID.String())
 		if err != nil {
 			return err
 		}
@@ -144,7 +144,7 @@ func CreateTestModel(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_credential (uuid, cloud_uuid, auth_type_id, owner_uuid, name, revoked, invalid)
 			VALUES (?, ?, ?, ?, "foobar", false, false)
-		`, credID, cloudUUID.String(), 0, userUUID)
+`, credID, cloudUUID.String(), 0, userUUID)
 		if err != nil {
 			return err
 		}
@@ -222,7 +222,7 @@ func CreateTestModelWithoutActivation(
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, userUUID.String(), userName.Name(), userName.Name(), false, false, userUUID, time.Now())
+`, userUUID.String(), userName.Name(), userName.Name(), false, false, userUUID, time.Now())
 		if err != nil {
 			return err
 		}
@@ -230,7 +230,7 @@ func CreateTestModelWithoutActivation(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO user_authentication (user_uuid, disabled)
 			VALUES (?, ?)
-		`, userUUID.String(), false)
+`, userUUID.String(), false)
 		if err != nil {
 			return err
 		}
@@ -238,7 +238,7 @@ func CreateTestModelWithoutActivation(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify)
 			VALUES (?, ?, ?, "", true)
-		`, cloudUUID.String(), name, 5)
+`, cloudUUID.String(), name, 5)
 		if err != nil {
 			return err
 		}
@@ -246,7 +246,7 @@ func CreateTestModelWithoutActivation(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_region (uuid, name, cloud_uuid)
 			VALUES (?, ?, ?)
-		`, cloudRegionUUID.String(), regionName, cloudUUID.String())
+`, cloudRegionUUID.String(), regionName, cloudUUID.String())
 		if err != nil {
 			return err
 		}
@@ -254,7 +254,7 @@ func CreateTestModelWithoutActivation(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_auth_type (cloud_uuid, auth_type_id)
 			VALUES (?, 0), (?, 2)
-		`, cloudUUID.String(), cloudUUID.String())
+`, cloudUUID.String(), cloudUUID.String())
 		if err != nil {
 			return err
 		}
@@ -262,7 +262,7 @@ func CreateTestModelWithoutActivation(
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_credential (uuid, cloud_uuid, auth_type_id, owner_uuid, name, revoked, invalid)
 			VALUES (?, ?, ?, ?, "foobar", false, false)
-		`, credId, cloudUUID.String(), 0, userUUID)
+`, credId, cloudUUID.String(), 0, userUUID)
 		if err != nil {
 			return err
 		}

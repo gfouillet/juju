@@ -148,12 +148,12 @@ func DumpTableSqlair(c *tc.C, preparer preparer, tx *sqlair.TX, table string, ex
 // is useful for debugging tests. It is not intended for use in production code.
 func DumpForeignKeysForTableSqlair(c *tc.C, preparer preparer, tx *sqlair.TX, table string) {
 	getForeignKeysStmt, err := preparer.Prepare(`
-WITH tbls(name) AS ( 
-	SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' 
-) 
+WITH tbls (name) AS (
+	SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+)
 SELECT DISTINCT
-	t.name    AS &tableName.name 
-FROM tbls t, pragma_foreign_key_list(t.name) AS fk 
+	t.name AS &tableName.name
+FROM tbls t, pragma_foreign_key_list(t.name) AS fk
 WHERE fk."table" = $tableName.name
 `, tableName{})
 	c.Assert(err, tc.ErrorIsNil)

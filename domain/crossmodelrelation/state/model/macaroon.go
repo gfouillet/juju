@@ -68,8 +68,8 @@ func (st *State) GetMacaroonForRelation(ctx context.Context, relationUUID string
 
 	stmt, err := st.Prepare(`
 SELECT &relationMacaroon.macaroon
-FROM   application_remote_offerer_relation_macaroon
-WHERE  relation_uuid = $remoteRelationUUID.uuid
+FROM application_remote_offerer_relation_macaroon
+WHERE relation_uuid = $remoteRelationUUID.uuid
 `, relUUID, relationMacaroon{})
 	if err != nil {
 		return nil, errors.Capture(err)

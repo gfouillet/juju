@@ -81,16 +81,16 @@ WHERE mr.machine_name = $machineName.name
 		return reprovisionDetachStatements{}, errors.Errorf("preparing existing reprovision query: %w", err)
 	}
 	statements.target, err = st.Prepare(`
-SELECT     m.uuid AS &reprovisionDetachTarget.machine_uuid,
+SELECT m.uuid AS &reprovisionDetachTarget.machine_uuid,
            m.net_node_uuid AS &reprovisionDetachTarget.net_node_uuid,
            mci.instance_id AS &reprovisionDetachTarget.instance_id,
            m.life_id AS &reprovisionDetachTarget.life_id,
            COUNT(DISTINCT mapr.machine_uuid) AS &reprovisionDetachTarget.agent_present
-FROM       machine AS m
-JOIN       machine_cloud_instance AS mci ON m.uuid = mci.machine_uuid
-LEFT JOIN  machine_agent_presence AS mapr ON m.uuid = mapr.machine_uuid
-WHERE      m.name = $machineName.name
-GROUP BY   m.uuid, m.net_node_uuid, mci.instance_id, m.life_id
+FROM machine AS m
+JOIN machine_cloud_instance AS mci ON m.uuid = mci.machine_uuid
+LEFT JOIN machine_agent_presence AS mapr ON m.uuid = mapr.machine_uuid
+WHERE m.name = $machineName.name
+GROUP BY m.uuid, m.net_node_uuid, mci.instance_id, m.life_id
 `, machineName{}, reprovisionDetachTarget{})
 	if err != nil {
 		return reprovisionDetachStatements{}, errors.Errorf("preparing reprovision detach target query: %w", err)
@@ -280,11 +280,11 @@ SELECT u.uuid AS &reprovisionUnit.uuid,
        u.net_node_uuid AS &reprovisionUnit.net_node_uuid,
        u.charm_uuid AS &reprovisionUnit.charm_uuid,
        COALESCE(up.principal_uuid, '') AS &reprovisionUnit.principal_uuid
-FROM   unit AS u
-JOIN   application AS a ON u.application_uuid = a.uuid
-JOIN   machine AS m ON u.net_node_uuid = m.net_node_uuid
+FROM unit AS u
+JOIN application AS a ON u.application_uuid = a.uuid
+JOIN machine AS m ON u.net_node_uuid = m.net_node_uuid
 LEFT JOIN unit_principal AS up ON u.uuid = up.unit_uuid
-WHERE  m.uuid = $entityUUID.uuid
+WHERE m.uuid = $entityUUID.uuid
 ORDER BY u.name
 `, entityUUID{}, reprovisionUnit{})
 	if err != nil {
@@ -292,10 +292,10 @@ ORDER BY u.name
 	}
 	statements.mark, err = st.Prepare(`
 UPDATE unit
-SET    life_id = $reprovisionUnitReplacement.dead_life_id,
+SET life_id = $reprovisionUnitReplacement.dead_life_id,
        password_hash = NULL,
        password_hash_algorithm_id = NULL
-WHERE  uuid = $reprovisionUnitReplacement.old_uuid
+WHERE uuid = $reprovisionUnitReplacement.old_uuid
 `, reprovisionUnitReplacement{})
 	if err != nil {
 		return reprovisionUnitStatements{}, errors.Errorf("preparing reprovision unit retirement: %w", err)
@@ -314,7 +314,7 @@ VALUES ($reprovisionUnitReplacement.new_uuid,
 	}
 	statements.deletePresence, err = st.Prepare(`
 DELETE FROM unit_agent_presence
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid
 `, reprovisionUnitReplacement{})
 	if err != nil {
 		return reprovisionUnitStatements{}, errors.Errorf("preparing retired unit presence cleanup: %w", err)
@@ -354,8 +354,8 @@ VALUES ($reprovisionUnitReplacement.removal_uuid,
 	}
 	statements.nameExists, err = st.Prepare(`
 SELECT name AS &reprovisionUnitReplacement.name
-FROM   unit
-WHERE  name = $reprovisionUnitReplacement.name
+FROM unit
+WHERE name = $reprovisionUnitReplacement.name
 `, reprovisionUnitReplacement{})
 	if err != nil {
 		return reprovisionUnitStatements{}, errors.Errorf("preparing replacement unit name query: %w", err)
@@ -363,22 +363,22 @@ WHERE  name = $reprovisionUnitReplacement.name
 	statements.state, err = st.Prepare(`
 INSERT INTO unit_state (unit_uuid, uniter_state, storage_state, secret_state)
 SELECT $reprovisionUnitReplacement.new_uuid, '', '', secret_state
-FROM   unit_state
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid
+FROM unit_state
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid
 `, reprovisionUnitReplacement{})
 	if err != nil {
 		return reprovisionUnitStatements{}, errors.Errorf("preparing replacement unit state creation: %w", err)
 	}
 	statements.resetCharmState, err = st.Prepare(`
 DELETE FROM unit_state_charm
-WHERE       unit_uuid = $reprovisionUnitReplacement.old_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid
 `, reprovisionUnitReplacement{})
 	if err != nil {
 		return reprovisionUnitStatements{}, errors.Errorf("preparing reprovision unit charm state reset: %w", err)
 	}
 	statements.resetRelationState, err = st.Prepare(`
 DELETE FROM unit_state_relation
-WHERE       unit_uuid = $reprovisionUnitReplacement.old_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid
 `, reprovisionUnitReplacement{})
 	if err != nil {
 		return reprovisionUnitStatements{}, errors.Errorf("preparing reprovision unit relation state reset: %w", err)
@@ -542,47 +542,47 @@ func (st *State) prepareReprovisionUnitTransferStatements() ([]*sqlair.Statement
 	queries := []string{
 		`
 UPDATE annotation_unit
-SET    uuid = $reprovisionUnitReplacement.new_uuid
-WHERE  uuid = $reprovisionUnitReplacement.old_uuid`,
+SET uuid = $reprovisionUnitReplacement.new_uuid
+WHERE uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 UPDATE port_range
-SET    unit_uuid = $reprovisionUnitReplacement.new_uuid
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+SET unit_uuid = $reprovisionUnitReplacement.new_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 UPDATE unit_resource
-SET    unit_uuid = $reprovisionUnitReplacement.new_uuid
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+SET unit_uuid = $reprovisionUnitReplacement.new_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 UPDATE unit_storage_directive
-SET    unit_uuid = $reprovisionUnitReplacement.new_uuid
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+SET unit_uuid = $reprovisionUnitReplacement.new_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 UPDATE storage_unit_owner
-SET    unit_uuid = $reprovisionUnitReplacement.new_uuid
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+SET unit_uuid = $reprovisionUnitReplacement.new_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 UPDATE storage_attachment
-SET    unit_uuid = $reprovisionUnitReplacement.new_uuid
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+SET unit_uuid = $reprovisionUnitReplacement.new_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 INSERT INTO operation_unit_task (task_uuid, unit_uuid)
 SELECT task_uuid, $reprovisionUnitReplacement.new_uuid
-FROM   operation_unit_task
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+FROM operation_unit_task
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 DELETE FROM operation_unit_task
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 UPDATE secret_unit_owner
-SET    unit_uuid = $reprovisionUnitReplacement.new_uuid
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+SET unit_uuid = $reprovisionUnitReplacement.new_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 UPDATE secret_unit_consumer
-SET    unit_uuid = $reprovisionUnitReplacement.new_uuid
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+SET unit_uuid = $reprovisionUnitReplacement.new_uuid
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 DELETE FROM secret_reservation
-WHERE  unit_uuid = $reprovisionUnitReplacement.old_uuid`,
+WHERE unit_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 INSERT INTO secret_permission
     (secret_id, role_id, subject_uuid, subject_type_id, scope_uuid, scope_type_id)
@@ -600,13 +600,13 @@ SELECT secret_id,
            ELSE scope_uuid
        END,
        scope_type_id
-FROM   secret_permission
-WHERE  subject_uuid = $reprovisionUnitReplacement.old_uuid
-OR     scope_uuid = $reprovisionUnitReplacement.old_uuid`,
+FROM secret_permission
+WHERE subject_uuid = $reprovisionUnitReplacement.old_uuid
+OR scope_uuid = $reprovisionUnitReplacement.old_uuid`,
 		`
 DELETE FROM secret_permission
-WHERE  subject_uuid = $reprovisionUnitReplacement.old_uuid
-OR     scope_uuid = $reprovisionUnitReplacement.old_uuid`,
+WHERE subject_uuid = $reprovisionUnitReplacement.old_uuid
+OR scope_uuid = $reprovisionUnitReplacement.old_uuid`,
 	}
 	return st.prepareReprovisionStatements(queries, reprovisionUnitReplacement{})
 }
@@ -640,33 +640,33 @@ func (st *State) prepareReprovisionRelationScopeStatements() ([]*sqlair.Statemen
 		`
 WITH target_relation_units AS (
     SELECT re.relation_uuid, u.name AS unit_name
-    FROM   relation_unit AS ru
-    JOIN   relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
-    JOIN   unit AS u ON ru.unit_uuid = u.uuid
-    JOIN   machine AS m ON u.net_node_uuid = m.net_node_uuid
-    WHERE  m.uuid = $entityUUID.uuid
+    FROM relation_unit AS ru
+    JOIN relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
+    JOIN unit AS u ON ru.unit_uuid = u.uuid
+    JOIN machine AS m ON u.net_node_uuid = m.net_node_uuid
+    WHERE m.uuid = $entityUUID.uuid
 )
 DELETE FROM relation_unit_setting_archive
 WHERE (relation_uuid, unit_name) IN (
     SELECT tru.relation_uuid, tru.unit_name
-    FROM   target_relation_units AS tru
+    FROM target_relation_units AS tru
 )`,
 		`
 INSERT INTO relation_unit_setting_archive (relation_uuid, unit_name, "key", value)
 SELECT re.relation_uuid, u.name, rus."key", rus.value
-FROM   relation_unit AS ru
-JOIN   relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
-JOIN   unit AS u ON ru.unit_uuid = u.uuid
-JOIN   machine AS m ON u.net_node_uuid = m.net_node_uuid
-JOIN   relation_unit_setting AS rus ON ru.uuid = rus.relation_unit_uuid
-WHERE  m.uuid = $entityUUID.uuid`,
+FROM relation_unit AS ru
+JOIN relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
+JOIN unit AS u ON ru.unit_uuid = u.uuid
+JOIN machine AS m ON u.net_node_uuid = m.net_node_uuid
+JOIN relation_unit_setting AS rus ON ru.uuid = rus.relation_unit_uuid
+WHERE m.uuid = $entityUUID.uuid`,
 		`
 WITH target_relation_units AS (
     SELECT ru.uuid
-    FROM   relation_unit AS ru
-    JOIN   unit AS u ON ru.unit_uuid = u.uuid
-    JOIN   machine AS m ON u.net_node_uuid = m.net_node_uuid
-    WHERE  m.uuid = $entityUUID.uuid
+    FROM relation_unit AS ru
+    JOIN unit AS u ON ru.unit_uuid = u.uuid
+    JOIN machine AS m ON u.net_node_uuid = m.net_node_uuid
+    WHERE m.uuid = $entityUUID.uuid
 )
 DELETE FROM relation_unit_settings_hash
 WHERE relation_unit_uuid IN (
@@ -675,10 +675,10 @@ WHERE relation_unit_uuid IN (
 		`
 WITH target_relation_units AS (
     SELECT ru.uuid
-    FROM   relation_unit AS ru
-    JOIN   unit AS u ON ru.unit_uuid = u.uuid
-    JOIN   machine AS m ON u.net_node_uuid = m.net_node_uuid
-    WHERE  m.uuid = $entityUUID.uuid
+    FROM relation_unit AS ru
+    JOIN unit AS u ON ru.unit_uuid = u.uuid
+    JOIN machine AS m ON u.net_node_uuid = m.net_node_uuid
+    WHERE m.uuid = $entityUUID.uuid
 )
 DELETE FROM relation_unit_setting
 WHERE relation_unit_uuid IN (
@@ -687,9 +687,9 @@ WHERE relation_unit_uuid IN (
 		`
 WITH target_units AS (
     SELECT u.uuid
-    FROM   unit AS u
-    JOIN   machine AS m ON u.net_node_uuid = m.net_node_uuid
-    WHERE  m.uuid = $entityUUID.uuid
+    FROM unit AS u
+    JOIN machine AS m ON u.net_node_uuid = m.net_node_uuid
+    WHERE m.uuid = $entityUUID.uuid
 )
 DELETE FROM relation_unit
 WHERE unit_uuid IN (
@@ -1186,15 +1186,15 @@ WHERE sfa.net_node_uuid = $reprovisionStorageTargetParams.net_node_uuid
 	}
 	statements.unclassifiedStorageInstances, err = st.Prepare(`
 SELECT sa.storage_instance_uuid AS &reprovisionStorageLogicalAttachment.entity_uuid
-FROM   storage_attachment AS sa
-JOIN   unit AS u ON sa.unit_uuid = u.uuid
+FROM storage_attachment AS sa
+JOIN unit AS u ON sa.unit_uuid = u.uuid
 LEFT JOIN storage_instance_volume AS siv
        ON sa.storage_instance_uuid = siv.storage_instance_uuid
 LEFT JOIN storage_instance_filesystem AS sif
        ON sa.storage_instance_uuid = sif.storage_instance_uuid
-WHERE  u.net_node_uuid = $reprovisionStorageTargetParams.net_node_uuid
-AND    siv.storage_instance_uuid IS NULL
-AND    sif.storage_instance_uuid IS NULL
+WHERE u.net_node_uuid = $reprovisionStorageTargetParams.net_node_uuid
+AND siv.storage_instance_uuid IS NULL
+AND sif.storage_instance_uuid IS NULL
 LIMIT 1`, reprovisionStorageTargetParams{}, reprovisionStorageLogicalAttachment{})
 	if err != nil {
 		return reprovisionStorageTargetStatements{}, errors.Capture(err)

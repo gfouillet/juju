@@ -273,28 +273,28 @@ func (s *importSuite) seedModel(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify)
 			VALUES (?, ?, 7, "test-endpoint", true)
-		`, cloudUUID, "test-cloud")
+`, cloudUUID, "test-cloud")
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_auth_type (cloud_uuid, auth_type_id)
 			VALUES (?, 0), (?, 2)
-		`, cloudUUID, cloudUUID)
+`, cloudUUID, cloudUUID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_credential (uuid, cloud_uuid, auth_type_id, owner_uuid, name, revoked, invalid)
 			VALUES (?, ?, ?, ?, "foobar", false, false)
-		`, credUUID, cloudUUID, 0, s.adminUserUUID)
+`, credUUID, cloudUUID, 0, s.adminUserUUID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, name, qualifier, model_type_id, life_id, cloud_uuid)
 			VALUES (?, "test", "prod", 0, 0, ?)
-		`, s.modelUUID.String(), cloudUUID)
+`, s.modelUUID.String(), cloudUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

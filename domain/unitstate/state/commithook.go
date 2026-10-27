@@ -152,9 +152,9 @@ func (st *State) createOneSecret(ctx context.Context, tx *sqlair.TX, arg interna
 	// 1. Check if secret ID already exists.
 	checkExistsStmt, err := st.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   secret
-WHERE  id = $createSecretID.id
-LIMIT  1
+FROM secret
+WHERE id = $createSecretID.id
+LIMIT 1
 `, createSecretID{}, countResult{})
 	if err != nil {
 		return errors.Capture(err)
@@ -330,9 +330,9 @@ SELECT sm.secret_id AS &secretInfo.secret_id,
        sm.update_time AS &secretInfo.update_time,
        MAX(sr.revision) AS &secretInfo.latest_revision,
 	   sr.uuid AS &secretInfo.latest_revision_uuid
-FROM   secret_metadata sm
+FROM secret_metadata sm
 	   JOIN secret_revision sr ON sr.secret_id = sm.secret_id
-WHERE  sm.secret_id = $secretID.secret_id
+WHERE sm.secret_id = $secretID.secret_id
 GROUP BY sm.secret_id`
 	existingStmt, err := st.Prepare(existingQuery, secretID{}, secretInfo{})
 	if err != nil {
@@ -357,11 +357,11 @@ GROUP BY sm.secret_id`
 	upsertMdStmt, err := st.Prepare(`
 INSERT INTO secret_metadata (secret_id, version, description, rotate_policy_id, auto_prune, latest_revision_checksum, create_time, update_time)
 VALUES ($secretInfo.secret_id, $secretInfo.version, $secretInfo.description, $secretInfo.rotate_policy_id, $secretInfo.auto_prune, $secretInfo.latest_revision_checksum, $secretInfo.create_time, $secretInfo.update_time)
-ON CONFLICT(secret_id) DO UPDATE SET
-    description=excluded.description,
-    rotate_policy_id=excluded.rotate_policy_id,
-    latest_revision_checksum=excluded.latest_revision_checksum,
-    update_time=excluded.update_time
+ON CONFLICT (secret_id) DO UPDATE SET
+    description = excluded.description,
+    rotate_policy_id = excluded.rotate_policy_id,
+    latest_revision_checksum = excluded.latest_revision_checksum,
+    update_time = excluded.update_time
 `, secretInfo{})
 	if err != nil {
 		return errors.Capture(err)
@@ -422,9 +422,9 @@ ON CONFLICT(secret_id) DO UPDATE SET
 			ownerStmt, err := st.Prepare(`
 INSERT INTO secret_application_owner (secret_id, application_uuid, label)
 SELECT $secretID.secret_id, owner_uuid, $secretApplicationOwner.label
-FROM   v_secret_owner
-WHERE  secret_id = $secretID.secret_id
-ON CONFLICT(secret_id, application_uuid) DO UPDATE SET label=excluded.label
+FROM v_secret_owner
+WHERE secret_id = $secretID.secret_id
+ON CONFLICT (secret_id, application_uuid) DO UPDATE SET label = excluded.label
 `, secretID{}, secretApplicationOwner{})
 			if err != nil {
 				return errors.Capture(err)
@@ -436,9 +436,9 @@ ON CONFLICT(secret_id, application_uuid) DO UPDATE SET label=excluded.label
 			ownerStmt, err := st.Prepare(`
 INSERT INTO secret_unit_owner (secret_id, unit_uuid, label)
 SELECT $secretID.secret_id, owner_uuid, $secretUnitOwner.label
-FROM   v_secret_owner
-WHERE  secret_id = $secretID.secret_id
-ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET label=excluded.label
+FROM v_secret_owner
+WHERE secret_id = $secretID.secret_id
+ON CONFLICT (secret_id, unit_uuid) DO UPDATE SET label = excluded.label
 `, secretID{}, secretUnitOwner{})
 			if err != nil {
 				return errors.Capture(err)
@@ -460,7 +460,7 @@ ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET label=excluded.label
 		upsertRevStmt, err := st.Prepare(`
 INSERT INTO secret_revision (uuid, secret_id, revision, create_time, update_time)
 VALUES ($secretRevision.*)
-ON CONFLICT(uuid) DO UPDATE SET update_time=excluded.update_time
+ON CONFLICT (uuid) DO UPDATE SET update_time = excluded.update_time
 `, secretRevision{})
 		if err != nil {
 			return errors.Capture(err)
@@ -473,7 +473,7 @@ ON CONFLICT(uuid) DO UPDATE SET update_time=excluded.update_time
 			contentStmt, err := st.Prepare(`
 INSERT INTO secret_content (revision_uuid, name, content)
 VALUES ($secretContent.*)
-ON CONFLICT(revision_uuid, name) DO UPDATE SET content=excluded.content
+ON CONFLICT (revision_uuid, name) DO UPDATE SET content = excluded.content
 `, secretContent{})
 			if err != nil {
 				return errors.Capture(err)
@@ -490,7 +490,7 @@ ON CONFLICT(revision_uuid, name) DO UPDATE SET content=excluded.content
 			refStmt, err := st.Prepare(`
 INSERT INTO secret_value_ref (revision_uuid, backend_uuid, revision_id)
 VALUES ($secretValueRef.*)
-ON CONFLICT(revision_uuid) DO UPDATE SET backend_uuid=excluded.backend_uuid, revision_id=excluded.revision_id
+ON CONFLICT (revision_uuid) DO UPDATE SET backend_uuid = excluded.backend_uuid, revision_id = excluded.revision_id
 `, secretValueRef{})
 			if err != nil {
 				return errors.Capture(err)
@@ -518,7 +518,7 @@ ON CONFLICT(revision_uuid) DO UPDATE SET backend_uuid=excluded.backend_uuid, rev
 			expStmt, err := st.Prepare(`
 INSERT INTO secret_revision_expire (revision_uuid, expire_time)
 VALUES ($secretRevisionExpire.*)
-ON CONFLICT(revision_uuid) DO UPDATE SET expire_time=excluded.expire_time
+ON CONFLICT (revision_uuid) DO UPDATE SET expire_time = excluded.expire_time
 `, secretRevisionExpire{})
 			if err != nil {
 				return errors.Capture(err)
@@ -556,10 +556,10 @@ func (st *State) grantSecretsAccess(ctx context.Context, tx *sqlair.TX, grants [
 	// type — changing these after initial grant is forbidden.
 	checkInvariantStmt, err := st.Prepare(`
 SELECT sp.secret_id AS &secretID.secret_id
-FROM   secret_permission sp
-WHERE  sp.secret_id = $secretPermissionGrant.secret_id
-AND    sp.subject_uuid = $secretPermissionGrant.subject_uuid
-AND    (sp.subject_type_id <> $secretPermissionGrant.subject_type_id
+FROM secret_permission sp
+WHERE sp.secret_id = $secretPermissionGrant.secret_id
+AND sp.subject_uuid = $secretPermissionGrant.subject_uuid
+AND (sp.subject_type_id <> $secretPermissionGrant.subject_type_id
         OR sp.scope_uuid <> $secretPermissionGrant.scope_uuid
         OR sp.scope_type_id <> $secretPermissionGrant.scope_type_id)
 `, secretPermissionGrant{}, secretID{})
@@ -571,11 +571,11 @@ AND    (sp.subject_type_id <> $secretPermissionGrant.subject_type_id
 	upsertStmt, err := st.Prepare(`
 INSERT INTO secret_permission (*)
 VALUES ($secretPermissionGrant.*)
-ON CONFLICT(secret_id, subject_uuid) DO UPDATE SET
-    role_id=excluded.role_id,
-    subject_type_id=excluded.subject_type_id,
-    scope_type_id=excluded.scope_type_id,
-    scope_uuid=excluded.scope_uuid
+ON CONFLICT (secret_id, subject_uuid) DO UPDATE SET
+    role_id = excluded.role_id,
+    subject_type_id = excluded.subject_type_id,
+    scope_type_id = excluded.scope_type_id,
+    scope_uuid = excluded.scope_uuid
 `, secretPermissionGrant{})
 	if err != nil {
 		return errors.Capture(err)
@@ -742,8 +742,8 @@ func (st *State) filterExistingSecrets(ctx context.Context, tx *sqlair.TX, ids s
 
 	stmt, err := st.Prepare(`
 SELECT &secretID.secret_id
-FROM   secret_metadata
-WHERE  secret_id IN ($secretIDs[:])
+FROM secret_metadata
+WHERE secret_id IN ($secretIDs[:])
 `, secretID{}, secretIDs{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -788,9 +788,9 @@ func (st *State) revokeSecretsAccess(ctx context.Context, tx *sqlair.TX, revokes
 	// Delete permission row.
 	deleteStmt, err := st.Prepare(`
 DELETE FROM secret_permission
-WHERE  secret_id = $secretPermissionRevoke.secret_id
-AND    subject_type_id = $secretPermissionRevoke.subject_type_id
-AND    subject_uuid = $secretPermissionRevoke.subject_uuid
+WHERE secret_id = $secretPermissionRevoke.secret_id
+AND subject_type_id = $secretPermissionRevoke.subject_type_id
+AND subject_uuid = $secretPermissionRevoke.subject_uuid
 `, secretPermissionRevoke{})
 	if err != nil {
 		return errors.Capture(err)
@@ -916,8 +916,8 @@ func (st *State) trackSecrets(ctx context.Context, tx *sqlair.TX, unitUUID strin
 	latestRevStmt, err := st.Prepare(`
 SELECT secret_id AS &secretIDAndRevision.secret_id,
        MAX(revision) AS &secretIDAndRevision.revision
-FROM   secret_revision
-WHERE  secret_id IN ($secretIDs[:])
+FROM secret_revision
+WHERE secret_id IN ($secretIDs[:])
 GROUP BY secret_id
 `, secretIDAndRevision{}, secretIDs{})
 	if err != nil {
@@ -963,7 +963,7 @@ INSERT INTO secret_unit_consumer (secret_id, source_model_uuid, unit_uuid, label
 VALUES ($secretUnitConsumerLatest.secret_id, $secretUnitConsumerLatest.source_model_uuid,
         $secretUnitConsumerLatest.unit_uuid, '',
         $secretUnitConsumerLatest.current_revision)
-ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET
+ON CONFLICT (secret_id, unit_uuid) DO UPDATE SET
     current_revision = excluded.current_revision
 `, secretUnitConsumerLatest{})
 	if err != nil {
@@ -1000,24 +1000,24 @@ ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET
 func (st *State) markSecretRevisionsObsolete(ctx context.Context, tx *sqlair.TX, ids secretIDs) error {
 	findObsoleteStmt, err := st.Prepare(`
 SELECT sr.uuid AS &secretRevisionUUID.uuid
-FROM   secret_revision sr
+FROM secret_revision sr
        LEFT JOIN (
            SELECT DISTINCT current_revision AS revision, secret_id
-           FROM   secret_unit_consumer
-           WHERE  secret_id IN ($secretIDs[:])
+           FROM secret_unit_consumer
+           WHERE secret_id IN ($secretIDs[:])
            UNION
            SELECT DISTINCT current_revision AS revision, secret_id
-           FROM   secret_remote_unit_consumer
-           WHERE  secret_id IN ($secretIDs[:])
+           FROM secret_remote_unit_consumer
+           WHERE secret_id IN ($secretIDs[:])
            UNION
            SELECT MAX(revision) AS revision, secret_id
-           FROM   secret_revision
-           WHERE  secret_id IN ($secretIDs[:])
+           FROM secret_revision
+           WHERE secret_id IN ($secretIDs[:])
            GROUP BY secret_id
        ) in_use ON sr.revision = in_use.revision
               AND sr.secret_id = in_use.secret_id
-WHERE  sr.secret_id IN ($secretIDs[:])
-AND    (in_use.revision IS NULL OR in_use.revision = 0)
+WHERE sr.secret_id IN ($secretIDs[:])
+AND (in_use.revision IS NULL OR in_use.revision = 0)
 `, secretRevisionUUID{}, secretIDs{})
 	if err != nil {
 		return errors.Capture(err)
@@ -1037,8 +1037,8 @@ INSERT INTO secret_revision_obsolete (revision_uuid, obsolete, pending_delete)
 VALUES ($secretRevisionObsolete.revision_uuid,
         $secretRevisionObsolete.obsolete,
         $secretRevisionObsolete.pending_delete)
-ON CONFLICT(revision_uuid) DO UPDATE SET
-    obsolete       = excluded.obsolete,
+ON CONFLICT (revision_uuid) DO UPDATE SET
+    obsolete = excluded.obsolete,
     pending_delete = excluded.pending_delete
 `, secretRevisionObsolete{})
 	if err != nil {
@@ -1077,9 +1077,9 @@ SELECT u.uuid AS &commitHookUnitInfo.unit_uuid,
        u.life_id AS &commitHookUnitInfo.unit_life_id,
        u.application_uuid AS &commitHookUnitInfo.application_uuid,
        m.uuid AS &commitHookUnitInfo.machine_uuid
-FROM   unit u
+FROM unit u
 LEFT JOIN machine m ON m.net_node_uuid = u.net_node_uuid
-WHERE  u.name = $unitName.name
+WHERE u.name = $unitName.name
 `, unitNameArg, commitHookUnitInfo{})
 	if err != nil {
 		return internal.CommitHookUnitInfo{}, errors.Capture(err)
@@ -1118,8 +1118,8 @@ func (st *State) getUnitLife(
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.*
-FROM   unit
-WHERE  uuid = $entityUUID.uuid
+FROM unit
+WHERE uuid = $entityUUID.uuid
 `, arg, entityLife{})
 	if err != nil {
 		return 0, errors.Capture(err)
@@ -1147,8 +1147,8 @@ func (st *State) checkRelationsExist(ctx context.Context, tx *sqlair.TX, setting
 
 	stmt, err := st.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   relation
-WHERE  uuid IN ($uuids[:])
+FROM relation
+WHERE uuid IN ($uuids[:])
 `, countResult{}, uuids{})
 	if err != nil {
 		return errors.Capture(err)

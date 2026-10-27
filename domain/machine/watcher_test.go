@@ -76,8 +76,8 @@ func (s *watcherSuite) SetUpTest(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
-			VALUES (?, ?, "test", "prod",  "iaas", "test-model", "ec2")
-		`, modelUUID.String(), internaltesting.ControllerTag.Id())
+			VALUES (?, ?, "test", "prod", "iaas", "test-model", "ec2")
+`, modelUUID.String(), internaltesting.ControllerTag.Id())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1093,19 +1093,19 @@ func (s *watcherSuite) deleteFilesystem(c *tc.C, fsUUID string) {
 	txn := func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 DELETE FROM machine_filesystem WHERE filesystem_uuid = ?
-			`, fsUUID)
+`, fsUUID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 DELETE FROM storage_filesystem_attachment WHERE storage_filesystem_uuid = ?
-			`, fsUUID)
+`, fsUUID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 DELETE FROM storage_filesystem WHERE uuid = ?
-			`, fsUUID)
+`, fsUUID)
 		if err != nil {
 			return err
 		}
@@ -1119,25 +1119,25 @@ func (s *watcherSuite) deleteVolume(c *tc.C, volUUID string) {
 	txn := func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 DELETE FROM machine_volume WHERE volume_uuid = ?
-			`, volUUID)
+`, volUUID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 DELETE FROM storage_volume_attachment WHERE storage_volume_uuid = ?
-			`, volUUID)
+`, volUUID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 DELETE FROM storage_volume_attachment_plan WHERE storage_volume_uuid = ?
-			`, volUUID)
+`, volUUID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 DELETE FROM storage_volume WHERE uuid = ?
-			`, volUUID)
+`, volUUID)
 		if err != nil {
 			return err
 		}
@@ -1154,13 +1154,13 @@ func (s *watcherSuite) createMachineFilesystem(
 	txn := func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id) VALUES (?, ?, ?, ?)
-		`, fsUUID, "0", 0, 0)
+`, fsUUID, "0", 0, 0)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO machine_filesystem (machine_uuid, filesystem_uuid) VALUES (?, ?)
-		`, machineUUID, fsUUID)
+`, machineUUID, fsUUID)
 		if err != nil {
 			return err
 		}
@@ -1178,13 +1178,13 @@ func (s *watcherSuite) createMachineVolume(
 	txn := func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id) VALUES (?, ?, ?, ?)
-		`, volUUID, "0", 0, 0)
+`, volUUID, "0", 0, 0)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO machine_volume (machine_uuid, volume_uuid) VALUES (?, ?)
-		`, machineUUID, volUUID)
+`, machineUUID, volUUID)
 		if err != nil {
 			return err
 		}
@@ -1204,7 +1204,7 @@ func (s *watcherSuite) createAttachedVolume(
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, ?, ?)
-		`, volUUID, "1", 0, 0)
+`, volUUID, "1", 0, 0)
 		if err != nil {
 			return err
 		}
@@ -1212,7 +1212,7 @@ VALUES (?, ?, ?, ?)
 INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, life_id,
                                        provision_scope_id, net_node_uuid)
 VALUES (?, ?, ?, ?, (SELECT net_node_uuid FROM machine WHERE uuid = ?))
-		`, vaUUID, volUUID, 0, 0, machineUUID)
+`, vaUUID, volUUID, 0, 0, machineUUID)
 		if err != nil {
 			return err
 		}
@@ -1232,7 +1232,7 @@ func (s *watcherSuite) createPlanAttachedVolume(
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, ?, ?)
-		`, volUUID, "2", 0, 0)
+`, volUUID, "2", 0, 0)
 		if err != nil {
 			return err
 		}
@@ -1240,7 +1240,7 @@ VALUES (?, ?, ?, ?)
 INSERT INTO storage_volume_attachment_plan (uuid, storage_volume_uuid, life_id,
                                             provision_scope_id, net_node_uuid)
 VALUES (?, ?, ?, ?, (SELECT net_node_uuid FROM machine WHERE uuid = ?))
-		`, vaUUID, volUUID, 0, 0, machineUUID)
+`, vaUUID, volUUID, 0, 0, machineUUID)
 		if err != nil {
 			return err
 		}
@@ -1260,7 +1260,7 @@ func (s *watcherSuite) createAttachedFilesystem(
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES (?, ?, ?, ?)
-		`, fsUUID, "1", 0, 0)
+`, fsUUID, "1", 0, 0)
 		if err != nil {
 			return err
 		}
@@ -1269,7 +1269,7 @@ INSERT INTO storage_filesystem_attachment (uuid, storage_filesystem_uuid,
                                           life_id, provision_scope_id,
                                           net_node_uuid)
 VALUES (?, ?, ?, ?, (SELECT net_node_uuid FROM machine WHERE uuid = ?))
-		`, faUUID, fsUUID, 0, 0, machineUUID)
+`, faUUID, fsUUID, 0, 0, machineUUID)
 		if err != nil {
 			return err
 		}

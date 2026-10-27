@@ -30,16 +30,16 @@ func (st *State) ApplicationExists(ctx context.Context, aUUID string) (bool, err
 	applicationUUID := entityUUID{UUID: aUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   application
-WHERE  uuid = $entityUUID.uuid`, applicationUUID)
+FROM application
+WHERE uuid = $entityUUID.uuid`, applicationUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing application exists query: %w", err)
 	}
 
 	isRemoteOffererStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM   application_remote_offerer
-WHERE  application_uuid = $entityUUID.uuid`, count{}, applicationUUID)
+FROM application_remote_offerer
+WHERE application_uuid = $entityUUID.uuid`, count{}, applicationUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing application remote offerer exists query: %w", err)
 	}
@@ -97,9 +97,9 @@ func (st *State) EnsureApplicationNotAliveCascade(
 	applicationUUID := entityUUID{UUID: aUUID}
 	updateApplicationStmt, err := st.Prepare(`
 UPDATE application
-SET    life_id = 1
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 0`, applicationUUID)
+SET life_id = 1
+WHERE uuid = $entityUUID.uuid
+AND life_id = 0`, applicationUUID)
 	if err != nil {
 		return res, errors.Errorf("preparing application life update: %w", err)
 	}
@@ -111,10 +111,10 @@ AND    life_id = 0`, applicationUUID)
 	// races.
 	selectRelationUUIDsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   v_relation_endpoint AS re
-JOIN   relation AS r ON re.relation_uuid = r.uuid
-WHERE  r.life_id < 2
-AND    re.application_uuid = $entityUUID.uuid
+FROM v_relation_endpoint AS re
+JOIN relation AS r ON re.relation_uuid = r.uuid
+WHERE r.life_id < 2
+AND re.application_uuid = $entityUUID.uuid
 `, applicationUUID)
 	if err != nil {
 		return res, errors.Errorf("preparing relation uuids query: %w", err)
@@ -122,18 +122,18 @@ AND    re.application_uuid = $entityUUID.uuid
 
 	updateRelationStmt, err := st.Prepare(`
 UPDATE relation
-SET    life_id = 1
-WHERE  uuid IN ($uuids[:])
-AND    life_id = 0`, uuids{})
+SET life_id = 1
+WHERE uuid IN ($uuids[:])
+AND life_id = 0`, uuids{})
 	if err != nil {
 		return res, errors.Errorf("preparing relation life update: %w", err)
 	}
 
 	selectUnitUUIDsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   unit
-WHERE  application_uuid = $entityUUID.uuid
-AND    life_id < 2`, applicationUUID)
+FROM unit
+WHERE application_uuid = $entityUUID.uuid
+AND life_id < 2`, applicationUUID)
 	if err != nil {
 		return res, errors.Errorf("preparing unit uuids query: %w", err)
 	}
@@ -339,8 +339,8 @@ func (st *State) IsApplicationK8sResourcesManaged(ctx context.Context, aUUID str
 	applicationUUID := entityUUID{UUID: aUUID}
 	stmt, err := st.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM   application_k8s_resources_managed
-WHERE  application_uuid = $entityUUID.uuid
+FROM application_k8s_resources_managed
+WHERE application_uuid = $entityUUID.uuid
 `, count{}, applicationUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing k8s resources managed query: %w", err)
@@ -369,9 +369,9 @@ func (st *State) MarkApplicationAsDead(ctx context.Context, aUUID string) error 
 
 	updateStmt, err := st.Prepare(`
 UPDATE application
-SET    life_id = 2
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 1`, applicationUUID)
+SET life_id = 2
+WHERE uuid = $entityUUID.uuid
+AND life_id = 1`, applicationUUID)
 	if err != nil {
 		return errors.Errorf("preparing application life update: %w", err)
 	}
@@ -414,7 +414,7 @@ WHERE ae.application_uuid = $entityUUID.uuid
 
 	deleteApplicationStmt, err := st.Prepare(`
 DELETE FROM application
-WHERE  uuid = $entityUUID.uuid;`, applicationUUID)
+WHERE uuid = $entityUUID.uuid;`, applicationUUID)
 	if err != nil {
 		return errors.Errorf("preparing application delete: %w", err)
 	}

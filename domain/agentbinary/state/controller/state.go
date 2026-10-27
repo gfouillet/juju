@@ -47,7 +47,7 @@ func (s *ControllerState) CheckAgentBinarySHA256Exists(ctx context.Context, sha2
 
 	stmt, err := s.Prepare(`
 SELECT &objectStoreSHA256Sum.*
-FROM   v_agent_binary_store
+FROM v_agent_binary_store
 WHERE sha_256 = $objectStoreSHA256Sum.sha_256
 `, dbVal)
 	if err != nil {
@@ -95,8 +95,8 @@ func (s *ControllerState) GetObjectUUID(
 
 	stmt, err := s.Prepare(`
 SELECT metadata_uuid AS &objectStorePath.metadata_uuid
-FROM   object_store_metadata_path
-WHERE  path = $objectStorePath.path`, objectStore)
+FROM object_store_metadata_path
+WHERE path = $objectStorePath.path`, objectStore)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -139,8 +139,8 @@ func (s *ControllerState) RegisterAgentBinary(ctx context.Context, arg agentbina
 
 	archStmt, err := s.Prepare(`
 SELECT &architectureRecord.*
-FROM   architecture
-WHERE  name = $architectureRecord.name
+FROM architecture
+WHERE name = $architectureRecord.name
 `, archVal)
 	if err != nil {
 		return errors.Capture(err)
@@ -236,9 +236,9 @@ func (s *ControllerState) getAgentBinary(
 	}
 	getStmt, err := s.Prepare(`
 SELECT &agentBinaryRecord.*
-FROM   agent_binary_store
-WHERE  version = $agentBinaryRecord.version
-AND    architecture_id = $agentBinaryRecord.architecture_id
+FROM agent_binary_store
+WHERE version = $agentBinaryRecord.version
+AND architecture_id = $agentBinaryRecord.architecture_id
 `, agentBinaryVal)
 	if err != nil {
 		return agentBinaryVal, errors.Capture(err)
@@ -269,8 +269,8 @@ func (s *ControllerState) checkObjectExists(
 	dbVal := objectStoreUUID{UUID: objectUUID.String()}
 	objectExistsStmt, err := s.Prepare(`
 SELECT &objectStoreUUID.*
-FROM   object_store_metadata
-WHERE  uuid = $objectStoreUUID.uuid
+FROM object_store_metadata
+WHERE uuid = $objectStoreUUID.uuid
 `,
 		dbVal,
 	)
@@ -301,7 +301,7 @@ func (s *ControllerState) ListAgentBinaries(ctx context.Context) ([]agentbinary.
 
 	stmt, err := s.Prepare(`
 SELECT &metadataRecord.*
-FROM   v_agent_binary_store`, metadataRecord{})
+FROM v_agent_binary_store`, metadataRecord{})
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -335,9 +335,9 @@ func (s *ControllerState) GetAgentBinarySHA256(ctx context.Context, version core
 
 	stmt, err := s.Prepare(`
 SELECT &metadataRecord.*
-FROM   v_agent_binary_store
-WHERE  version = $metadataRecord.version
-AND    architecture_name = $metadataRecord.architecture_name`, record)
+FROM v_agent_binary_store
+WHERE version = $metadataRecord.version
+AND architecture_name = $metadataRecord.architecture_name`, record)
 	if err != nil {
 		return "", false, errors.Capture(err)
 	}

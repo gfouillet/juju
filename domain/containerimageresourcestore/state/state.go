@@ -46,8 +46,8 @@ func (s *State) GetContainerImageMetadata(
 	m := containerImageMetadata{}
 	stmt, err := s.Prepare(`
 SELECT &containerImageMetadata.*
-FROM   resource_container_image_metadata_store
-WHERE  storage_key = $containerImageMetadataStorageKey.storage_key
+FROM resource_container_image_metadata_store
+WHERE storage_key = $containerImageMetadataStorageKey.storage_key
 `, sk, m)
 	if err != nil {
 		return containerimageresourcestore.ContainerImageMetadata{}, errors.Errorf(
@@ -98,8 +98,8 @@ func (s *State) PutContainerImageMetadata(
 
 	checkStmt, err := s.Prepare(`
 SELECT &containerImageMetadata.storage_key
-FROM   resource_container_image_metadata_store
-WHERE  storage_key = $containerImageMetadata.storage_key
+FROM resource_container_image_metadata_store
+WHERE storage_key = $containerImageMetadata.storage_key
 `, m)
 	if err != nil {
 		return store.ID{}, errors.Capture(err)
@@ -107,7 +107,7 @@ WHERE  storage_key = $containerImageMetadata.storage_key
 
 	insertStmt, err := s.Prepare(`
 INSERT INTO resource_container_image_metadata_store (*)
-VALUES      ($containerImageMetadata.*) 
+VALUES ($containerImageMetadata.*)
 `, m)
 	if err != nil {
 		return store.ID{}, errors.Capture(err)
@@ -159,8 +159,8 @@ func (s *State) RemoveContainerImageMetadata(ctx context.Context, storageKey str
 
 	sk := containerImageMetadataStorageKey{StorageKey: storageKey}
 	stmt, err := s.Prepare(`
-DELETE FROM resource_container_image_metadata_store 
-WHERE       storage_key = $containerImageMetadataStorageKey.storage_key
+DELETE FROM resource_container_image_metadata_store
+WHERE storage_key = $containerImageMetadataStorageKey.storage_key
 `, sk)
 	if err != nil {
 		return errors.Errorf(

@@ -271,7 +271,7 @@ INSERT INTO secret_metadata (secret_id, version, rotate_policy_id, create_time, 
 
 	_, err = s.DB().ExecContext(
 		ctx, `
-INSERT INTO secret_reference (secret_id, latest_revision, owner_application_uuid, updated_at) 
+INSERT INTO secret_reference (secret_id, latest_revision, owner_application_uuid, updated_at)
 VALUES (?, ?, ?, ?)`, sec, 0, appUUID, time.Now().UTC())
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -287,7 +287,7 @@ VALUES (?, ?, ?, ?)`, sec, 0, appUUID, time.Now().UTC())
 
 		_, err := s.DB().ExecContext(
 			ctx, `
-INSERT INTO secret_revision (uuid, secret_id, revision, create_time, update_time) 
+INSERT INTO secret_revision (uuid, secret_id, revision, create_time, update_time)
 VALUES (?, ?, ?, ?, ?)`, rev, sec, i, s.now, s.now)
 		c.Assert(err, tc.ErrorIsNil)
 

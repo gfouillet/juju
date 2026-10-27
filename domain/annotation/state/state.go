@@ -98,7 +98,7 @@ func (st *State) getAnnotationsForModel(ctx context.Context) (map[string]string,
 
 	getAnnotationsStmt, err := st.Prepare(`
 SELECT (key, value) AS (&annotation.*)
-FROM   annotation_model`, annotation{})
+FROM annotation_model`, annotation{})
 	if err != nil {
 		return nil, errors.Errorf("preparing get annotations query for model: %w", err)
 	}

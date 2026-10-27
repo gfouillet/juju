@@ -82,11 +82,11 @@ func (st *ModelState) getFilesystemProvisioningStatus(
 	var sts storageProvisioningStatusInfo
 
 	stmt, err := st.Prepare(`
-SELECT    &storageProvisioningStatusInfo.*
-FROM      storage_filesystem sf
+SELECT &storageProvisioningStatusInfo.*
+FROM storage_filesystem sf
 LEFT JOIN storage_filesystem_status sfs ON sf.uuid = sfs.filesystem_uuid
 LEFT JOIN storage_instance_filesystem sif ON sf.uuid = sif.storage_filesystem_uuid
-WHERE     sf.uuid = $filesystemUUID.uuid
+WHERE sf.uuid = $filesystemUUID.uuid
 `, id, sts)
 	if err != nil {
 		return -1, false, errors.Capture(err)
@@ -141,8 +141,8 @@ func (st *ModelState) GetFilesystemUUIDByID(
 	arg := filesystemUUIDID{ID: id}
 	stmt, err := st.Prepare(`
 SELECT &filesystemUUIDID.uuid
-FROM   storage_filesystem
-WHERE  filesystem_id = $filesystemUUIDID.filesystem_id
+FROM storage_filesystem
+WHERE filesystem_id = $filesystemUUIDID.filesystem_id
 `, arg)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -182,7 +182,7 @@ func (st *ModelState) updateFilesystemStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO storage_filesystem_status (*) VALUES ($filesystemStatusInfo.*)
-ON CONFLICT(filesystem_uuid) DO UPDATE SET
+ON CONFLICT (filesystem_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at
@@ -248,11 +248,11 @@ func (st *ModelState) getVolumeProvisioningStatus(
 	var sts storageProvisioningStatusInfo
 
 	stmt, err := st.Prepare(`
-SELECT    &storageProvisioningStatusInfo.*
-FROM      storage_volume sv
+SELECT &storageProvisioningStatusInfo.*
+FROM storage_volume sv
 LEFT JOIN storage_volume_status svs ON sv.uuid = svs.volume_uuid
 LEFT JOIN storage_instance_volume siv ON sv.uuid = siv.storage_volume_uuid
-WHERE     sv.uuid = $volumeUUID.uuid
+WHERE sv.uuid = $volumeUUID.uuid
 `, id, sts)
 	if err != nil {
 		return -1, false, errors.Capture(err)
@@ -307,8 +307,8 @@ func (st *ModelState) GetVolumeUUIDByID(
 	arg := volumeUUIDID{ID: id}
 	stmt, err := st.Prepare(`
 SELECT &volumeUUIDID.uuid
-FROM   storage_volume
-WHERE  volume_id = $volumeUUIDID.volume_id
+FROM storage_volume
+WHERE volume_id = $volumeUUIDID.volume_id
 `, arg)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -348,7 +348,7 @@ func (st *ModelState) updateVolumeStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO storage_volume_status (*) VALUES ($volumeStatusInfo.*)
-ON CONFLICT(volume_uuid) DO UPDATE SET
+ON CONFLICT (volume_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at
@@ -377,7 +377,7 @@ func (st *ModelState) GetStorageInstances(
 
 	stmt, err := st.Prepare(`
 SELECT &storageInstanceStatusDetails.* FROM (
-    SELECT    si.uuid,
+    SELECT si.uuid,
               si.storage_id,
               si.life_id,
               si.storage_kind_id,
@@ -393,15 +393,15 @@ SELECT &storageInstanceStatusDetails.* FROM (
               sfs.status_id AS filesystem_status_id,
               sfs.message AS filesystem_status_message,
               sfs.updated_at AS filesystem_status_updated_at
-    FROM      storage_instance si
-    LEFT JOIN storage_unit_owner suo ON si.uuid=suo.storage_instance_uuid
-    LEFT JOIN unit u ON suo.unit_uuid=u.uuid
-    LEFT JOIN storage_instance_volume siv ON si.uuid=siv.storage_instance_uuid
-    LEFT JOIN storage_volume sv ON sv.uuid=siv.storage_volume_uuid
-    LEFT JOIN storage_volume_status svs ON siv.storage_volume_uuid=svs.volume_uuid
-    LEFT JOIN storage_instance_filesystem sif ON si.uuid=sif.storage_instance_uuid
-    LEFT JOIN storage_filesystem_status sfs ON sif.storage_filesystem_uuid=sfs.filesystem_uuid
-    WHERE     si.uuid IN ($entityUUIDs[:])
+    FROM storage_instance si
+    LEFT JOIN storage_unit_owner suo ON si.uuid = suo.storage_instance_uuid
+    LEFT JOIN unit u ON suo.unit_uuid = u.uuid
+    LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
+    LEFT JOIN storage_volume sv ON sv.uuid = siv.storage_volume_uuid
+    LEFT JOIN storage_volume_status svs ON siv.storage_volume_uuid = svs.volume_uuid
+    LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
+    LEFT JOIN storage_filesystem_status sfs ON sif.storage_filesystem_uuid = sfs.filesystem_uuid
+    WHERE si.uuid IN ($entityUUIDs[:])
 )
 `, storageInstanceStatusDetails{}, ids)
 	if err != nil {
@@ -478,7 +478,7 @@ func (st *ModelState) GetAllStorageInstances(
 
 	stmt, err := st.Prepare(`
 SELECT &storageInstanceStatusDetails.* FROM (
-    SELECT    si.uuid,
+    SELECT si.uuid,
     		  si.storage_id,
               si.life_id,
               si.storage_kind_id,
@@ -494,14 +494,14 @@ SELECT &storageInstanceStatusDetails.* FROM (
               sfs.status_id AS filesystem_status_id,
               sfs.message AS filesystem_status_message,
               sfs.updated_at AS filesystem_status_updated_at
-    FROM      storage_instance si
-    LEFT JOIN storage_unit_owner suo ON si.uuid=suo.storage_instance_uuid
-    LEFT JOIN unit u ON suo.unit_uuid=u.uuid
-    LEFT JOIN storage_instance_volume siv ON si.uuid=siv.storage_instance_uuid
-    LEFT JOIN storage_volume sv ON sv.uuid=siv.storage_volume_uuid
-    LEFT JOIN storage_volume_status svs ON siv.storage_volume_uuid=svs.volume_uuid
-    LEFT JOIN storage_instance_filesystem sif ON si.uuid=sif.storage_instance_uuid
-    LEFT JOIN storage_filesystem_status sfs ON sif.storage_filesystem_uuid=sfs.filesystem_uuid
+    FROM storage_instance si
+    LEFT JOIN storage_unit_owner suo ON si.uuid = suo.storage_instance_uuid
+    LEFT JOIN unit u ON suo.unit_uuid = u.uuid
+    LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
+    LEFT JOIN storage_volume sv ON sv.uuid = siv.storage_volume_uuid
+    LEFT JOIN storage_volume_status svs ON siv.storage_volume_uuid = svs.volume_uuid
+    LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
+    LEFT JOIN storage_filesystem_status sfs ON sif.storage_filesystem_uuid = sfs.filesystem_uuid
 )
 `, storageInstanceStatusDetails{})
 	if err != nil {
@@ -581,21 +581,21 @@ func (st *ModelState) GetStorageInstanceAttachments(
 
 	stmt, err := st.Prepare(`
 SELECT &storageAttachmentStatusDetails.* FROM (
-    SELECT    sa.storage_instance_uuid, sa.life_id,
+    SELECT sa.storage_instance_uuid, sa.life_id,
               u.name AS unit_name,
               m.name AS machine_name,
               sfa.mount_point AS filesystem_mount_point,
               sva.block_device_uuid AS volume_block_device_uuid
-    FROM      storage_attachment sa
-    LEFT JOIN unit u ON sa.unit_uuid=u.uuid
-    LEFT JOIN machine m ON u.net_node_uuid=m.net_node_uuid
-    LEFT JOIN storage_instance_volume siv ON sa.storage_instance_uuid=siv.storage_instance_uuid
-    LEFT JOIN storage_volume_attachment sva ON siv.storage_volume_uuid=sva.storage_volume_uuid AND
-                                               u.net_node_uuid=sva.net_node_uuid
-    LEFT JOIN storage_instance_filesystem sif ON sa.storage_instance_uuid=sif.storage_instance_uuid
-    LEFT JOIN storage_filesystem_attachment sfa ON sif.storage_filesystem_uuid=sfa.storage_filesystem_uuid AND
-                                                   u.net_node_uuid=sfa.net_node_uuid
-    WHERE     sa.storage_instance_uuid IN ($entityUUIDs[:])
+    FROM storage_attachment sa
+    LEFT JOIN unit u ON sa.unit_uuid = u.uuid
+    LEFT JOIN machine m ON u.net_node_uuid = m.net_node_uuid
+    LEFT JOIN storage_instance_volume siv ON sa.storage_instance_uuid = siv.storage_instance_uuid
+    LEFT JOIN storage_volume_attachment sva ON siv.storage_volume_uuid = sva.storage_volume_uuid AND
+                                               u.net_node_uuid = sva.net_node_uuid
+    LEFT JOIN storage_instance_filesystem sif ON sa.storage_instance_uuid = sif.storage_instance_uuid
+    LEFT JOIN storage_filesystem_attachment sfa ON sif.storage_filesystem_uuid = sfa.storage_filesystem_uuid AND
+                                                   u.net_node_uuid = sfa.net_node_uuid
+    WHERE sa.storage_instance_uuid IN ($entityUUIDs[:])
 )
 `, storageAttachmentStatusDetails{}, ids)
 	if err != nil {
@@ -653,20 +653,20 @@ func (st *ModelState) GetAllStorageInstanceAttachments(
 
 	stmt, err := st.Prepare(`
 SELECT &storageAttachmentStatusDetails.* FROM (
-    SELECT    sa.storage_instance_uuid, sa.life_id,
+    SELECT sa.storage_instance_uuid, sa.life_id,
               u.name AS unit_name,
               m.name AS machine_name,
               sfa.mount_point AS filesystem_mount_point,
               sva.block_device_uuid AS volume_block_device_uuid
-    FROM      storage_attachment sa
-    LEFT JOIN unit u ON sa.unit_uuid=u.uuid
-    LEFT JOIN machine m ON u.net_node_uuid=m.net_node_uuid
-    LEFT JOIN storage_instance_volume siv ON sa.storage_instance_uuid=siv.storage_instance_uuid
-    LEFT JOIN storage_volume_attachment sva ON siv.storage_volume_uuid=sva.storage_volume_uuid AND
-                                               u.net_node_uuid=sva.net_node_uuid
-    LEFT JOIN storage_instance_filesystem sif ON sa.storage_instance_uuid=sif.storage_instance_uuid
-    LEFT JOIN storage_filesystem_attachment sfa ON sif.storage_filesystem_uuid=sfa.storage_filesystem_uuid AND
-                                                   u.net_node_uuid=sfa.net_node_uuid
+    FROM storage_attachment sa
+    LEFT JOIN unit u ON sa.unit_uuid = u.uuid
+    LEFT JOIN machine m ON u.net_node_uuid = m.net_node_uuid
+    LEFT JOIN storage_instance_volume siv ON sa.storage_instance_uuid = siv.storage_instance_uuid
+    LEFT JOIN storage_volume_attachment sva ON siv.storage_volume_uuid = sva.storage_volume_uuid AND
+                                               u.net_node_uuid = sva.net_node_uuid
+    LEFT JOIN storage_instance_filesystem sif ON sa.storage_instance_uuid = sif.storage_instance_uuid
+    LEFT JOIN storage_filesystem_attachment sfa ON sif.storage_filesystem_uuid = sfa.storage_filesystem_uuid AND
+                                                   u.net_node_uuid = sfa.net_node_uuid
 )
 `, storageAttachmentStatusDetails{})
 	if err != nil {
@@ -724,19 +724,19 @@ func (st *ModelState) GetFilesystems(
 	ids := IDs[entityUUIDs](uuids)
 
 	stmt, err := st.Prepare(`
-SELECT    (sf.uuid, sf.filesystem_id, sf.life_id, sf.provider_id, sf.size_mib) AS (&filesystemStatusDetails.*),
+SELECT (sf.uuid, sf.filesystem_id, sf.life_id, sf.provider_id, sf.size_mib) AS (&filesystemStatusDetails.*),
           (sfs.status_id, sfs.message, sfs.updated_at) AS (&filesystemStatusDetails.*),
           (si.storage_id, sv.volume_id) AS (&filesystemStatusDetails.*),
           sp.name AS &filesystemStatusDetails.pool_name,
           si.uuid AS &filesystemStatusDetails.storage_instance_uuid
-FROM      storage_filesystem sf
-LEFT JOIN storage_filesystem_status sfs ON sfs.filesystem_uuid=sf.uuid
-LEFT JOIN storage_instance_filesystem sif ON sf.uuid=sif.storage_filesystem_uuid
-LEFT JOIN storage_instance si ON si.uuid=sif.storage_instance_uuid
-LEFT JOIN storage_pool sp ON sp.uuid=si.storage_pool_uuid
-LEFT JOIN storage_instance_volume siv ON siv.storage_instance_uuid=si.uuid
-LEFT JOIN storage_volume sv ON sv.uuid=siv.storage_volume_uuid
-WHERE     sf.uuid IN ($entityUUIDs[:])
+FROM storage_filesystem sf
+LEFT JOIN storage_filesystem_status sfs ON sfs.filesystem_uuid = sf.uuid
+LEFT JOIN storage_instance_filesystem sif ON sf.uuid = sif.storage_filesystem_uuid
+LEFT JOIN storage_instance si ON si.uuid = sif.storage_instance_uuid
+LEFT JOIN storage_pool sp ON sp.uuid = si.storage_pool_uuid
+LEFT JOIN storage_instance_volume siv ON siv.storage_instance_uuid = si.uuid
+LEFT JOIN storage_volume sv ON sv.uuid = siv.storage_volume_uuid
+WHERE sf.uuid IN ($entityUUIDs[:])
 `, filesystemStatusDetails{}, ids)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -797,18 +797,18 @@ func (st *ModelState) GetAllFilesystems(
 	}
 
 	stmt, err := st.Prepare(`
-SELECT    (sf.uuid, sf.filesystem_id, sf.life_id, sf.provider_id, sf.size_mib) AS (&filesystemStatusDetails.*),
+SELECT (sf.uuid, sf.filesystem_id, sf.life_id, sf.provider_id, sf.size_mib) AS (&filesystemStatusDetails.*),
           (sfs.status_id, sfs.message, sfs.updated_at) AS (&filesystemStatusDetails.*),
           (si.storage_id, sv.volume_id) AS (&filesystemStatusDetails.*),
           sp.name AS &filesystemStatusDetails.pool_name,
           si.uuid AS &filesystemStatusDetails.storage_instance_uuid
-FROM      storage_filesystem sf
-LEFT JOIN storage_filesystem_status sfs ON sfs.filesystem_uuid=sf.uuid
-LEFT JOIN storage_instance_filesystem sif ON sf.uuid=sif.storage_filesystem_uuid
-LEFT JOIN storage_instance si ON si.uuid=sif.storage_instance_uuid
-LEFT JOIN storage_pool sp ON sp.uuid=si.storage_pool_uuid
-LEFT JOIN storage_instance_volume siv ON siv.storage_instance_uuid=si.uuid
-LEFT JOIN storage_volume sv ON sv.uuid=siv.storage_volume_uuid
+FROM storage_filesystem sf
+LEFT JOIN storage_filesystem_status sfs ON sfs.filesystem_uuid = sf.uuid
+LEFT JOIN storage_instance_filesystem sif ON sf.uuid = sif.storage_filesystem_uuid
+LEFT JOIN storage_instance si ON si.uuid = sif.storage_instance_uuid
+LEFT JOIN storage_pool sp ON sp.uuid = si.storage_pool_uuid
+LEFT JOIN storage_instance_volume siv ON siv.storage_instance_uuid = si.uuid
+LEFT JOIN storage_volume sv ON sv.uuid = siv.storage_volume_uuid
 `, filesystemStatusDetails{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -875,21 +875,21 @@ func (st *ModelState) GetFilesystemAttachments(
 	// If units are for machines they share a net node.
 	q := `
 SELECT DISTINCT &filesystemAttachmentStatusDetails.* FROM (
-    SELECT    sfa.storage_filesystem_uuid,
+    SELECT sfa.storage_filesystem_uuid,
               sfa.life_id,
               sfa.mount_point,
               sfa.read_only,
               u.name As unit_name,
               m.name AS machine_name
-    FROM      storage_filesystem_attachment sfa
-    LEFT JOIN machine m ON sfa.net_node_uuid=m.net_node_uuid
+    FROM storage_filesystem_attachment sfa
+    LEFT JOIN machine m ON sfa.net_node_uuid = m.net_node_uuid
     -- Only join units when there is no machine.
     LEFT JOIN unit u
         ON sfa.net_node_uuid = u.net_node_uuid
         AND m.net_node_uuid IS NULL
-    LEFT JOIN storage_instance_filesystem sif ON sif.storage_filesystem_uuid=sfa.storage_filesystem_uuid
-    LEFT JOIN storage_attachment sa ON sa.storage_instance_uuid=sif.storage_instance_uuid
-    WHERE     sfa.storage_filesystem_uuid IN ($entityUUIDs[:])
+    LEFT JOIN storage_instance_filesystem sif ON sif.storage_filesystem_uuid = sfa.storage_filesystem_uuid
+    LEFT JOIN storage_attachment sa ON sa.storage_instance_uuid = sif.storage_instance_uuid
+    WHERE sfa.storage_filesystem_uuid IN ($entityUUIDs[:])
 )
 `
 
@@ -949,20 +949,20 @@ func (st *ModelState) GetAllFilesystemAttachments(
 	// If units are for machines they share a net node.
 	q := `
 SELECT DISTINCT &filesystemAttachmentStatusDetails.* FROM (
-    SELECT    sfa.storage_filesystem_uuid,
+    SELECT sfa.storage_filesystem_uuid,
               sfa.life_id,
               sfa.mount_point,
               sfa.read_only,
               u.name As unit_name,
               m.name AS machine_name
-    FROM      storage_filesystem_attachment sfa
-    LEFT JOIN machine m ON sfa.net_node_uuid=m.net_node_uuid
+    FROM storage_filesystem_attachment sfa
+    LEFT JOIN machine m ON sfa.net_node_uuid = m.net_node_uuid
     -- Only join units when there is no machine.
     LEFT JOIN unit u
         ON sfa.net_node_uuid = u.net_node_uuid
         AND m.net_node_uuid IS NULL
-    LEFT JOIN storage_instance_filesystem sif ON sif.storage_filesystem_uuid=sfa.storage_filesystem_uuid
-    LEFT JOIN storage_attachment sa ON sa.storage_instance_uuid=sif.storage_instance_uuid
+    LEFT JOIN storage_instance_filesystem sif ON sif.storage_filesystem_uuid = sfa.storage_filesystem_uuid
+    LEFT JOIN storage_attachment sa ON sa.storage_instance_uuid = sif.storage_instance_uuid
 )
 `
 
@@ -1017,17 +1017,17 @@ func (st *ModelState) GetVolumes(
 	ids := IDs[entityUUIDs](uuids)
 
 	stmt, err := st.Prepare(`
-SELECT    (sv.uuid, sv.volume_id, sv.life_id, sv.provider_id, sv.hardware_id, sv.wwn, sv.size_mib, sv.persistent) AS (&volumeStatusDetails.*),
+SELECT (sv.uuid, sv.volume_id, sv.life_id, sv.provider_id, sv.hardware_id, sv.wwn, sv.size_mib, sv.persistent) AS (&volumeStatusDetails.*),
           (svs.status_id, svs.message, svs.updated_at) AS (&volumeStatusDetails.*),
           si.storage_id AS &volumeStatusDetails.storage_id,
           sp.name AS &volumeStatusDetails.pool_name,
           si.uuid AS &volumeStatusDetails.storage_instance_uuid
-FROM      storage_volume sv
-LEFT JOIN storage_volume_status svs ON svs.volume_uuid=sv.uuid
-LEFT JOIN storage_instance_volume siv ON siv.storage_volume_uuid=sv.uuid
-LEFT JOIN storage_instance si ON si.uuid=siv.storage_instance_uuid
-LEFT JOIN storage_pool sp ON sp.uuid=si.storage_pool_uuid
-WHERE     sv.uuid IN ($entityUUIDs[:])
+FROM storage_volume sv
+LEFT JOIN storage_volume_status svs ON svs.volume_uuid = sv.uuid
+LEFT JOIN storage_instance_volume siv ON siv.storage_volume_uuid = sv.uuid
+LEFT JOIN storage_instance si ON si.uuid = siv.storage_instance_uuid
+LEFT JOIN storage_pool sp ON sp.uuid = si.storage_pool_uuid
+WHERE sv.uuid IN ($entityUUIDs[:])
 `, volumeStatusDetails{}, ids)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1086,16 +1086,16 @@ func (st *ModelState) GetAllVolumes(
 	}
 
 	stmt, err := st.Prepare(`
-SELECT    (sv.uuid, sv.volume_id, sv.life_id, sv.provider_id, sv.hardware_id, sv.wwn, sv.size_mib, sv.persistent) AS (&volumeStatusDetails.*),
+SELECT (sv.uuid, sv.volume_id, sv.life_id, sv.provider_id, sv.hardware_id, sv.wwn, sv.size_mib, sv.persistent) AS (&volumeStatusDetails.*),
           (svs.status_id, svs.message, svs.updated_at) AS (&volumeStatusDetails.*),
           si.storage_id AS &volumeStatusDetails.storage_id,
           sp.name AS &volumeStatusDetails.pool_name,
           si.uuid AS &volumeStatusDetails.storage_instance_uuid
-FROM      storage_volume sv
-LEFT JOIN storage_volume_status svs ON svs.volume_uuid=sv.uuid
-LEFT JOIN storage_instance_volume siv ON siv.storage_volume_uuid=sv.uuid
-LEFT JOIN storage_instance si ON si.uuid=siv.storage_instance_uuid
-LEFT JOIN storage_pool sp ON sp.uuid=si.storage_pool_uuid
+FROM storage_volume sv
+LEFT JOIN storage_volume_status svs ON svs.volume_uuid = sv.uuid
+LEFT JOIN storage_instance_volume siv ON siv.storage_volume_uuid = sv.uuid
+LEFT JOIN storage_instance si ON si.uuid = siv.storage_instance_uuid
+LEFT JOIN storage_pool sp ON sp.uuid = si.storage_pool_uuid
 `, volumeStatusDetails{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1160,7 +1160,7 @@ func (st *ModelState) GetVolumeAttachments(
 	volumeAttachmentQuery := `
 SELECT &volumeAttachmentStatusDetails.*
 FROM (
-    SELECT    sva.uuid,
+    SELECT sva.uuid,
               sva.storage_volume_uuid,
               sva.life_id,
               sva.read_only,
@@ -1168,11 +1168,11 @@ FROM (
               bd.bus_address AS bus_address,
               u.name AS unit_name,
               m.name AS machine_name
-    FROM      storage_volume_attachment sva
-    LEFT JOIN block_device bd ON bd.uuid=sva.block_device_uuid
-    LEFT JOIN machine m ON sva.net_node_uuid=m.net_node_uuid
+    FROM storage_volume_attachment sva
+    LEFT JOIN block_device bd ON bd.uuid = sva.block_device_uuid
+    LEFT JOIN machine m ON sva.net_node_uuid = m.net_node_uuid
     LEFT JOIN unit u
-        ON sva.net_node_uuid=u.net_node_uuid
+        ON sva.net_node_uuid = u.net_node_uuid
         AND m.net_node_uuid IS NULL
     WHERE sva.storage_volume_uuid IN ($entityUUIDs[:])
 )
@@ -1181,21 +1181,21 @@ FROM (
 	// Query to get all device links for volume attachments.
 	deviceLinksQuery := `
 SELECT &volumeAttachmentDeviceLink.*
-FROM  (
-    SELECT    sva.uuid,
+FROM (
+    SELECT sva.uuid,
               bdld.name AS device_link
-    FROM      storage_volume_attachment sva
-    JOIN      block_device bd ON bd.uuid=sva.block_device_uuid
-    JOIN      block_device_link_device bdld ON bdld.block_device_uuid=bd.uuid
-    WHERE     sva.storage_volume_uuid IN ($entityUUIDs[:])
+    FROM storage_volume_attachment sva
+    JOIN block_device bd ON bd.uuid = sva.block_device_uuid
+    JOIN block_device_link_device bdld ON bdld.block_device_uuid = bd.uuid
+    WHERE sva.storage_volume_uuid IN ($entityUUIDs[:])
 )
 `
 
 	volumeAttachmentPlanQuery := `
-SELECT    &volumeAttachmentPlanStatusDetails.*
-FROM      storage_volume_attachment_plan svap
-LEFT JOIN storage_volume_attachment_plan_attr svapa ON svapa.attachment_plan_uuid=svap.uuid
-ORDER BY  svap.uuid
+SELECT &volumeAttachmentPlanStatusDetails.*
+FROM storage_volume_attachment_plan svap
+LEFT JOIN storage_volume_attachment_plan_attr svapa ON svapa.attachment_plan_uuid = svap.uuid
+ORDER BY svap.uuid
 `
 
 	ids := IDs[entityUUIDs](uuids)
@@ -1334,7 +1334,7 @@ func (st *ModelState) GetAllVolumeAttachments(
 	q := `
 SELECT &volumeAttachmentStatusDetails.*
 FROM (
-    SELECT    sva.uuid,
+    SELECT sva.uuid,
               sva.storage_volume_uuid,
               sva.life_id,
               sva.read_only,
@@ -1342,31 +1342,31 @@ FROM (
               bd.bus_address AS bus_address,
               u.name AS unit_name,
               m.name AS machine_name
-    FROM      storage_volume_attachment sva
-    LEFT JOIN block_device bd ON bd.uuid=sva.block_device_uuid
-    LEFT JOIN machine m ON sva.net_node_uuid=m.net_node_uuid
+    FROM storage_volume_attachment sva
+    LEFT JOIN block_device bd ON bd.uuid = sva.block_device_uuid
+    LEFT JOIN machine m ON sva.net_node_uuid = m.net_node_uuid
     LEFT JOIN unit u
-        ON sva.net_node_uuid=u.net_node_uuid
+        ON sva.net_node_uuid = u.net_node_uuid
         AND m.net_node_uuid IS NULL
 )
 `
 
 	deviceLinksQuery := `
 SELECT &volumeAttachmentDeviceLink.*
-FROM  (
-   SELECT    sva.uuid,
+FROM (
+   SELECT sva.uuid,
              bdld.name AS device_link
-   FROM      storage_volume_attachment sva
-   JOIN      block_device bd ON bd.uuid=sva.block_device_uuid
-   JOIN      block_device_link_device bdld ON bdld.block_device_uuid=bd.uuid
+   FROM storage_volume_attachment sva
+   JOIN block_device bd ON bd.uuid = sva.block_device_uuid
+   JOIN block_device_link_device bdld ON bdld.block_device_uuid = bd.uuid
 )
 `
 
 	volumeAttachmentPlanQuery := `
-SELECT    &volumeAttachmentPlanStatusDetails.*
-FROM      storage_volume_attachment_plan svap
-LEFT JOIN storage_volume_attachment_plan_attr svapa ON svapa.attachment_plan_uuid=svap.uuid
-ORDER BY  svap.uuid
+SELECT &volumeAttachmentPlanStatusDetails.*
+FROM storage_volume_attachment_plan svap
+LEFT JOIN storage_volume_attachment_plan_attr svapa ON svapa.attachment_plan_uuid = svap.uuid
+ORDER BY svap.uuid
 `
 
 	stmt, err := st.Prepare(q, volumeAttachmentStatusDetails{})

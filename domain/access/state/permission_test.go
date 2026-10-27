@@ -184,9 +184,9 @@ func (s *permissionStateSuite) checkPermissionRow(c *tc.C, userUUID string, spec
 	// Find the permission
 	row := db.QueryRow(`
 SELECT uuid, access_type, object_type, grant_to, grant_on
-FROM   v_permission
-WHERE  grant_to = ?
-AND    grant_on = ?
+FROM v_permission
+WHERE grant_to = ?
+AND grant_on = ?
 `, userUUID, spec.Target.Key)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 	var (
@@ -1187,7 +1187,7 @@ func (s *permissionStateSuite) TestUpdatePermissionRevokeLastAdmin(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, name, qualifier, model_type_id, life_id, cloud_uuid)
 			VALUES (?, "test", "prod", 0, 0, 987)
-		`, modelUUID)
+`, modelUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1262,14 +1262,14 @@ func (s *permissionStateSuite) TestAllModelAccessForOwner(c *tc.C) {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify)
 			VALUES (?, 'owner-a-second', -1, '', true)
-		`, secondCloudUUID.String()); err != nil {
+`, secondCloudUUID.String()); err != nil {
 			return err
 		}
 
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud_credential (uuid, cloud_uuid, auth_type_id, owner_uuid, name, revoked, invalid)
 			VALUES (?, ?, 0, ?, 'foobar', false, false)
-		`, secondCredUUID, secondCloudUUID.String(), ownerUUID); err != nil {
+`, secondCredUUID, secondCloudUUID.String(), ownerUUID); err != nil {
 			return err
 		}
 
@@ -1278,7 +1278,7 @@ func (s *permissionStateSuite) TestAllModelAccessForOwner(c *tc.C) {
 			    (uuid, name, qualifier, cloud_uuid, cloud_credential_uuid,
 			     model_type_id, life_id, activated)
 			VALUES (?, 'owner-a-second', 'prod', ?, ?, 0, 0, true)
-		`, secondModelUUID.String(), secondCloudUUID.String(), secondCredUUID); err != nil {
+`, secondModelUUID.String(), secondCloudUUID.String(), secondCredUUID); err != nil {
 			return err
 		}
 
@@ -1544,7 +1544,7 @@ func (s *permissionStateSuite) ensureUser(c *tc.C, userUUID, name, createdByUUID
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, userUUID, name, name, external, false, createdByUUID, time.Now())
+`, userUUID, name, name, external, false, createdByUUID, time.Now())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1552,7 +1552,7 @@ func (s *permissionStateSuite) ensureUser(c *tc.C, userUUID, name, createdByUUID
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user_authentication (user_uuid, disabled)
 			VALUES (?, ?)
-		`, userUUID, false)
+`, userUUID, false)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1568,8 +1568,8 @@ func (s *permissionStateSuite) ensurePermission(c *tc.C, grantOn, grantTo string
 			FROM permission_access_type AS pat
 			LEFT JOIN permission_object_type AS pot
 			WHERE pat.type = ?
-			AND   pot.type = ?
-		`, permissionUUID, grantTo, grantOn, access, objectType)
+			AND pot.type = ?
+`, permissionUUID, grantTo, grantOn, access, objectType)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1581,14 +1581,14 @@ func (s *permissionStateSuite) ensureCloud(c *tc.C, cloudUUID, cloudName, credUU
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify)
 			VALUES (?, ?, 7, "test-endpoint", true)
-		`, cloudUUID, cloudName)
+`, cloudUUID, cloudName)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_auth_type (cloud_uuid, auth_type_id)
 			VALUES (?, 0), (?, 2)
-		`, cloudUUID, cloudUUID)
+`, cloudUUID, cloudUUID)
 		if err != nil {
 			return err
 		}
@@ -1596,7 +1596,7 @@ func (s *permissionStateSuite) ensureCloud(c *tc.C, cloudUUID, cloudName, credUU
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO cloud_credential (uuid, cloud_uuid, auth_type_id, owner_uuid, name, revoked, invalid)
 			VALUES (?, ?, ?, ?, "foobar", false, false)
-		`, credUUID, cloudUUID, 0, ownerUUID)
+`, credUUID, cloudUUID, 0, ownerUUID)
 		return err
 	})
 
@@ -1607,7 +1607,7 @@ func (s *permissionStateSuite) disableUser(c *tc.C, userUUID string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			UPDATE user_authentication SET disabled = true WHERE user_uuid = ?
-		`, userUUID)
+`, userUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1617,7 +1617,7 @@ func (s *permissionStateSuite) removeUser(c *tc.C, userUUID string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			UPDATE user SET removed = true WHERE uuid = ?
-		`, userUUID)
+`, userUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

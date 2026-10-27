@@ -22,8 +22,8 @@ func (st *State) OfferExists(ctx context.Context, oUUID string) (bool, error) {
 	offerUUID := entityUUID{UUID: oUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   offer
-WHERE  uuid = $entityUUID.uuid`, offerUUID)
+FROM offer
+WHERE uuid = $entityUUID.uuid`, offerUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing offer exists query: %w", err)
 	}
@@ -62,7 +62,7 @@ func (st *State) DeleteOffer(ctx context.Context, oUUID string, force bool) erro
 func (st *State) deleteOffer(ctx context.Context, tx *sqlair.TX, offerUUID entityUUID, force bool) error {
 	checkConnsStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM offer_connection 
+FROM offer_connection
 WHERE offer_uuid = $entityUUID.uuid
 `, count{}, offerUUID)
 	if err != nil {
@@ -71,8 +71,8 @@ WHERE offer_uuid = $entityUUID.uuid
 
 	getSynthRelationsStmt, err := st.Prepare(`
 SELECT remote_relation_uuid AS &entityUUID.uuid
-FROM   offer_connection
-WHERE  offer_uuid = $entityUUID.uuid
+FROM offer_connection
+WHERE offer_uuid = $entityUUID.uuid
 `, entityUUID{})
 	if err != nil {
 		return errors.Errorf("preparing synthetic relations query: %w", err)
@@ -87,7 +87,7 @@ WHERE offer_uuid = $entityUUID.uuid
 	}
 
 	deleteOfferStmt, err := st.Prepare(`
-DELETE FROM offer 
+DELETE FROM offer
 WHERE uuid = $entityUUID.uuid
 `, offerUUID)
 	if err != nil {

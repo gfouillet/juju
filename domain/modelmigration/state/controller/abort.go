@@ -55,10 +55,10 @@ source_phase AS (
     SELECT id FROM model_migration_import_phase_type WHERE type = $importPhaseUpdate.source
 )
 UPDATE model_migration_import
-SET    phase_type_id = (SELECT id FROM target_phase),
-       updated_at    = $importPhaseUpdate.updated_at
-WHERE  model_uuid = $importPhaseUpdate.model_uuid
-AND    phase_type_id = (SELECT id FROM source_phase)
+SET phase_type_id = (SELECT id FROM target_phase),
+       updated_at = $importPhaseUpdate.updated_at
+WHERE model_uuid = $importPhaseUpdate.model_uuid
+AND phase_type_id = (SELECT id FROM source_phase)
 `, update)
 	if err != nil {
 		return errors.Capture(err)
@@ -98,9 +98,9 @@ func (s *State) checkAbortingState(ctx context.Context, tx *sqlair.TX, modelUUID
 	var row importPhaseRow
 	stmt, err := s.Prepare(`
 SELECT mmipt.type AS &importPhaseRow.phase_type
-FROM   model_migration_import AS mmi
-JOIN   model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
-WHERE  mmi.model_uuid = $modelUUIDArg.model_uuid
+FROM model_migration_import AS mmi
+JOIN model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
+WHERE mmi.model_uuid = $modelUUIDArg.model_uuid
 `, row, arg)
 	if err != nil {
 		return errors.Capture(err)
@@ -131,8 +131,8 @@ func (s *State) IsModelNotAlive(ctx context.Context, modelUUID string) (bool, er
 	arg := modelUUIDArg{ModelUUID: modelUUID}
 	stmt, err := s.Prepare(`
 SELECT m.life_id AS &modelLifeRow.life_id
-FROM   model AS m
-WHERE  m.uuid = $modelUUIDArg.model_uuid`, arg, modelLifeRow{})
+FROM model AS m
+WHERE m.uuid = $modelUUIDArg.model_uuid`, arg, modelLifeRow{})
 	if err != nil {
 		return false, errors.Capture(err)
 	}
@@ -172,8 +172,8 @@ SELECT mmi.model_uuid AS &importClaimStatusRow.model_uuid,
        mmi.source_migration_uuid AS &importClaimStatusRow.source_migration_uuid,
        mmipt.type AS &importClaimStatusRow.phase_type,
 	       mmi.updated_at AS &importClaimStatusRow.updated_at
-FROM   model_migration_import AS mmi
-JOIN   model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
+FROM model_migration_import AS mmi
+JOIN model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
 `, importClaimStatusRow{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -219,9 +219,9 @@ func (s *State) IsImportNamespaceRegistered(ctx context.Context, modelUUID strin
 	arg := namespaceArg{Namespace: modelUUID}
 	stmt, err := s.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   namespace_list
-WHERE  namespace = $namespaceArg.namespace
-LIMIT  1
+FROM namespace_list
+WHERE namespace = $namespaceArg.namespace
+LIMIT 1
 `, countResult{}, arg)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -266,16 +266,16 @@ func (s *State) StageAbortedModelDatabaseDeletion(ctx context.Context, modelUUID
 	nsArg := namespaceArg{Namespace: modelUUID}
 	deleteNamespaceListStmt, err := s.Prepare(`
 DELETE FROM namespace_list
-WHERE  namespace = $namespaceArg.namespace
+WHERE namespace = $namespaceArg.namespace
 `, nsArg)
 	if err != nil {
 		return errors.Capture(err)
 	}
 	stagedDeletionStmt, err := s.Prepare(`
 SELECT 1 AS &countResult.count
-FROM   model_database_deletion
-WHERE  namespace = $namespaceArg.namespace
-LIMIT  1
+FROM model_database_deletion
+WHERE namespace = $namespaceArg.namespace
+LIMIT 1
 `, countResult{}, nsArg)
 	if err != nil {
 		return errors.Capture(err)
@@ -351,7 +351,7 @@ model_namespace_row AS (
 staged_deletion_row AS (
     SELECT 1 FROM model_database_deletion WHERE namespace = $namespaceArg.namespace
 )
-SELECT EXISTS(SELECT 1 FROM model_row)           AS &abortFinalizeChecks.model_exists,
+SELECT EXISTS(SELECT 1 FROM model_row) AS &abortFinalizeChecks.model_exists,
        EXISTS(SELECT 1 FROM model_namespace_row) AS &abortFinalizeChecks.namespace_exists,
        EXISTS(SELECT 1 FROM staged_deletion_row) AS &abortFinalizeChecks.deletion_staged
 `, abortFinalizeChecks{}, mUUID, nsArg)
@@ -363,7 +363,7 @@ WITH claim AS (
     SELECT uuid FROM model_migration_import WHERE model_uuid = $modelUUIDArg.model_uuid
 )
 DELETE FROM model_migration_import_offer
-WHERE  migration_uuid IN (SELECT uuid FROM claim)
+WHERE migration_uuid IN (SELECT uuid FROM claim)
 `, mUUID)
 	if err != nil {
 		return errors.Capture(err)
@@ -373,14 +373,14 @@ WITH claim AS (
     SELECT uuid FROM model_migration_import WHERE model_uuid = $modelUUIDArg.model_uuid
 )
 DELETE FROM model_migration_import_external_controller_model
-WHERE  migration_uuid IN (SELECT uuid FROM claim)
+WHERE migration_uuid IN (SELECT uuid FROM claim)
 `, mUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
 	deleteClaimStmt, err := s.Prepare(`
 DELETE FROM model_migration_import
-WHERE  model_uuid = $modelUUIDArg.model_uuid
+WHERE model_uuid = $modelUUIDArg.model_uuid
 `, mUUID)
 	if err != nil {
 		return errors.Capture(err)

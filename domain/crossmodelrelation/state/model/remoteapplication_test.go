@@ -1342,10 +1342,10 @@ SELECT offer_connection_uuid FROM application_remote_consumer WHERE consumer_app
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT r.uuid
-FROM   application_remote_consumer AS arc
-JOIN   offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
-JOIN   relation AS r ON r.uuid = oc.remote_relation_uuid
-WHERE  arc.offer_connection_uuid = ?`, consumerUUID).Scan(&offererRelationUUID)
+FROM application_remote_consumer AS arc
+JOIN offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
+JOIN relation AS r ON r.uuid = oc.remote_relation_uuid
+WHERE arc.offer_connection_uuid = ?`, consumerUUID).Scan(&offererRelationUUID)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -1472,18 +1472,18 @@ SELECT offer_connection_uuid FROM application_remote_consumer WHERE consumer_app
 		}
 		if err := tx.QueryRowContext(ctx, `
 SELECT r.uuid
-FROM   application_remote_consumer AS arc
-JOIN   offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
-JOIN   relation AS r ON r.uuid = oc.remote_relation_uuid
-WHERE  arc.offer_connection_uuid = ?`, consumerUUID1).Scan(&offererRelationUUID1); err != nil {
+FROM application_remote_consumer AS arc
+JOIN offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
+JOIN relation AS r ON r.uuid = oc.remote_relation_uuid
+WHERE arc.offer_connection_uuid = ?`, consumerUUID1).Scan(&offererRelationUUID1); err != nil {
 			return err
 		}
 		return tx.QueryRowContext(ctx, `
 SELECT r.uuid
-FROM   application_remote_consumer AS arc
-JOIN   offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
-JOIN   relation AS r ON r.uuid = oc.remote_relation_uuid
-WHERE  arc.offer_connection_uuid = ?`, consumerUUID2).Scan(&offererRelationUUID2)
+FROM application_remote_consumer AS arc
+JOIN offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
+JOIN relation AS r ON r.uuid = oc.remote_relation_uuid
+WHERE arc.offer_connection_uuid = ?`, consumerUUID2).Scan(&offererRelationUUID2)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -1570,10 +1570,10 @@ SELECT offer_connection_uuid FROM application_remote_consumer WHERE consumer_app
 		return tx.QueryRowContext(ctx, `
 
 SELECT r.uuid
-FROM   application_remote_consumer AS arc
-JOIN   offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
-JOIN   relation AS r ON r.uuid = oc.remote_relation_uuid
-WHERE  arc.offer_connection_uuid = ?`, consumerUUID).Scan(&offererRelationUUID)
+FROM application_remote_consumer AS arc
+JOIN offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
+JOIN relation AS r ON r.uuid = oc.remote_relation_uuid
+WHERE arc.offer_connection_uuid = ?`, consumerUUID).Scan(&offererRelationUUID)
 
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1645,10 +1645,10 @@ SELECT offer_connection_uuid FROM application_remote_consumer WHERE consumer_app
 		return tx.QueryRowContext(ctx, `
 
 SELECT r.uuid
-FROM   application_remote_consumer AS arc
-JOIN   offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
-JOIN   relation AS r ON r.uuid = oc.remote_relation_uuid
-WHERE  arc.offer_connection_uuid = ?`, consumerUUID).Scan(&offererRelationUUID)
+FROM application_remote_consumer AS arc
+JOIN offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
+JOIN relation AS r ON r.uuid = oc.remote_relation_uuid
+WHERE arc.offer_connection_uuid = ?`, consumerUUID).Scan(&offererRelationUUID)
 
 	})
 	c.Assert(err, tc.ErrorIsNil)

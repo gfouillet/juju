@@ -804,11 +804,11 @@ func (s *stateSuite) assertNumProviderSubnets(c *tc.C, db *sql.DB, subnetUUID st
 
 func (s *stateSuite) assertSubnetAZs(c *tc.C, db *sql.DB, subnetUUID string, expectedAZs []string) {
 	rows, err := db.Query(`
-SELECT name 
-FROM   availability_zone_subnet 
-JOIN   availability_zone
-ON     availability_zone_uuid = availability_zone.uuid
-WHERE  subnet_uuid = ?`, subnetUUID)
+SELECT name
+FROM availability_zone_subnet
+JOIN availability_zone
+ON availability_zone_uuid = availability_zone.uuid
+WHERE subnet_uuid = ?`, subnetUUID)
 	c.Assert(err, tc.ErrorIsNil)
 	defer rows.Close()
 

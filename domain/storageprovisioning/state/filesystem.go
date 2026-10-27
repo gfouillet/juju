@@ -59,12 +59,12 @@ SELECT (asd.storage_name,
        cs.location,
        cs.count_max) AS (&filesystemTemplate.*),
        sp.type AS &filesystemTemplate.storage_type
-FROM   application_storage_directive AS asd
+FROM application_storage_directive AS asd
        JOIN charm_storage cs
             ON asd.charm_uuid = cs.charm_uuid
             AND asd.storage_name = cs.name
        JOIN storage_pool sp ON asd.storage_pool_uuid = sp.uuid
-WHERE  asd.application_uuid = $entityUUID.uuid
+WHERE asd.application_uuid = $entityUUID.uuid
 `, filesystemTemplate{}, id)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -150,8 +150,8 @@ func (st *State) checkFilesystemAttachmentExists(
 
 	checkQuery, err := st.Prepare(`
 SELECT &filesystemAttachmentUUID.*
-FROM   storage_filesystem_attachment
-WHERE  uuid = $filesystemAttachmentUUID.uuid
+FROM storage_filesystem_attachment
+WHERE uuid = $filesystemAttachmentUUID.uuid
 `,
 		fsaUUIDInput,
 	)
@@ -180,8 +180,8 @@ func (st *State) checkFilesystemExists(
 
 	checkQuery, err := st.Prepare(`
 SELECT &filesystemUUID.*
-FROM   storage_filesystem
-WHERE  uuid = $filesystemUUID.uuid
+FROM storage_filesystem
+WHERE uuid = $filesystemUUID.uuid
 `,
 		filesystemUUIDInput,
 	)
@@ -213,8 +213,8 @@ func (st *State) CheckFilesystemForIDExists(
 	filesystemIDInput := filesystemID{ID: fsID}
 	checkQuery, err := st.Prepare(`
 SELECT &filesystemID.*
-FROM   storage_filesystem
-WHERE  filesystem_id=$filesystemID.filesystem_id
+FROM storage_filesystem
+WHERE filesystem_id = $filesystemID.filesystem_id
 `,
 		filesystemIDInput,
 	)
@@ -269,12 +269,12 @@ SELECT (
   sv.volume_id,
   sfs.size_mib
 ) AS (&filesystem.*)
-FROM      storage_filesystem sfs
+FROM storage_filesystem sfs
 LEFT JOIN storage_instance_filesystem sifs ON sfs.uuid = sifs.storage_filesystem_uuid
 LEFT JOIN storage_instance si ON sifs.storage_instance_uuid = si.uuid
 LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
 LEFT JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
-WHERE     sfs.uuid = $filesystemUUID.uuid
+WHERE sfs.uuid = $filesystemUUID.uuid
 `,
 		uuidInput, dbVal,
 	)
@@ -333,9 +333,9 @@ func (st *State) GetFilesystemAttachment(
 
 	stmt, err := st.Prepare(`
 SELECT &filesystemAttachment.*
-FROM   storage_filesystem_attachment sfa
-JOIN   storage_filesystem sf ON sfa.storage_filesystem_uuid = sf.uuid
-WHERE  sfa.uuid = $filesystemAttachmentUUID.uuid
+FROM storage_filesystem_attachment sfa
+JOIN storage_filesystem sf ON sfa.storage_filesystem_uuid = sf.uuid
+WHERE sfa.uuid = $filesystemAttachmentUUID.uuid
 `,
 		uuidInput, dbVal,
 	)
@@ -406,7 +406,7 @@ SELECT DISTINCT
        (sfa.uuid, sf.filesystem_id) AS (&filesystemAttachmentIDs.*),
        m.name AS &filesystemAttachmentIDs.machine_name,
        u.name AS &filesystemAttachmentIDs.unit_name
-FROM   storage_filesystem_attachment sfa
+FROM storage_filesystem_attachment sfa
        JOIN storage_filesystem sf ON sfa.storage_filesystem_uuid = sf.uuid
        LEFT JOIN machine m ON sfa.net_node_uuid = m.net_node_uuid
        -- Only join units when there is no machine.
@@ -414,7 +414,7 @@ FROM   storage_filesystem_attachment sfa
            ON sfa.net_node_uuid = u.net_node_uuid
            AND m.net_node_uuid IS NULL
 WHERE sfa.uuid IN ($filesystemAttachmentUUIDs[:])
-AND   (m.net_node_uuid IS NOT NULL OR u.net_node_uuid IS NOT NULL)
+AND (m.net_node_uuid IS NOT NULL OR u.net_node_uuid IS NOT NULL)
 `
 
 	uuidToIDsStmt, err := st.Prepare(q, filesystemAttachmentIDs{}, uuidInputs)
@@ -478,8 +478,8 @@ func (st *State) GetFilesystemAttachmentLife(
 
 	lifeQuery, err := st.Prepare(`
 SELECT &entityLife.*
-FROM   storage_filesystem_attachment
-WHERE  uuid = $filesystemAttachmentUUID.uuid
+FROM storage_filesystem_attachment
+WHERE uuid = $filesystemAttachmentUUID.uuid
 `,
 		uuidInput, lifeDBVal,
 	)
@@ -531,10 +531,10 @@ func (st *State) getFilesystemAttachmentLifeForNetNode(
 	netNodeInput := netNodeUUID{UUID: uuid.String()}
 	stmt, err := st.Prepare(`
 SELECT DISTINCT &attachmentLife.*
-FROM            storage_filesystem_attachment
-WHERE           provision_scope_id=1
-AND             net_node_uuid=$netNodeUUID.uuid
-		`, attachmentLife{}, netNodeInput)
+FROM storage_filesystem_attachment
+WHERE provision_scope_id = 1
+AND net_node_uuid = $netNodeUUID.uuid
+`, attachmentLife{}, netNodeInput)
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -607,7 +607,7 @@ func (st *State) GetFilesystemAttachmentParams(
 	*/
 	stmt, err := st.Prepare(`
 SELECT &filesystemAttachmentParams.* FROM (
-    SELECT    sf.provider_id AS filesystem_provider_id,
+    SELECT sf.provider_id AS filesystem_provider_id,
               sfa.provider_id AS filesystem_attachment_provider_id,
               mci.instance_id AS machine_instance_id,
               kp.provider_id AS caas_instance_id,
@@ -616,18 +616,18 @@ SELECT &filesystemAttachmentParams.* FROM (
               sfa.mount_point,
               cs.read_only AS charm_storage_read_only,
               sp.type AS storage_pool_type
-    FROM      storage_filesystem_attachment sfa
-    JOIN      storage_filesystem sf ON sfa.storage_filesystem_uuid = sf.uuid
-    JOIN      storage_instance_filesystem sif ON sf.uuid = sif.storage_filesystem_uuid
-    JOIN 	  storage_instance si ON sif.storage_instance_uuid = si.uuid
-    JOIN      storage_pool sp ON si.storage_pool_uuid = sp.uuid
+    FROM storage_filesystem_attachment sfa
+    JOIN storage_filesystem sf ON sfa.storage_filesystem_uuid = sf.uuid
+    JOIN storage_instance_filesystem sif ON sf.uuid = sif.storage_filesystem_uuid
+    JOIN storage_instance si ON sif.storage_instance_uuid = si.uuid
+    JOIN storage_pool sp ON si.storage_pool_uuid = sp.uuid
     LEFT JOIN storage_attachment sa ON si.uuid = sa.storage_instance_uuid
     LEFT JOIN unit u ON sa.unit_uuid = u.uuid
   	LEFT JOIN k8s_pod kp ON u.uuid = kp.unit_uuid
     LEFT JOIN charm_storage cs ON u.charm_uuid = cs.charm_uuid AND si.storage_name = cs.name
     LEFT JOIN machine m ON sfa.net_node_uuid = m.net_node_uuid
     LEFT JOIN machine_cloud_instance mci ON m.uuid = mci.machine_uuid
-    WHERE     sfa.uuid = $filesystemAttachmentUUID.uuid
+    WHERE sfa.uuid = $filesystemAttachmentUUID.uuid
 )
 `,
 		fsaUUIDInput, dbVal,
@@ -708,10 +708,10 @@ func (st *State) GetFilesystemAttachmentUUIDForFilesystemNetNode(
 
 	uuidQuery, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_filesystem_attachment
-WHERE  storage_filesystem_uuid = $filesystemUUID.uuid
-AND    net_node_uuid = $netNodeUUID.uuid
-	`,
+FROM storage_filesystem_attachment
+WHERE storage_filesystem_uuid = $filesystemUUID.uuid
+AND net_node_uuid = $netNodeUUID.uuid
+`,
 		dbVal, netNodeInput, fsUUIDInput,
 	)
 	if err != nil {
@@ -780,8 +780,8 @@ func (st *State) GetFilesystemLife(
 
 	lifeQuery, err := st.Prepare(`
 SELECT &entityLife.*
-FROM   storage_filesystem
-WHERE  uuid = $filesystemUUID.uuid
+FROM storage_filesystem
+WHERE uuid = $filesystemUUID.uuid
 `,
 		uuidInput, lifeDBVal,
 	)
@@ -831,11 +831,11 @@ func (st *State) getFilesystemLifeForNetNode(
 	netNodeInput := netNodeUUID{UUID: uuid.String()}
 	stmt, err := st.Prepare(`
 SELECT DISTINCT (sf.filesystem_id, sf.life_id) AS (&filesystemLife.*)
-FROM            storage_filesystem sf
-JOIN            storage_filesystem_attachment sfa ON sf.uuid=sfa.storage_filesystem_uuid
-WHERE           sf.provision_scope_id=1
-AND             sfa.net_node_uuid=$netNodeUUID.uuid
-		`, filesystemLife{}, netNodeInput)
+FROM storage_filesystem sf
+JOIN storage_filesystem_attachment sfa ON sf.uuid = sfa.storage_filesystem_uuid
+WHERE sf.provision_scope_id = 1
+AND sfa.net_node_uuid = $netNodeUUID.uuid
+`, filesystemLife{}, netNodeInput)
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -888,18 +888,18 @@ func (st *State) GetFilesystemParams(
 
 	paramsStmt, err := st.Prepare(`
 SELECT &filesystemProvisioningParams.* FROM (
-    SELECT    sf.filesystem_id,
+    SELECT sf.filesystem_id,
               sf.provider_id,
               si.requested_size_mib AS size_mib,
               sp.type,
               sv.volume_id
-    FROM      storage_filesystem sf
-    JOIN      storage_instance_filesystem sif ON sif.storage_filesystem_uuid = sf.uuid
-    JOIN      storage_instance si ON sif.storage_instance_uuid = si.uuid
-    JOIN      storage_pool sp ON si.storage_pool_uuid = sp.uuid
+    FROM storage_filesystem sf
+    JOIN storage_instance_filesystem sif ON sif.storage_filesystem_uuid = sf.uuid
+    JOIN storage_instance si ON sif.storage_instance_uuid = si.uuid
+    JOIN storage_pool sp ON si.storage_pool_uuid = sp.uuid
     LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
     LEFT JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
-    WHERE  sf.uuid = $filesystemUUID.uuid
+    WHERE sf.uuid = $filesystemUUID.uuid
 )
 `,
 		paramsVal, input,
@@ -910,12 +910,12 @@ SELECT &filesystemProvisioningParams.* FROM (
 
 	poolAttributesStmt, err := st.Prepare(`
 SELECT &storagePoolAttribute.*
-FROM   storage_pool_attribute spa
-JOIN   storage_pool sp ON spa.storage_pool_uuid = sp.uuid
-JOIN   storage_instance si ON sp.uuid = si.storage_pool_uuid
-JOIN   storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
-JOIN   storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
-WHERE  sf.uuid = $filesystemUUID.uuid
+FROM storage_pool_attribute spa
+JOIN storage_pool sp ON spa.storage_pool_uuid = sp.uuid
+JOIN storage_instance si ON sp.uuid = si.storage_pool_uuid
+JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
+JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
+WHERE sf.uuid = $filesystemUUID.uuid
 `,
 		storagePoolAttribute{}, input,
 	)
@@ -1012,11 +1012,11 @@ SELECT &filesystemRemovalParams.* FROM (
     SELECT sf.provider_id,
            sf.obliterate_on_cleanup,
            sp.type
-    FROM   storage_filesystem sf
-    JOIN   storage_instance_filesystem sif ON sif.storage_filesystem_uuid = sf.uuid
-    JOIN   storage_instance si ON sif.storage_instance_uuid = si.uuid
-    JOIN   storage_pool sp ON si.storage_pool_uuid = sp.uuid
-    WHERE  sf.uuid = $filesystemUUID.uuid
+    FROM storage_filesystem sf
+    JOIN storage_instance_filesystem sif ON sif.storage_filesystem_uuid = sf.uuid
+    JOIN storage_instance si ON sif.storage_instance_uuid = si.uuid
+    JOIN storage_pool sp ON si.storage_pool_uuid = sp.uuid
+    WHERE sf.uuid = $filesystemUUID.uuid
 )
 `,
 		paramsVal, input,
@@ -1082,8 +1082,8 @@ func (st *State) GetFilesystemUUIDForID(
 	)
 	uuidQuery, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_filesystem
-WHERE  filesystem_id = $filesystemID.filesystem_id
+FROM storage_filesystem
+WHERE filesystem_id = $filesystemID.filesystem_id
 `,
 		idInput, dbVal,
 	)
@@ -1135,7 +1135,7 @@ func (st *State) InitialWatchStatementModelProvisionedFilesystems() (string, str
 		stmt, err := st.Prepare(`
 SELECT &filesystemID.*
 FROM storage_filesystem
-WHERE provision_scope_id=0
+WHERE provision_scope_id = 0
 `,
 			filesystemID{})
 		if err != nil {
@@ -1187,9 +1187,9 @@ func (st *State) InitialWatchStatementModelProvisionedFilesystemAttachments() (s
 	query := func(ctx context.Context, db database.TxnRunner) ([]string, error) {
 		stmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_filesystem_attachment
-WHERE  provision_scope_id=0
-		`, entityUUID{})
+FROM storage_filesystem_attachment
+WHERE provision_scope_id = 0
+`, entityUUID{})
 		if err != nil {
 			return nil, errors.Capture(err)
 		}
@@ -1234,9 +1234,9 @@ func (st *State) SetFilesystemProvisionedInfo(
 	}
 	stmt, err := st.Prepare(`
 UPDATE storage_filesystem
-SET    provider_id = $filesystemProvisionedInfo.provider_id,
+SET provider_id = $filesystemProvisionedInfo.provider_id,
        size_mib = $filesystemProvisionedInfo.size_mib
-WHERE  uuid = $filesystemProvisionedInfo.uuid
+WHERE uuid = $filesystemProvisionedInfo.uuid
 `, fs)
 	if err != nil {
 		return errors.Capture(err)
@@ -1278,9 +1278,9 @@ func (st *State) SetFilesystemAttachmentProvisionedInfo(
 	}
 	stmt, err := st.Prepare(`
 UPDATE storage_filesystem_attachment
-SET    mount_point = $filesystemAttachmentProvisionedInfo.mount_point,
+SET mount_point = $filesystemAttachmentProvisionedInfo.mount_point,
        read_only = $filesystemAttachmentProvisionedInfo.read_only
-WHERE  uuid = $filesystemAttachmentProvisionedInfo.uuid
+WHERE uuid = $filesystemAttachmentProvisionedInfo.uuid
 `, fs)
 	if err != nil {
 		return errors.Capture(err)
@@ -1330,9 +1330,9 @@ func (st *State) GetContainerMountsForApplication(
 SELECT (ccm.charm_container_key,
        ccm.storage,
        ccm.location) AS (&containerMount.*)
-FROM   application a
-INNER  JOIN charm_container_mount ccm ON a.charm_uuid = ccm.charm_uuid
-WHERE  a.uuid = $entityUUID.uuid
+FROM application a
+INNER JOIN charm_container_mount ccm ON a.charm_uuid = ccm.charm_uuid
+WHERE a.uuid = $entityUUID.uuid
 `, containerMount{}, input)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1389,12 +1389,12 @@ func (st *State) GetProvisionedFilesystemAttachmentsForApplication(
 SELECT (sfa.uuid,
        si.storage_name,
        sfa.provider_id) AS (&existingFilesystemAttachment.*)
-FROM   storage_filesystem_attachment AS sfa
-JOIN   storage_instance_filesystem AS sif ON sfa.storage_filesystem_uuid = sif.storage_filesystem_uuid
-JOIN   storage_instance AS si ON sif.storage_instance_uuid = si.uuid
-JOIN   storage_attachment AS sa ON si.uuid = sa.storage_instance_uuid
-JOIN   unit AS u ON sa.unit_uuid = u.uuid
-WHERE  u.application_uuid = $entityUUID.uuid AND sfa.provider_id <> ''`,
+FROM storage_filesystem_attachment AS sfa
+JOIN storage_instance_filesystem AS sif ON sfa.storage_filesystem_uuid = sif.storage_filesystem_uuid
+JOIN storage_instance AS si ON sif.storage_instance_uuid = si.uuid
+JOIN storage_attachment AS sa ON si.uuid = sa.storage_instance_uuid
+JOIN unit AS u ON sa.unit_uuid = u.uuid
+WHERE u.application_uuid = $entityUUID.uuid AND sfa.provider_id <> ''`,
 		existingFilesystemAttachment{}, input)
 
 	if err != nil {

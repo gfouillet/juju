@@ -66,7 +66,7 @@ func (s *ControllerSuite) SeedControllerTable(c *tc.C, controllerModelUUID corem
 		_, err := tx.ExecContext(
 			ctx,
 			`
-INSERT INTO controller (uuid, model_uuid, target_version, api_port, cert, private_key, ca_cert, ca_private_key, system_identity) 
+INSERT INTO controller (uuid, model_uuid, target_version, api_port, cert, private_key, ca_cert, ca_private_key, system_identity)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 			controllerUUID,

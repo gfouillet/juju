@@ -101,7 +101,7 @@ func (s *stateSuite) TestSetInstanceData(c *tc.C) {
 	// Create a reference machine.
 	machineUUID, machineName := s.addMachine(c)
 	// Add a reference AZ.
-	_, err := db.ExecContext(c.Context(), "INSERT INTO availability_zone VALUES('deadbeef-0bad-400d-8000-4b1d0d06f00d', 'az-1')")
+	_, err := db.ExecContext(c.Context(), "INSERT INTO availability_zone VALUES ('deadbeef-0bad-400d-8000-4b1d0d06f00d', 'az-1')")
 	c.Assert(err, tc.ErrorIsNil)
 	s.runQuery(c, `
 INSERT INTO machine_reprovision (machine_name, requested_at)
@@ -127,7 +127,7 @@ VALUES (?, ?)`, machineName.String(), time.Now())
 	c.Assert(err, tc.ErrorIsNil)
 
 	var instanceData instanceData
-	row := db.QueryRowContext(c.Context(), "SELECT * FROM machine_cloud_instance WHERE instance_id='1'")
+	row := db.QueryRowContext(c.Context(), "SELECT * FROM machine_cloud_instance WHERE instance_id = '1'")
 	c.Assert(row.Err(), tc.ErrorIsNil)
 	err = row.Scan(
 		&instanceData.MachineUUID,
@@ -194,7 +194,7 @@ VALUES (?, ?)`, machineName.String(), time.Now())
 	c.Assert(err, tc.ErrorIsNil)
 
 	var instanceID sql.Null[string]
-	row := db.QueryRowContext(c.Context(), "SELECT instance_id FROM machine_cloud_instance WHERE machine_uuid=?", machineUUID)
+	row := db.QueryRowContext(c.Context(), "SELECT instance_id FROM machine_cloud_instance WHERE machine_uuid = ?", machineUUID)
 	err = row.Scan(
 		&instanceID,
 	)
@@ -221,7 +221,7 @@ func (s *stateSuite) TestSetInstanceDataEmptyDisplayName(c *tc.C) {
 	c.Assert(err, tc.ErrorIsNil)
 
 	var displayName sql.Null[string]
-	row := db.QueryRowContext(c.Context(), "SELECT display_name FROM machine_cloud_instance WHERE machine_uuid=?", machineUUID)
+	row := db.QueryRowContext(c.Context(), "SELECT display_name FROM machine_cloud_instance WHERE machine_uuid = ?", machineUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 	err = row.Scan(
 		&displayName,
@@ -363,7 +363,7 @@ func (s *stateSuite) ensureInstance(c *tc.C) (machine.UUID, machine.Name) {
 	// Create a reference machine.
 	machineUUID, machineName := s.addMachine(c)
 	// Add a reference AZ.
-	_, err := db.ExecContext(c.Context(), "INSERT INTO availability_zone VALUES('deadbeef-0bad-400d-8000-4b1d0d06f00d', 'az-1')")
+	_, err := db.ExecContext(c.Context(), "INSERT INTO availability_zone VALUES ('deadbeef-0bad-400d-8000-4b1d0d06f00d', 'az-1')")
 	c.Assert(err, tc.ErrorIsNil)
 
 	err = s.state.SetMachineCloudInstance(

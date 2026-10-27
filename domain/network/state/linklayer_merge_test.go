@@ -324,7 +324,7 @@ func (s *mergeLinkLayerSuite) TestCannotAddEmptyProviderLinkLayerDevice(c *tc.C)
 	query := `
 INSERT INTO provider_link_layer_device (provider_id, device_uuid)
 VALUES (?, ?)
-	`
+`
 
 	// Act
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
@@ -348,7 +348,7 @@ func (s *mergeLinkLayerSuite) TestCannotAddEmptyProviderIPAddress(c *tc.C) {
 	query := `
 INSERT INTO provider_ip_address (provider_id, address_uuid)
 VALUES (?, ?)
-	`
+`
 
 	// Act
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {

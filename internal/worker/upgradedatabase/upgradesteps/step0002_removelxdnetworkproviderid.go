@@ -16,15 +16,15 @@ import (
 var (
 	getModelDBCloudTypeQuery = sqlair.MustPrepare(`
 SELECT m.cloud_type AS &cloudType.type
-FROM   model AS m;
+FROM model AS m;
 `, cloudType{})
 	deleteProviderSubnetQuery = sqlair.MustPrepare(`
 DELETE FROM provider_subnet;
 `)
 	updateProviderNetworkQuery = sqlair.MustPrepare(`
 UPDATE provider_network
-SET    provider_network_id = trim(provider_network_id, 'net-')
-WHERE  provider_network_id LIKE 'net-%';
+SET provider_network_id = trim(provider_network_id, 'net-')
+WHERE provider_network_id LIKE 'net-%';
 `)
 )
 

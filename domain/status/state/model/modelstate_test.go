@@ -58,7 +58,7 @@ func TestModelStateSuite(t *testing.T) {
 func (s *modelStateSuite) SetUpTest(c *tc.C) {
 	s.baseSuite.SetUpTest(c)
 
-	_, err := s.DB().ExecContext(c.Context(), "INSERT INTO availability_zone VALUES('deadbeef-0bad-400d-8000-4b1d0d06f00d', 'az-1')")
+	_, err := s.DB().ExecContext(c.Context(), "INSERT INTO availability_zone VALUES ('deadbeef-0bad-400d-8000-4b1d0d06f00d', 'az-1')")
 	c.Assert(err, tc.ErrorIsNil)
 
 	s.state = NewModelState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
@@ -73,7 +73,7 @@ func (s *modelStateSuite) TestGetModelStatusInfo(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type, credential_owner)
 VALUES (?, ?, "test", "prod", "iaas", "test-model", "ec2", "owner")
-		`, modelUUID.String(), controllerUUID.String())
+`, modelUUID.String(), controllerUUID.String())
 		return err
 	})
 	c.Check(err, tc.ErrorIsNil)
@@ -99,7 +99,7 @@ func (s *modelStateSuite) TestIsControllerModelNotControllerModel(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type, credential_owner)
 VALUES (?, ?, "test", "prod", "iaas", "test-model", "ec2", "owner")
-		`, modelUUID.String(), controllerUUID.String())
+`, modelUUID.String(), controllerUUID.String())
 		return err
 	})
 	c.Check(err, tc.ErrorIsNil)
@@ -118,7 +118,7 @@ func (s *modelStateSuite) TestIsControllerModel(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type, credential_owner, is_controller_model)
 VALUES (?, ?, "test", "prod", "iaas", "test-model", "ec2", "owner", true)
-		`, modelUUID.String(), controllerUUID.String())
+`, modelUUID.String(), controllerUUID.String())
 		return err
 	})
 	c.Check(err, tc.ErrorIsNil)
@@ -621,8 +621,8 @@ func (s *modelStateSuite) getRelationStatus(c *tc.C, relationUUID corerelation.U
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT relation_status_type_id, message, updated_at
-FROM   relation_status
-WHERE  relation_uuid = ?
+FROM relation_status
+WHERE relation_uuid = ?
 `, relationUUID).Scan(&statusType, &message, &updated_at)
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1502,9 +1502,9 @@ func (s *modelStateSuite) TestSetUnitPresence(c *tc.C) {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT uap.last_seen
-FROM   unit_agent_presence AS uap
-JOIN   unit AS u ON u.uuid = uap.unit_uuid
-WHERE  u.name = ?`, "foo/0").Scan(&lastSeen); err != nil {
+FROM unit_agent_presence AS uap
+JOIN unit AS u ON u.uuid = uap.unit_uuid
+WHERE u.name = ?`, "foo/0").Scan(&lastSeen); err != nil {
 			return err
 		}
 		return err
@@ -1535,9 +1535,9 @@ func (s *modelStateSuite) TestDeleteUnitPresence(c *tc.C) {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT uap.last_seen
-FROM   unit_agent_presence AS uap
-JOIN   unit AS u ON u.uuid = uap.unit_uuid
-WHERE  u.name = ?`, "foo/0").Scan(&lastSeen); err != nil {
+FROM unit_agent_presence AS uap
+JOIN unit AS u ON u.uuid = uap.unit_uuid
+WHERE u.name = ?`, "foo/0").Scan(&lastSeen); err != nil {
 			return err
 		}
 		return err
@@ -1554,9 +1554,9 @@ WHERE  u.name = ?`, "foo/0").Scan(&lastSeen); err != nil {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM   unit_agent_presence AS uap
-JOIN   unit AS u ON u.uuid = uap.unit_uuid
-WHERE  u.name = ?`, "foo/0").Scan(&count); err != nil {
+FROM unit_agent_presence AS uap
+JOIN unit AS u ON u.uuid = uap.unit_uuid
+WHERE u.name = ?`, "foo/0").Scan(&count); err != nil {
 			return err
 		}
 		return err
@@ -1579,8 +1579,8 @@ func (s *modelStateSuite) TestGetApplicationAndUnitStatusesCMRSyntheticApplicati
 
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-UPDATE charm SET source_id=2, architecture_id=NULL
-WHERE uuid=(SELECT charm_uuid FROM application WHERE uuid=?)`, appUUID)
+UPDATE charm SET source_id = 2, architecture_id = NULL
+WHERE uuid = (SELECT charm_uuid FROM application WHERE uuid = ?)`, appUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -2147,10 +2147,10 @@ func (s *modelStateSuite) TestGetApplicationAndUnitStatusesK8sServiceNonLocalAdd
 
 func (s *modelStateSuite) setWorkloadVersion(c *tc.C, appUUID coreapplication.UUID, unitUUID coreunit.UUID, version string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `UPDATE application_workload_version SET version=? WHERE application_uuid=?`, version, appUUID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE application_workload_version SET version = ? WHERE application_uuid = ?`, version, appUUID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE unit_workload_version SET version=? WHERE unit_uuid=?`, version, unitUUID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE unit_workload_version SET version = ? WHERE unit_uuid = ?`, version, unitUUID); err != nil {
 			return err
 		}
 		return nil
@@ -2352,10 +2352,10 @@ func (s *modelStateSuite) TestGetMachineStatusSuccess(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(c.Context(), `
 UPDATE machine_status
-SET status_id='1',
-	message='started',
-	updated_at='2024-07-12 12:00:00'
-WHERE machine_uuid=?`, mUUID)
+SET status_id = '1',
+	message = 'started',
+	updated_at = '2024-07-12 12:00:00'
+WHERE machine_uuid = ?`, mUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -2382,11 +2382,11 @@ func (s *modelStateSuite) TestGetMachineStatusSuccessWithData(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(c.Context(), `
 UPDATE machine_status
-SET status_id='1',
-	message='started',
-	data='{"key":"data"}',
-	updated_at='2024-07-12 12:00:00'
-WHERE machine_uuid=?`, mUUID)
+SET status_id = '1',
+	message = 'started',
+	data = '{"key":"data"}',
+	updated_at = '2024-07-12 12:00:00'
+WHERE machine_uuid = ?`, mUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -2426,7 +2426,7 @@ func (s *modelStateSuite) TestGetMachineMachineStatusNotFoundError(c *tc.C) {
 	mUUID, machineName := s.createMachine(c)
 
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "DELETE FROM machine_status WHERE machine_uuid=?", mUUID)
+		_, err := tx.ExecContext(ctx, "DELETE FROM machine_status WHERE machine_uuid = ?", mUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -2754,10 +2754,10 @@ func (s *modelStateSuite) TestGetInstanceStatusSuccess(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(c.Context(), `
 UPDATE machine_cloud_instance_status
-SET status_id='3',
-	message='running',
-	updated_at='2024-07-12 12:00:00'
-WHERE machine_uuid=?`, machineUUID)
+SET status_id = '3',
+	message = 'running',
+	updated_at = '2024-07-12 12:00:00'
+WHERE machine_uuid = ?`, machineUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -2783,11 +2783,11 @@ func (s *modelStateSuite) TestGetInstanceStatusSuccessWithData(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(c.Context(), `
 UPDATE machine_cloud_instance_status
-SET status_id='3',
-	message='running',
-	data='{"key": "data"}',
-	updated_at='2024-07-12 12:00:00'
-WHERE machine_uuid=?`, machineUUID)
+SET status_id = '3',
+	message = 'running',
+	data = '{"key": "data"}',
+	updated_at = '2024-07-12 12:00:00'
+WHERE machine_uuid = ?`, machineUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -2819,7 +2819,7 @@ func (s *modelStateSuite) TestGetInstanceStatusMachineStatusNotFoundError(c *tc.
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(c.Context(), `
 DELETE FROM machine_cloud_instance_status
-WHERE machine_uuid=?`, machineUUID)
+WHERE machine_uuid = ?`, machineUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

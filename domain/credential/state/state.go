@@ -74,10 +74,10 @@ func (st *State) credentialUUIDForKey(
 
 	selectStmt, err := st.Prepare(`
 SELECT &credentialUUID.uuid
-FROM   v_cloud_credential
-WHERE  name = $credentialKey.name
-AND    owner_name = $credentialKey.owner_name
-AND    cloud_name = $credentialKey.cloud_name
+FROM v_cloud_credential
+WHERE name = $credentialKey.name
+AND owner_name = $credentialKey.owner_name
+AND cloud_name = $credentialKey.cloud_name
 `, dbKey, result)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -113,8 +113,8 @@ func (st *State) GetModelCredentialStatus(
 	vals := modelCredentialStatus{}
 	stmt, err := st.Prepare(`
 SELECT &modelCredentialStatus.*
-FROM   v_model
-WHERE  uuid = $modelUUID.uuid`,
+FROM v_model
+WHERE uuid = $modelUUID.uuid`,
 		modelUUID, vals,
 	)
 	if err != nil {
@@ -181,10 +181,10 @@ func (st *State) UpsertCloudCredential(ctx context.Context, key corecredential.K
 	}
 	stmt, err := st.Prepare(`
 SELECT uuid AS &credentialUUID.uuid
-FROM   v_cloud_credential
-WHERE  name = $credentialKey.name
-AND    owner_name = $credentialKey.owner_name
-AND    cloud_name = $credentialKey.cloud_name
+FROM v_cloud_credential
+WHERE name = $credentialKey.name
+AND owner_name = $credentialKey.owner_name
+AND cloud_name = $credentialKey.cloud_name
 `, dbKey, credentialUUID{})
 	if err != nil {
 		return errors.Capture(err)
@@ -252,13 +252,13 @@ VALUES (
     $Credential.invalid,
     $Credential.invalid_reason
 )
-ON CONFLICT(uuid) DO UPDATE SET name=excluded.name,
-                                cloud_uuid=excluded.cloud_uuid,
-                                auth_type_id=excluded.auth_type_id,
-                                owner_uuid=excluded.owner_uuid,
-                                revoked=excluded.revoked,
-                                invalid=excluded.invalid,
-                                invalid_reason=excluded.invalid_reason
+ON CONFLICT (uuid) DO UPDATE SET name = excluded.name,
+                                cloud_uuid = excluded.cloud_uuid,
+                                auth_type_id = excluded.auth_type_id,
+                                owner_uuid = excluded.owner_uuid,
+                                revoked = excluded.revoked,
+                                invalid = excluded.invalid,
+                                invalid_reason = excluded.invalid_reason
 `
 
 	insertStmt, err := sqlair.Prepare(insertQuery, Credential{})
@@ -279,8 +279,8 @@ func updateCredentialAttributes(ctx context.Context, tx *sqlair.TX, credentialUU
 	// Delete any keys no longer in the attributes map.
 	// TODO(wallyworld) - sqlair does not support IN operations with a list of values
 	deleteQuery := `
-DELETE FROM  cloud_credential_attribute
-WHERE        cloud_credential_uuid = $M.uuid
+DELETE FROM cloud_credential_attribute
+WHERE cloud_credential_uuid = $M.uuid
 `
 
 	deleteStmt, err := sqlair.Prepare(deleteQuery, sqlair.M{})

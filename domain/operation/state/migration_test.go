@@ -102,9 +102,9 @@ func (s *migrationSuite) TestImportOperationsWithSingleUnitTask(c *tc.C) {
 	// Verify operation row and timestamps/flags
 	rows := s.queryRows(
 		c, `
-SELECT uuid, summary, enqueued_at, started_at, completed_at, parallel, execution_group 
-FROM   operation 
-WHERE  uuid = ?`, opUUID)
+SELECT uuid, summary, enqueued_at, started_at, completed_at, parallel, execution_group
+FROM operation
+WHERE uuid = ?`, opUUID)
 	c.Assert(rows, tc.HasLen, 1)
 	row := rows[0]
 	c.Check(row["uuid"], tc.Equals, opUUID)
@@ -118,9 +118,9 @@ WHERE  uuid = ?`, opUUID)
 
 	// Verify task row
 	taskRows := s.queryRows(c, `
-SELECT uuid, operation_uuid, task_id, enqueued_at, started_at, completed_at 
-FROM   operation_task 
-WHERE  uuid = ?`, taskUUID)
+SELECT uuid, operation_uuid, task_id, enqueued_at, started_at, completed_at
+FROM operation_task
+WHERE uuid = ?`, taskUUID)
 	c.Assert(taskRows, tc.HasLen, 1)
 	c.Check(taskRows[0]["operation_uuid"], tc.Equals, opUUID)
 	c.Check(taskRows[0]["task_id"], tc.Equals, "t-1")
@@ -130,45 +130,45 @@ WHERE  uuid = ?`, taskUUID)
 
 	// Verify unit link exists and points to the "miniapp" unit
 	unitRows := s.queryRows(c, `
-SELECT name 
-FROM   unit
-JOIN   operation_unit_task AS out ON unit.uuid = out.unit_uuid
-WHERE  task_uuid = ?`, taskUUID)
+SELECT name
+FROM unit
+JOIN operation_unit_task AS out ON unit.uuid = out.unit_uuid
+WHERE task_uuid = ?`, taskUUID)
 	c.Assert(unitRows, tc.HasLen, 1)
 	c.Check(unitRows[0]["name"], tc.Equals, "miniapp/0")
 
 	// Verify task status stored as "running"
 	statusRows := s.queryRows(c, `
-SELECT sv.status 
-FROM   operation_task_status AS ts 
-JOIN   operation_task_status_value AS sv ON ts.status_id = sv.id 
-WHERE  ts.task_uuid = ?`, taskUUID)
+SELECT sv.status
+FROM operation_task_status AS ts
+JOIN operation_task_status_value AS sv ON ts.status_id = sv.id
+WHERE ts.task_uuid = ?`, taskUUID)
 	c.Assert(statusRows, tc.HasLen, 1)
 	c.Check(statusRows[0]["status"], tc.Equals, "running")
 
 	// Verify log entry stored
 	logRows := s.queryRows(c, `
 SELECT content, created_at
-FROM   operation_task_log 
-WHERE  task_uuid = ?`, taskUUID)
+FROM operation_task_log
+WHERE task_uuid = ?`, taskUUID)
 	c.Assert(logRows, tc.HasLen, 1)
 	c.Check(logRows[0]["content"], tc.Equals, "hello")
 	c.Check(logRows[0]["created_at"], tc.Equals, logTime)
 
 	// Verify operation parameters saved from task parameters
 	paramRows := s.queryRows(c, `
-SELECT key, value 
-FROM   operation_parameter 
-WHERE  operation_uuid = ?`, opUUID)
+SELECT key, value
+FROM operation_parameter
+WHERE operation_uuid = ?`, opUUID)
 	c.Assert(paramRows, tc.HasLen, 1)
 	c.Check(paramRows[0]["key"], tc.Equals, "p1")
 	c.Check(paramRows[0]["value"], tc.Equals, `"v1"`)
 
 	// Verify operation action bound via application/charm
 	actionRows := s.queryRows(c, `
-SELECT charm_uuid, charm_action_key 
-FROM   operation_action 
-WHERE  operation_uuid = ?`, opUUID)
+SELECT charm_uuid, charm_action_key
+FROM operation_action
+WHERE operation_uuid = ?`, opUUID)
 	c.Assert(actionRows, tc.HasLen, 1)
 	c.Check(actionRows[0]["charm_action_key"], tc.Equals, "test-action")
 	c.Check(actionRows[0]["charm_uuid"], tc.Equals, charmUUID)
@@ -220,7 +220,7 @@ func (s *migrationSuite) TestImportOperationsWithMultipleUnitTask(c *tc.C) {
 	c.Assert(err, tc.IsNil)
 	// Verify machine link exists and points to the right machine
 	linkRows := s.queryRows(c, `
-SELECT operation_task.task_id, unit.name 
+SELECT operation_task.task_id, unit.name
 FROM operation_unit_task
 JOIN operation_task ON operation_task.uuid = operation_unit_task.task_uuid
 JOIN unit ON unit.uuid = operation_unit_task.unit_uuid`)
@@ -334,7 +334,7 @@ func (s *migrationSuite) TestImportOperationsWithMultipleMachineTasks(c *tc.C) {
 
 	// Verify machine link exists and points to the right machine
 	linkRows := s.queryRows(c, `
-SELECT operation_task.task_id, machine.name 
+SELECT operation_task.task_id, machine.name
 FROM operation_machine_task
 JOIN operation_task ON operation_task.uuid = operation_machine_task.task_uuid
 JOIN machine ON machine.uuid = operation_machine_task.machine_uuid`)

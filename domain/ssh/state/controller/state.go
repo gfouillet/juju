@@ -236,7 +236,7 @@ func (st *State) SetSSHServerPort(ctx context.Context, port int) error {
 
 	updateStmt, err := st.Prepare(`
 UPDATE controller_ssh_server_port
-SET    port = $sshServerPort.port`, sshServerPort{})
+SET port = $sshServerPort.port`, sshServerPort{})
 	if err != nil {
 		return errors.Capture(err)
 	}

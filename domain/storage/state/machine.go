@@ -29,8 +29,8 @@ func checkMachinesExist(
 	var foundCount count
 	checkQ := `
 SELECT COUNT(uuid) AS &count.count
-FROM   machine
-WHERE  uuid IN ($machineUUIDs[:])
+FROM machine
+WHERE uuid IN ($machineUUIDs[:])
 `
 
 	stmt, err := preparer.Prepare(checkQ, uuids, foundCount)

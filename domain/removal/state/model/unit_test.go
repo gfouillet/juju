@@ -152,7 +152,7 @@ func (s *unitSuite) TestEnsureUnitNotAliveCascadeNormalSuccessLastUnitParentMach
 
 	_, err := s.DB().Exec(`
 INSERT INTO machine_parent (machine_uuid, parent_uuid) VALUES (?, ?)
-	`, app2UnitMachineUUID.String(), app1UnitMachineUUID.String())
+`, app2UnitMachineUUID.String(), app1UnitMachineUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
 	st := NewState(s.TxnRunnerFactory(), loggertesting.WrapCheckLog(c))
@@ -242,14 +242,14 @@ VALUES ('instance-uuid', 'does-not-matter', 'pool-uuid', 1, 100, 'charm-name', '
 		}
 
 		fs := `
-INSERT INTO storage_filesystem(uuid, filesystem_id, life_id, provision_scope_id)
+INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES ('filesystem-uuid', 'filesystem-id', 0, 1)`
 		if _, err := tx.ExecContext(ctx, fs); err != nil {
 			return err
 		}
 
 		mfs := `
-INSERT INTO machine_filesystem(machine_uuid, filesystem_uuid)
+INSERT INTO machine_filesystem (machine_uuid, filesystem_uuid)
 VALUES (?, 'filesystem-uuid')`
 		if _, err := tx.ExecContext(ctx, mfs, unitMachineUUID.String()); err != nil {
 			return err
@@ -438,7 +438,7 @@ func (s *unitSuite) TestGetRelationUnitsForUnit(c *tc.C) {
 	crs := []string{"some-charm-rel1", "some-charm-rel2", "some-charm-rel3"}
 	for _, cr := range crs {
 		_, err = s.DB().ExecContext(ctx, `
-INSERT INTO charm_relation (uuid, charm_uuid, name, interface, capacity, role_id,  scope_id)
+INSERT INTO charm_relation (uuid, charm_uuid, name, interface, capacity, role_id, scope_id)
 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			cr, charm, cr, "interface", 0, 0, 0,
 		)
@@ -448,7 +448,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	aes := []string{"some-app-ep1", "some-app-ep2", "some-app-ep3"}
 	for i, ae := range aes {
 		_, err = s.DB().ExecContext(ctx, `
-INSERT INTO application_endpoint (uuid, application_uuid, space_uuid, charm_relation_uuid) 
+INSERT INTO application_endpoint (uuid, application_uuid, space_uuid, charm_relation_uuid)
 VALUES (?, ?, ?, ?)`,
 			ae, app, network.AlphaSpaceId, crs[i],
 		)
@@ -516,8 +516,8 @@ func (s *unitSuite) TestUnitRemovalNotExistsSuccess(c *tc.C) {
 	// We rely on the worker to handle that fact.
 	row := s.DB().QueryRow(`
 SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, "removal-uuid",
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, "removal-uuid",
 	)
 
 	var (
@@ -703,7 +703,7 @@ func (s *unitSuite) TestMarkUnitAsDeadWithNoEntitiesWithRelations(c *tc.C) {
 	s.checkUnitLife(c, unitUUID.String(), life.Dying)
 
 	// Remove the unit from the relation scope.
-	row := s.DB().QueryRowContext(c.Context(), "SELECT uuid FROM relation_unit WHERE unit_uuid=?", unitUUID.String())
+	row := s.DB().QueryRowContext(c.Context(), "SELECT uuid FROM relation_unit WHERE unit_uuid = ?", unitUUID.String())
 	var ruUUID string
 	err = row.Scan(&ruUUID)
 	c.Assert(err, tc.ErrorIsNil)
@@ -773,7 +773,7 @@ func (s *unitSuite) TestDeleteIAASUnitConsumingSecret(c *tc.C) {
 	c.Assert(err, tc.ErrorIsNil)
 
 	q := `
-INSERT INTO secret_unit_consumer(secret_id, source_model_uuid, unit_uuid, current_revision) 
+INSERT INTO secret_unit_consumer (secret_id, source_model_uuid, unit_uuid, current_revision)
 VALUES (?, 'some-model', ?, 0)`
 	_, err = s.DB().ExecContext(ctx, q, sID, unitUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
@@ -782,7 +782,7 @@ VALUES (?, 'some-model', ?, 0)`
 	// The reservation reference should be deleted;
 	// the deletion would fail due to FK violation.
 	_, err = s.DB().ExecContext(ctx,
-		"INSERT INTO secret_reservation(secret_id, unit_uuid, created_at) VALUES (?, ?, '2025-01-01 00:00:00')",
+		"INSERT INTO secret_reservation (secret_id, unit_uuid, created_at) VALUES (?, ?, '2025-01-01 00:00:00')",
 		sID+"-reserved", unitUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -1086,7 +1086,7 @@ func (s *unitSuite) TestDeleteUnitWithDanglingCharmReference(c *tc.C) {
 			uuid TEXT PRIMARY KEY,
 			charm_uuid TEXT,
 			created_at DATETIME,
-			FOREIGN KEY(charm_uuid) REFERENCES charm(uuid)
+			FOREIGN KEY (charm_uuid) REFERENCES charm (uuid)
 		)`)
 		if err != nil {
 			return err

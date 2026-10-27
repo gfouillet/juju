@@ -164,7 +164,7 @@ AND source = $inputMetadata.source
 
 	// Prepare a statement to update only the image from a specific UUID
 	updateMetadataStmt, err := sqlair.Prepare(`
-UPDATE cloud_image_metadata 
+UPDATE cloud_image_metadata
 SET image_id = $inputMetadata.image_id
 WHERE cloud_image_metadata.uuid = $inputMetadata.uuid;`, inputMetadata{})
 	if err != nil {
@@ -335,7 +335,7 @@ func (s *State) DeleteMetadataWithImageID(ctx context.Context, imageID string) e
 	}
 
 	deleteMetadataStmt, err := sqlair.Prepare(`
-DELETE FROM cloud_image_metadata 
+DELETE FROM cloud_image_metadata
 WHERE image_id = $metadataImageID.image_id`, metadataImageID{})
 	if err != nil {
 		return errors.Capture(err)
@@ -385,7 +385,7 @@ func (s *State) FindMetadata(ctx context.Context, criteria cloudimagemetadata.Me
 	}
 
 	findMetadataStmt, err := sqlair.Prepare(`
-WITH arch(id, architecture_name) AS (
+WITH arch (id, architecture_name) AS (
 	SELECT id, name FROM architecture
 )
 SELECT &outputMetadata.*
@@ -466,8 +466,8 @@ func (s *State) tryCleanUpExpiredMetadata(ctx context.Context) error {
 	}
 
 	deleteMetadataStmt, err := sqlair.Prepare(`
-DELETE FROM cloud_image_metadata 
-WHERE source != $inputMetadata.source AND  
+DELETE FROM cloud_image_metadata
+WHERE source != $inputMetadata.source AND
 created_at < $ttl.expires_at;`, expirationTime, customSource)
 	if err != nil {
 		return errors.Capture(err)

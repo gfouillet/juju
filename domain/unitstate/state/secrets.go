@@ -27,9 +27,9 @@ func (st *State) GetSecretRotatePolicy(ctx context.Context, secretUUID string) (
 
 	stmt, err := st.Prepare(`
 SELECT srp.policy AS &secretRotatePolicyInfo.policy
-FROM   secret_metadata sm
+FROM secret_metadata sm
        JOIN secret_rotate_policy srp ON srp.id = sm.rotate_policy_id
-WHERE  sm.secret_id = $secretID.secret_id`, secretID{}, secretRotatePolicyInfo{})
+WHERE sm.secret_id = $secretID.secret_id`, secretID{}, secretRotatePolicyInfo{})
 	if err != nil {
 		return coresecrets.RotateNever, errors.Capture(err)
 	}
@@ -70,13 +70,13 @@ func (st *State) upsertSecretMetadata(ctx context.Context, tx *sqlair.TX, md sec
 	query := `
 INSERT INTO secret_metadata (*)
 VALUES ($secretMetadata.*)
-ON CONFLICT(secret_id) DO UPDATE SET
-    version=excluded.version,
-    description=excluded.description,
-    rotate_policy_id=excluded.rotate_policy_id,
-    auto_prune=excluded.auto_prune,
-    latest_revision_checksum=excluded.latest_revision_checksum,
-    update_time=excluded.update_time`
+ON CONFLICT (secret_id) DO UPDATE SET
+    version = excluded.version,
+    description = excluded.description,
+    rotate_policy_id = excluded.rotate_policy_id,
+    auto_prune = excluded.auto_prune,
+    latest_revision_checksum = excluded.latest_revision_checksum,
+    update_time = excluded.update_time`
 
 	stmt, err := st.Prepare(query, secretMetadata{})
 	if err != nil {
@@ -91,7 +91,7 @@ func (st *State) upsertSecretRevision(ctx context.Context, tx *sqlair.TX, rev *s
 INSERT INTO secret_revision (*)
 VALUES ($secretRevision.*)
 ON CONFLICT (uuid) DO UPDATE SET
-    update_time=excluded.update_time`
+    update_time = excluded.update_time`
 
 	stmt, err := st.Prepare(query, secretRevision{})
 	if err != nil {
@@ -105,8 +105,8 @@ func (st *State) insertSecretContent(ctx context.Context, tx *sqlair.TX, revUUID
 	query := `
 INSERT INTO secret_content (revision_uuid, name, content)
 VALUES ($secretContent.revision_uuid, $secretContent.name, $secretContent.content)
-ON CONFLICT(revision_uuid, name) DO UPDATE SET
-    content=excluded.content`
+ON CONFLICT (revision_uuid, name) DO UPDATE SET
+    content = excluded.content`
 
 	stmt, err := st.Prepare(query, secretContent{})
 	if err != nil {
@@ -131,9 +131,9 @@ func (st *State) upsertSecretValueRef(ctx context.Context, tx *sqlair.TX, revUUI
 	query := `
 INSERT INTO secret_value_ref (*)
 VALUES ($secretValueRef.*)
-ON CONFLICT(revision_uuid) DO UPDATE SET
-    backend_uuid=excluded.backend_uuid,
-    revision_id=excluded.revision_id`
+ON CONFLICT (revision_uuid) DO UPDATE SET
+    backend_uuid = excluded.backend_uuid,
+    revision_id = excluded.revision_id`
 
 	stmt, err := st.Prepare(query, secretValueRef{})
 	if err != nil {
@@ -152,8 +152,8 @@ func (st *State) upsertSecretRevisionExpiry(ctx context.Context, tx *sqlair.TX, 
 	query := `
 INSERT INTO secret_revision_expire (*)
 VALUES ($secretRevisionExpire.*)
-ON CONFLICT(revision_uuid) DO UPDATE SET
-    expire_time=excluded.expire_time`
+ON CONFLICT (revision_uuid) DO UPDATE SET
+    expire_time = excluded.expire_time`
 
 	stmt, err := st.Prepare(query, secretRevisionExpire{})
 	if err != nil {
@@ -171,8 +171,8 @@ func (st *State) upsertSecretNextRotateTime(ctx context.Context, tx *sqlair.TX, 
 	query := `
 INSERT INTO secret_rotation (*)
 VALUES ($secretRotate.*)
-ON CONFLICT(secret_id) DO UPDATE SET
-    next_rotation_time=excluded.next_rotation_time`
+ON CONFLICT (secret_id) DO UPDATE SET
+    next_rotation_time = excluded.next_rotation_time`
 
 	stmt, err := st.Prepare(query, secretRotate{})
 	if err != nil {
@@ -200,7 +200,7 @@ func (st *State) setSecretApplicationOwner(ctx context.Context, tx *sqlair.TX, s
 	query := `
 INSERT INTO secret_application_owner (secret_id, application_uuid, label)
 VALUES ($secretApplicationOwner.*)
-ON CONFLICT(secret_id, application_uuid) DO UPDATE SET label=excluded.label`
+ON CONFLICT (secret_id, application_uuid) DO UPDATE SET label = excluded.label`
 
 	stmt, err := st.Prepare(query, secretApplicationOwner{})
 	if err != nil {
@@ -218,7 +218,7 @@ func (st *State) setSecretUnitOwner(ctx context.Context, tx *sqlair.TX, secretID
 	query := `
 INSERT INTO secret_unit_owner (secret_id, unit_uuid, label)
 VALUES ($secretUnitOwner.*)
-ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET label=excluded.label`
+ON CONFLICT (secret_id, unit_uuid) DO UPDATE SET label = excluded.label`
 
 	stmt, err := st.Prepare(query, secretUnitOwner{})
 	if err != nil {
@@ -250,19 +250,19 @@ func (st *State) checkApplicationSecretLabelExists(
 	stmt, err := st.Prepare(`
 WITH secret AS (
     SELECT secret_id
-    FROM   secret_application_owner
-    WHERE  label = $secretApplicationOwner.label
-    AND    application_uuid = $secretApplicationOwner.application_uuid
+    FROM secret_application_owner
+    WHERE label = $secretApplicationOwner.label
+    AND application_uuid = $secretApplicationOwner.application_uuid
     UNION ALL
     SELECT secret_id
-    FROM   secret_unit_owner
-    JOIN   unit u ON u.uuid = secret_unit_owner.unit_uuid
-    WHERE  label = $secretApplicationOwner.label
-    AND    u.application_uuid = $secretApplicationOwner.application_uuid
+    FROM secret_unit_owner
+    JOIN unit u ON u.uuid = secret_unit_owner.unit_uuid
+    WHERE label = $secretApplicationOwner.label
+    AND u.application_uuid = $secretApplicationOwner.application_uuid
 )
 SELECT COUNT(*) AS &countResult.count
 FROM secret
-WHERE  secret.secret_id != $secretApplicationOwner.secret_id
+WHERE secret.secret_id != $secretApplicationOwner.secret_id
 `, input, countResult{})
 	if err != nil {
 		return false, errors.Capture(err)
@@ -293,19 +293,19 @@ func (st *State) checkUnitSecretLabelExists(
 	stmt, err := st.Prepare(`
 WITH secret AS (
     SELECT secret_id
-    FROM   secret_application_owner AS sao
-    JOIN   unit AS u ON sao.application_uuid = u.application_uuid
-    WHERE  label = $secretUnitOwner.label
-    AND    u.uuid = $secretUnitOwner.unit_uuid
+    FROM secret_application_owner AS sao
+    JOIN unit AS u ON sao.application_uuid = u.application_uuid
+    WHERE label = $secretUnitOwner.label
+    AND u.uuid = $secretUnitOwner.unit_uuid
     UNION ALL
     SELECT secret_id
-    FROM   secret_unit_owner AS suo
-    WHERE  label = $secretUnitOwner.label
-    AND    suo.unit_uuid = $secretUnitOwner.unit_uuid
-) 
+    FROM secret_unit_owner AS suo
+    WHERE label = $secretUnitOwner.label
+    AND suo.unit_uuid = $secretUnitOwner.unit_uuid
+)
 SELECT COUNT(*) AS &countResult.count
 FROM secret
-WHERE  secret.secret_id != $secretUnitOwner.secret_id
+WHERE secret.secret_id != $secretUnitOwner.secret_id
 `, input, countResult{})
 	if err != nil {
 		return false, errors.Capture(err)
@@ -329,8 +329,8 @@ func (st *State) getSecretOwnerUUID(
 	case domainsecret.ApplicationCharmSecretOwner:
 		stmt, err := st.Prepare(`
 SELECT application_uuid AS &entityUUID.uuid
-FROM   secret_application_owner
-WHERE  secret_id = $secretID.secret_id
+FROM secret_application_owner
+WHERE secret_id = $secretID.secret_id
 `, arg, entityUUID{})
 		if err != nil {
 			return "", errors.Capture(err)
@@ -343,8 +343,8 @@ WHERE  secret_id = $secretID.secret_id
 	case domainsecret.UnitCharmSecretOwner:
 		stmt, err := st.Prepare(`
 SELECT unit_uuid AS &entityUUID.uuid
-FROM   secret_unit_owner
-WHERE  secret_id = $secretID.secret_id
+FROM secret_unit_owner
+WHERE secret_id = $secretID.secret_id
 `, arg, entityUUID{})
 		if err != nil {
 			return "", errors.Capture(err)
@@ -382,11 +382,11 @@ func (st *State) grantSecretOwnerManage(ctx context.Context, tx *sqlair.TX, secr
 	query := `
 INSERT INTO secret_permission (*)
 VALUES ($secretPermissionGrant.*)
-ON CONFLICT(secret_id, subject_uuid) DO UPDATE SET
-    role_id=excluded.role_id,
-    subject_type_id=excluded.subject_type_id,
-    scope_type_id=excluded.scope_type_id,
-    scope_uuid=excluded.scope_uuid`
+ON CONFLICT (secret_id, subject_uuid) DO UPDATE SET
+    role_id = excluded.role_id,
+    subject_type_id = excluded.subject_type_id,
+    scope_type_id = excluded.scope_type_id,
+    scope_uuid = excluded.scope_uuid`
 
 	stmt, err := st.Prepare(query, secretPermissionGrant{})
 	if err != nil {

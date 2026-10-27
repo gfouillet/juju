@@ -293,7 +293,7 @@ func (st *State) AllMachinesAndNetNodes(ctx context.Context) (map[string]string,
 	}
 	query := `
 SELECT &machineNameNetNode.*
-FROM   machine
+FROM machine
 `
 	stmt, err := st.Prepare(query, machineNameNetNode{})
 	if err != nil {

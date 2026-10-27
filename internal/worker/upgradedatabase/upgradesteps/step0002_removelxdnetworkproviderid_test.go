@@ -153,7 +153,7 @@ func (s *step0002Suite) addModel(c *tc.C, cloudType string) {
 	s.query(c, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, 'test-model', 'admin', 'iaas', 'test-cloud', ?)
-		`, "model-uuid", "controller-uuid", cloudType)
+`, "model-uuid", "controller-uuid", cloudType)
 }
 
 func (s *step0002Suite) addSubnet(c *tc.C, cidr string) string {

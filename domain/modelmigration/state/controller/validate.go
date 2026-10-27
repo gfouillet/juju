@@ -40,8 +40,8 @@ func (s *State) GetKnownSecretBackends(ctx context.Context, uuids []string) ([]s
 
 	stmt, err := s.Prepare(`
 SELECT sb.uuid AS &entityUUID.uuid
-FROM   secret_backend AS sb
-WHERE  sb.uuid IN ($nameList[:])
+FROM secret_backend AS sb
+WHERE sb.uuid IN ($nameList[:])
 `, entityUUID{}, nameList{})
 	if err != nil {
 		return nil, errors.Errorf("preparing known secret backends statement: %w", err)
@@ -75,8 +75,8 @@ func (s *State) GetSecretBackendReferencesForModel(ctx context.Context, modelUUI
 	arg := modelUUIDArg{ModelUUID: modelUUID}
 	stmt, err := s.Prepare(`
 SELECT (secret_revision_uuid, secret_backend_uuid) AS (&secretBackendRef.*)
-FROM   secret_backend_reference
-WHERE  model_uuid = $modelUUIDArg.model_uuid
+FROM secret_backend_reference
+WHERE model_uuid = $modelUUIDArg.model_uuid
 `, secretBackendRef{}, arg)
 	if err != nil {
 		return nil, errors.Errorf("preparing secret backend references statement: %w", err)
@@ -139,9 +139,9 @@ func (s *State) GetAgentBinaryArchitecturesForVersion(ctx context.Context, versi
 	arg := agentVersionArg{Version: version}
 	stmt, err := s.Prepare(`
 SELECT a.name AS &architectureName.name
-FROM   agent_binary_store AS abs
-JOIN   architecture AS a ON a.id = abs.architecture_id
-WHERE  abs.version = $agentVersionArg.version
+FROM agent_binary_store AS abs
+JOIN architecture AS a ON a.id = abs.architecture_id
+WHERE abs.version = $agentVersionArg.version
 `, architectureName{}, arg)
 	if err != nil {
 		return nil, errors.Errorf("preparing controller agent binary architectures statement: %w", err)

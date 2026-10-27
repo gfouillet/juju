@@ -69,8 +69,8 @@ func (s *State) getModelSecretBackendDetails(ctx context.Context, tx *sqlair.TX,
 	input := modelIdentifier{ModelID: uuid}
 	stmt, err := s.Prepare(`
 SELECT &ModelSecretBackend.*
-FROM   v_model_secret_backend
-WHERE  uuid = $modelIdentifier.uuid`, input, ModelSecretBackend{})
+FROM v_model_secret_backend
+WHERE uuid = $modelIdentifier.uuid`, input, ModelSecretBackend{})
 	if err != nil {
 		return secretbackend.ModelSecretBackend{}, errors.Capture(err)
 	}
@@ -102,9 +102,9 @@ func (s *State) GetModelType(ctx context.Context, modelUUID coremodel.UUID) (cor
 	mDetails := modelDetails{UUID: modelUUID}
 	stmt, err := s.Prepare(`
 SELECT mt.type AS &modelDetails.model_type
-FROM   model m
-JOIN   model_type mt ON mt.id = model_type_id
-WHERE  m.uuid = $modelDetails.uuid
+FROM model m
+JOIN model_type mt ON mt.id = model_type_id
+WHERE m.uuid = $modelDetails.uuid
 `, modelDetails{})
 	if err != nil {
 		return "", errors.Capture(err)
@@ -134,16 +134,16 @@ func (s *State) GetInternalAndActiveBackendUUIDs(ctx context.Context, modelUUID 
 
 	stmtActiveBackend, err := s.Prepare(`
 SELECT secret_backend_uuid AS &ModelSecretBackend.secret_backend_uuid
-FROM   v_model_secret_backend
-WHERE  uuid = $ModelSecretBackend.uuid`, activeBackend)
+FROM v_model_secret_backend
+WHERE uuid = $ModelSecretBackend.uuid`, activeBackend)
 	if err != nil {
 		return "", "", errors.Capture(err)
 	}
 
 	stmtBackendUUID, err := s.Prepare(`
 SELECT uuid AS &SecretBackend.uuid
-FROM   secret_backend
-WHERE  name = $SecretBackend.name`, internalBackend)
+FROM secret_backend
+WHERE name = $SecretBackend.name`, internalBackend)
 	if err != nil {
 		return "", "", errors.Capture(err)
 	}
@@ -291,8 +291,8 @@ func (s *State) DeleteSecretBackend(ctx context.Context, identifier secretbacken
 
 	checkInUseStmt, err := s.Prepare(`
 SELECT COUNT(*) AS &Count.num
-FROM   secret_backend_reference
-WHERE  secret_backend_uuid = $SecretBackend.uuid`, SecretBackend{}, Count{})
+FROM secret_backend_reference
+WHERE secret_backend_uuid = $SecretBackend.uuid`, SecretBackend{}, Count{})
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -388,9 +388,9 @@ func (s *State) isImmutable(ctx context.Context, tx *sqlair.TX, backendUUID stri
 	entity := secretBackend{UUID: backendUUID}
 	stmt, err := s.Prepare(`
 SELECT 1 AS &Count.num
-FROM   secret_backend
-WHERE  uuid = $secretBackend.uuid
-AND    origin_id = 0 -- built-in
+FROM secret_backend
+WHERE uuid = $secretBackend.uuid
+AND origin_id = 0 -- built-in
 LIMIT 1`, entity, Count{})
 	if err != nil {
 		return false, errors.Capture(err)
@@ -447,13 +447,13 @@ func (s *State) ListSecretBackends(ctx context.Context) ([]*secretbackend.Secret
 	}
 	nonK8sQuery := fmt.Sprintf(`
 SELECT
-    b.uuid                                   AS &SecretBackendRow.uuid,
-    b.name                                   AS &SecretBackendRow.name,
-    bt.type                                  AS &SecretBackendRow.backend_type,
-    b.token_rotate_interval                  AS &SecretBackendRow.token_rotate_interval,
+    b.uuid AS &SecretBackendRow.uuid,
+    b.name AS &SecretBackendRow.name,
+    bt.type AS &SecretBackendRow.backend_type,
+    b.token_rotate_interval AS &SecretBackendRow.token_rotate_interval,
     COUNT(DISTINCT sbr.secret_id) AS &SecretBackendRow.num_secrets,
-    c.name                                   AS &SecretBackendRow.config_name,
-    c.content                                AS &SecretBackendRow.config_content
+    c.name AS &SecretBackendRow.config_name,
+    c.content AS &SecretBackendRow.config_content
 FROM secret_backend b
     JOIN secret_backend_type bt ON b.backend_type_id = bt.id
     LEFT JOIN secret_backend_config c ON b.uuid = c.backend_uuid
@@ -505,13 +505,13 @@ GROUP BY b.name, c.name`, kubernetes.BackendName)
 func (s *State) listInUseKubernetesSecretBackends(ctx context.Context, tx *sqlair.TX) ([]*secretbackend.SecretBackend, error) {
 	backendQuery := fmt.Sprintf(`
 SELECT
-    sbr.secret_backend_uuid                  AS &secretBackendForK8sModelRow.uuid,
-    b.name                                   AS &secretBackendForK8sModelRow.name,
-    vm.uuid                                  AS &secretBackendForK8sModelRow.model_uuid,
-    vm.name                                  AS &secretBackendForK8sModelRow.model_name,
-    bt.type                                  AS &secretBackendForK8sModelRow.backend_type,
-    vc.uuid                                  AS &secretBackendForK8sModelRow.cloud_uuid,
-    vcca.uuid                                AS &secretBackendForK8sModelRow.cloud_credential_uuid,
+    sbr.secret_backend_uuid AS &secretBackendForK8sModelRow.uuid,
+    b.name AS &secretBackendForK8sModelRow.name,
+    vm.uuid AS &secretBackendForK8sModelRow.model_uuid,
+    vm.name AS &secretBackendForK8sModelRow.model_name,
+    bt.type AS &secretBackendForK8sModelRow.backend_type,
+    vc.uuid AS &secretBackendForK8sModelRow.cloud_uuid,
+    vcca.uuid AS &secretBackendForK8sModelRow.cloud_credential_uuid,
     COUNT(DISTINCT sbr.secret_id) AS &secretBackendForK8sModelRow.num_secrets,
     (vc.uuid,
     vc.name,

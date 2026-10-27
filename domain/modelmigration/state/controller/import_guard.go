@@ -18,10 +18,10 @@ import (
 // the txn guard and the companion-table write methods.
 const importPhaseQuery = `
 SELECT mmipt.type AS &importPhaseRow.phase_type
-FROM   model_migration_import AS mmi
-JOIN   model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
-WHERE  mmi.model_uuid = $importClaimKey.model_uuid
-AND    mmi.uuid = $importClaimKey.claim_uuid
+FROM model_migration_import AS mmi
+JOIN model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
+WHERE mmi.model_uuid = $importClaimKey.model_uuid
+AND mmi.uuid = $importClaimKey.claim_uuid
 `
 
 // NewImportTxnRunnerFactory returns a transaction runner factory that fences

@@ -233,7 +233,7 @@ func (s *importRemoteApplicationOfferersSuite) TestImportRemoteApplicationOffere
 			FROM application_remote_offerer rao
 			JOIN application a ON rao.application_uuid = a.uuid
 			WHERE a.name = ?
-		`, args[0].Name).Scan(&offerUUID, &offerURL, &offererModelUUID, &macaroon)
+`, args[0].Name).Scan(&offerUUID, &offerURL, &offererModelUUID, &macaroon)
 	})
 	c.Assert(err, tc.IsNil)
 	c.Check(offerUUID, tc.Equals, args[0].OfferUUID)
@@ -250,7 +250,7 @@ func (s *importRemoteApplicationOfferersSuite) TestImportRemoteApplicationOffere
 			JOIN charm c ON cr.charm_uuid = c.uuid
 			JOIN application a ON a.charm_uuid = c.uuid
 			WHERE a.name = ? AND cr.name != 'juju-info'
-		`, args[0].Name).Scan(&endpointCount)
+`, args[0].Name).Scan(&endpointCount)
 	})
 	c.Assert(err, tc.IsNil)
 	c.Check(endpointCount, tc.Equals, 2, tc.Commentf("Expected 2 user-defined endpoints"))
@@ -296,7 +296,7 @@ func (s *importRemoteApplicationOfferersSuite) TestImportRemoteApplicationOffere
 			JOIN application a ON u.application_uuid = a.uuid
 			WHERE a.name = ?
 			ORDER BY u.name
-		`, args[0].Name)
+`, args[0].Name)
 		if err != nil {
 			return err
 		}
@@ -865,7 +865,7 @@ func (s *importSecretSuite) TestImportRemoteApplicationSecretGrants(c *tc.C) {
 			SELECT secret_id, role_id, subject_uuid, subject_type_id, scope_uuid, scope_type_id
 			FROM secret_permission
 			WHERE secret_id = ?
-		`, secretID).Scan(&obtainedSecretID, &obtainedRoleID, &obtainedSubjectUUID, &obtainedSubjectType, &obtainedScopeUUID, &obtainedScopeType)
+`, secretID).Scan(&obtainedSecretID, &obtainedRoleID, &obtainedSubjectUUID, &obtainedSubjectType, &obtainedScopeUUID, &obtainedScopeType)
 	})
 	c.Assert(err, tc.IsNil)
 	c.Check(obtainedSecretID, tc.Equals, secretID)
@@ -923,7 +923,7 @@ func (s *importSecretSuite) TestImportRemoteApplicationSecretGrantsMultipleAppli
 			FROM secret_permission
 			WHERE secret_id = ?
 			ORDER BY subject_uuid
-		`, secretID)
+`, secretID)
 		if err != nil {
 			return err
 		}
@@ -1017,7 +1017,7 @@ func (s *importSecretSuite) TestImportRemoteSecretConsumers(c *tc.C) {
 			SELECT secret_id, unit_name, current_revision
 			FROM secret_remote_unit_consumer
 			WHERE secret_id = ?
-		`, secretID).Scan(&obtainedSecretID, &obtainedUnitName, &obtainedCurrentRev)
+`, secretID).Scan(&obtainedSecretID, &obtainedUnitName, &obtainedCurrentRev)
 	})
 	c.Assert(err, tc.IsNil)
 	c.Check(obtainedSecretID, tc.Equals, secretID)
@@ -1071,7 +1071,7 @@ func (s *importSecretSuite) TestImportRemoteSecret(c *tc.C) {
 			SELECT unit_uuid, source_model_uuid, label, current_revision
 			FROM secret_unit_consumer
 			WHERE secret_id = ?
-		`, secretID).Scan(&obtainedUnitUUID, &obtainedSourceModel, &obtainedLabel, &obtainedRev)
+`, secretID).Scan(&obtainedUnitUUID, &obtainedSourceModel, &obtainedLabel, &obtainedRev)
 	})
 	c.Assert(err, tc.IsNil)
 	c.Check(obtainedUnitUUID, tc.Equals, unitUUID)
@@ -1090,7 +1090,7 @@ func (s *importSecretSuite) TestImportRemoteSecret(c *tc.C) {
 			SELECT secret_id, latest_revision, migrated
 			FROM secret_reference
 			WHERE secret_id = ?
-		`, secretID).Scan(&obtainedRefSecretID, &obtainedRefLatestRevision, &obtainedRefMigrated)
+`, secretID).Scan(&obtainedRefSecretID, &obtainedRefLatestRevision, &obtainedRefMigrated)
 	})
 	c.Assert(err, tc.IsNil)
 	c.Check(obtainedRefSecretID, tc.Equals, secretID)
@@ -1156,7 +1156,7 @@ func (s *importSecretSuite) TestImportRemoteSecretTwoConsumerUnit(c *tc.C) {
 			FROM secret_unit_consumer
 			WHERE secret_id = ?
 			AND unit_uuid = ?
-		`, secretID, unitUUID2).Scan(&obtainedSourceModel, &obtainedLabel, &obtainedRev)
+`, secretID, unitUUID2).Scan(&obtainedSourceModel, &obtainedLabel, &obtainedRev)
 	})
 	c.Assert(err, tc.IsNil)
 	c.Check(obtainedSourceModel, tc.Equals, sourceModelUUID)
@@ -1174,7 +1174,7 @@ func (s *importSecretSuite) TestImportRemoteSecretTwoConsumerUnit(c *tc.C) {
 			SELECT secret_id, latest_revision, migrated
 			FROM secret_reference
 			WHERE secret_id = ?
-		`, secretID).Scan(&obtainedRefSecretID, &obtainedRefLatestRevision, &obtainedRefMigrated)
+`, secretID).Scan(&obtainedRefSecretID, &obtainedRefLatestRevision, &obtainedRefMigrated)
 	})
 	c.Assert(err, tc.IsNil)
 	c.Check(obtainedRefSecretID, tc.Equals, secretID)
@@ -1193,7 +1193,7 @@ func (s *importSecretSuite) createSecretWithMetadata(c *tc.C, secretID string) {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO secret_metadata (secret_id, version, description, rotate_policy_id, auto_prune, create_time, update_time)
 			VALUES (?, 1, '', 0, 0, ?, ?)
-		`, secretID, now, now); err != nil {
+`, secretID, now, now); err != nil {
 			return err
 		}
 		// create initial revision so latest revision queries work.
@@ -1201,7 +1201,7 @@ func (s *importSecretSuite) createSecretWithMetadata(c *tc.C, secretID string) {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO secret_revision (uuid, secret_id, revision, create_time)
 			VALUES (?, ?, 1, ?)
-		`, revUUID, secretID, now); err != nil {
+`, revUUID, secretID, now); err != nil {
 			return err
 		}
 		return nil

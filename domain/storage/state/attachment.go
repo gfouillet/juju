@@ -67,9 +67,9 @@ func (s *State) GetStorageAttachmentUUIDForStorageInstanceAndUnit(
 	)
 	stmt, err := s.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_attachment
-WHERE  storage_instance_uuid = $storageInstanceUUID.uuid
-AND    unit_uuid = $unitUUID.uuid`,
+FROM storage_attachment
+WHERE storage_instance_uuid = $storageInstanceUUID.uuid
+AND unit_uuid = $unitUUID.uuid`,
 		storageInstanceUUIDInput, unitUUIDInput, dbVal,
 	)
 	if err != nil {
@@ -204,21 +204,21 @@ func (s *State) GetStorageClassificationForUnits(
 -- storage_volume.persistent because persistent is only populated later at
 -- provisioning time (and never for storage_filesystem).
 WITH unit_storage AS (
-    SELECT    sa.unit_uuid          AS unit_uuid,
-              si.uuid               AS storage_uuid,
-              si.storage_id         AS storage_id,
+    SELECT sa.unit_uuid AS unit_uuid,
+              si.uuid AS storage_uuid,
+              si.storage_id AS storage_id,
               sf.provision_scope_id AS filesystem_provision_scope_id,
               sv.provision_scope_id AS volume_provision_scope_id
-    FROM      storage_attachment AS sa
-    JOIN      storage_instance AS si ON si.uuid = sa.storage_instance_uuid
+    FROM storage_attachment AS sa
+    JOIN storage_instance AS si ON si.uuid = sa.storage_instance_uuid
     LEFT JOIN storage_instance_filesystem AS sif ON sif.storage_instance_uuid = si.uuid
     LEFT JOIN storage_filesystem AS sf ON sf.uuid = sif.storage_filesystem_uuid
     LEFT JOIN storage_instance_volume AS siv ON siv.storage_instance_uuid = si.uuid
     LEFT JOIN storage_volume AS sv ON sv.uuid = siv.storage_volume_uuid
-    WHERE     sa.unit_uuid IN ($uuids[:])
+    WHERE sa.unit_uuid IN ($uuids[:])
 )
-SELECT   &storageClassification.*
-FROM     unit_storage
+SELECT &storageClassification.*
+FROM unit_storage
 ORDER BY unit_uuid, storage_uuid
 `, uuids{}, storageClassification{})
 	if err != nil {

@@ -585,7 +585,7 @@ func (s *applicationStateSuite) TestCreateApplicationWithResolvedResources(c *tc
 		return tx.QueryRowContext(ctx, `
 SELECT uuid, charm_uuid
 FROM application
-WHERE name=?`, "666").Scan(&appUUID, &charmUUID)
+WHERE name = ?`, "666").Scan(&appUUID, &charmUUID)
 	})
 	var (
 		foundCharmResources        []charm.Resource
@@ -598,8 +598,8 @@ WHERE name=?`, "666").Scan(&appUUID, &charmUUID)
 		rows, err := tx.QueryContext(ctx, `
 SELECT cr.name, crk.name as kind, path, description
 FROM charm_resource cr
-JOIN charm_resource_kind crk ON crk.id=cr.kind_id
-WHERE charm_uuid=?`, charmUUID)
+JOIN charm_resource_kind crk ON crk.id = cr.kind_id
+WHERE charm_uuid = ?`, charmUUID)
 		defer func() { _ = rows.Close() }()
 		if err != nil {
 			return errors.Capture(err)
@@ -737,7 +737,7 @@ func (s *applicationStateSuite) TestCreateApplicationWithPendingResources(c *tc.
 		return tx.QueryRowContext(ctx, `
 SELECT uuid, charm_uuid
 FROM application
-WHERE name=?`, appName).Scan(&appUUID, &charmUUID)
+WHERE name = ?`, appName).Scan(&appUUID, &charmUUID)
 	})
 	var (
 		foundCharmResources        []charm.Resource
@@ -750,8 +750,8 @@ WHERE name=?`, appName).Scan(&appUUID, &charmUUID)
 		rows, err := tx.QueryContext(ctx, `
 SELECT cr.name, crk.name as kind, path, description
 FROM charm_resource cr
-JOIN charm_resource_kind crk ON crk.id=cr.kind_id
-WHERE charm_uuid=?`, charmUUID)
+JOIN charm_resource_kind crk ON crk.id = cr.kind_id
+WHERE charm_uuid = ?`, charmUUID)
 		defer func() { _ = rows.Close() }()
 		if err != nil {
 			return errors.Capture(err)
@@ -1388,7 +1388,7 @@ JOIN link_layer_device AS lld ON lld.uuid = ip_address.device_uuid
 JOIN net_node ON net_node.uuid = lld.net_node_uuid
 JOIN k8s_service ON k8s_service.net_node_uuid = net_node.uuid
 WHERE application_uuid = ?
-			`, appUUID)
+`, appUUID)
 			if err != nil {
 				return err
 			}
@@ -1459,7 +1459,7 @@ JOIN link_layer_device AS lld ON lld.uuid = ip_address.device_uuid
 JOIN net_node ON net_node.uuid = lld.net_node_uuid
 JOIN k8s_service ON k8s_service.net_node_uuid = net_node.uuid
 WHERE application_uuid = ?
-			`, appUUID)
+`, appUUID)
 			if err != nil {
 				return err
 			}
@@ -1682,7 +1682,7 @@ func (s *applicationStateSuite) TestSetDesiredApplicationScale(c *tc.C) {
 
 	var gotScale int
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT scale FROM application_scale WHERE application_uuid=?", appUUID).
+		err := tx.QueryRowContext(ctx, "SELECT scale FROM application_scale WHERE application_uuid = ?", appUUID).
 			Scan(&gotScale)
 		return err
 	})
@@ -1701,7 +1701,7 @@ func (s *applicationStateSuite) TestUpdateApplicationScale(c *tc.C) {
 
 	var gotScale int
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT scale FROM application_scale WHERE application_uuid=?", appUUID).
+		err := tx.QueryRowContext(ctx, "SELECT scale FROM application_scale WHERE application_uuid = ?", appUUID).
 			Scan(&gotScale)
 		return err
 	})
@@ -1744,7 +1744,7 @@ func (s *applicationStateSuite) TestSetApplicationScalingStateAlreadyScaling(c *
 	checkResult := func(want application.ScaleState) {
 		var got application.ScaleState
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			err := tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid=?", appUUID).
+			err := tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid = ?", appUUID).
 				Scan(&got.Scale, &got.Scaling, &got.ScaleTarget)
 			return err
 		})
@@ -1817,7 +1817,7 @@ func (s *applicationStateSuite) TestSetApplicationScalingStateAppDying(c *tc.C) 
 	checkResult := func(want application.ScaleState) {
 		var got application.ScaleState
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			err := tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid=?", appUUID).
+			err := tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid = ?", appUUID).
 				Scan(&got.Scale, &got.Scaling, &got.ScaleTarget)
 			return err
 		})
@@ -1846,7 +1846,7 @@ func (s *applicationStateSuite) TestSetApplicationScalingStateAppDead(c *tc.C) {
 	checkResult := func(want application.ScaleState) {
 		var got application.ScaleState
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			err := tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid=?", appUUID).
+			err := tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid = ?", appUUID).
 				Scan(&got.Scale, &got.Scaling, &got.ScaleTarget)
 			return err
 		})
@@ -1873,7 +1873,7 @@ func (s *applicationStateSuite) TestSetApplicationScalingStateNotScaling(c *tc.C
 	checkResult := func(want application.ScaleState) {
 		var got application.ScaleState
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			err := tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid=?", appUUID).
+			err := tx.QueryRowContext(ctx, "SELECT scale, scaling, scale_target FROM application_scale WHERE application_uuid = ?", appUUID).
 				Scan(&got.Scale, &got.Scaling, &got.ScaleTarget)
 			return err
 		})
@@ -2257,7 +2257,7 @@ func (s *applicationStateSuite) TestInitialWatchStatementApplicationsWithPending
 UPDATE charm SET available = TRUE
 FROM application AS a
 INNER JOIN charm AS c ON a.charm_uuid = c.uuid
-WHERE a.uuid=?`, id1.String())
+WHERE a.uuid = ?`, id1.String())
 
 		return err
 	})
@@ -2294,7 +2294,7 @@ func (s *applicationStateSuite) TestGetApplicationsWithPendingCharmsFromUUIDsIfA
 UPDATE charm SET available = TRUE
 FROM application AS a
 INNER JOIN charm AS c ON a.charm_uuid = c.uuid
-WHERE a.uuid=?`, id.String())
+WHERE a.uuid = ?`, id.String())
 
 		return err
 	})
@@ -2343,7 +2343,7 @@ func (s *applicationStateSuite) TestGetApplicationsWithPendingCharmsFromUUIDsFor
 UPDATE charm SET available = TRUE
 FROM application AS a
 INNER JOIN charm AS c ON a.charm_uuid = c.uuid
-WHERE a.uuid=?`, id1.String())
+WHERE a.uuid = ?`, id1.String())
 
 		return err
 	})

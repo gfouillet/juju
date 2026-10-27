@@ -49,7 +49,7 @@ func (s *baseSuite) SetUpTest(c *tc.C) {
 	s.query(c, `
 			INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 			VALUES (?, ?, "test", "prod", "iaas", "test-model", "ec2")
-		`, s.modelUUID, coretesting.ControllerTag.Id())
+`, s.modelUUID, coretesting.ControllerTag.Id())
 
 	appState := applicationstate.NewState(s.TxnRunnerFactory(), s.modelUUID, clock.WallClock, loggertesting.WrapCheckLog(c))
 
@@ -182,7 +182,7 @@ func (s *commitHookBaseSuite) SetUpTest(c *tc.C) {
 func (s *commitHookBaseSuite) addCharmRelation(c *tc.C, charmUUID string, r deploymentcharm.Relation) string {
 	charmRelationUUID := tc.Must(c, uuid.NewUUID).String()
 	s.query(c, `
-INSERT INTO charm_relation (uuid, charm_uuid, name, role_id, interface, optional, capacity, scope_id) 
+INSERT INTO charm_relation (uuid, charm_uuid, name, role_id, interface, optional, capacity, scope_id)
 VALUES (?, ?, ?,
        (SELECT id FROM charm_relation_role WHERE name = ?),
        ?, ?, ?,
@@ -196,8 +196,8 @@ VALUES (?, ?, ?,
 func (s *commitHookBaseSuite) addRelation(c *tc.C) corerelation.UUID {
 	relationUUID := tc.Must(c, corerelation.NewUUID)
 	s.query(c, `
-INSERT INTO relation (uuid, life_id, relation_id, scope_id) 
-VALUES (?,0,?,0)
+INSERT INTO relation (uuid, life_id, relation_id, scope_id)
+VALUES (?, 0, ?, 0)
 `, relationUUID, s.relationCount)
 	s.relationCount++
 	return relationUUID
@@ -209,7 +209,7 @@ func (s *commitHookBaseSuite) addRelationUnit(c *tc.C, unitUUID coreunit.UUID, r
 	relationUnitUUID := corerelationtesting.GenRelationUnitUUID(c)
 	s.query(c, `
 INSERT INTO relation_unit (uuid, relation_endpoint_uuid, unit_uuid)
-VALUES (?,?,?)
+VALUES (?, ?, ?)
 `, relationUnitUUID, relationEndpointUUID, unitUUID)
 	return relationUnitUUID
 }
@@ -222,7 +222,7 @@ func (s *commitHookBaseSuite) addRelationEndpoint(
 	relationEndpointUUID := tc.Must(c, corerelation.NewEndpointUUID).String()
 	s.query(c, `
 INSERT INTO relation_endpoint (uuid, relation_uuid, endpoint_uuid)
-VALUES (?,?,?)
+VALUES (?, ?, ?)
 `, relationEndpointUUID, relationUUID, applicationEndpointUUID)
 	return relationEndpointUUID
 }

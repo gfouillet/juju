@@ -48,7 +48,7 @@ func (s *State) checkCharmExists(ctx context.Context, tx *sqlair.TX, id string) 
 SELECT &entityUUID.*
 FROM charm
 WHERE uuid = $entityUUID.uuid;
-	`
+`
 
 	result := entityUUID{UUID: id}
 	selectStmt, err := s.Prepare(selectQuery, result)
@@ -80,7 +80,7 @@ SELECT &entityUUID.*
 FROM charm
 WHERE reference_name = $charmReferenceNameRevisionSource.reference_name
 AND revision = $charmReferenceNameRevisionSource.revision
-	`
+`
 	ref := charmReferenceNameRevisionSource{
 		ReferenceName: referenceName,
 		Revision:      revision,
@@ -918,12 +918,12 @@ func (s *State) getCharmActions(ctx context.Context, tx *sqlair.TX, ident entity
 SELECT &entityUUID.*
 FROM charm
 WHERE uuid = $entityUUID.uuid;
-	`
+`
 	actionQuery := `
 SELECT &charmAction.*
 FROM charm_action
 WHERE charm_uuid = $entityUUID.uuid;
-	`
+`
 
 	charmStmt, err := s.Prepare(charmQuery, ident)
 	if err != nil {
@@ -1076,7 +1076,7 @@ func (s *State) getCharmRelations(ctx context.Context, tx *sqlair.TX, ident enti
 SELECT &charmRelation.*
 FROM v_charm_relation
 WHERE charm_uuid = $entityUUID.uuid;
-	`
+`
 	stmt, err := s.Prepare(query, charmRelation{}, ident)
 	if err != nil {
 		return nil, errors.Errorf("preparing query: %w", err)
@@ -1235,7 +1235,7 @@ func (st *State) checkUnitExistsByName(ctx context.Context, tx *sqlair.TX, uName
 	arg := unitName{Name: uName}
 	stmt, err := st.Prepare(`
 SELECT &unitName.*
-FROM  unit
+FROM unit
 WHERE name = $unitName.name;
 `, arg)
 	if err != nil {

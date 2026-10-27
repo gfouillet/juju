@@ -51,7 +51,7 @@ FROM (
     SELECT abs.version,
            abs.architecture_id,
            $agentStream.stream_id AS stream_id
-    FROM   agent_binary_store abs
+    FROM agent_binary_store abs
 )
 `
 
@@ -105,7 +105,7 @@ func (s *ControllerState) GetControllerNodes(ctx context.Context) ([]internal.Co
 
 	stmt, err := s.Prepare(`
 SELECT &controllerNodeAgentVersion.*
-FROM   controller_node_agent_version
+FROM controller_node_agent_version
 `,
 		controllerNodeAgentVersion{})
 	if err != nil {
@@ -157,7 +157,7 @@ func (s *ControllerState) GetControllerTargetVersion(ctx context.Context) (semve
 	var versionValue controllerTargetVersion
 	stmt, err := s.Prepare(`
 SELECT &controllerTargetVersion.*
-FROM   controller
+FROM controller
 `,
 		versionValue)
 	if err != nil {
@@ -209,7 +209,7 @@ func (s *ControllerState) SetControllerTargetVersion(
 	}
 	stmt, err := s.Prepare(`
 UPDATE controller
-SET    target_version = $setControllerTargetVersion.target_version
+SET target_version = $setControllerTargetVersion.target_version
 `,
 		toVersionInput)
 	if err != nil {

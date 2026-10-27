@@ -167,7 +167,7 @@ func (s *modelImporterSuite) createExternalSecretBackend(c *tc.C, name string) s
 			INSERT INTO secret_backend (uuid, name, backend_type_id)
 			VALUES (?, ?, 1)
 			ON CONFLICT (name) DO NOTHING
-		`, backendUUID, name)
+`, backendUUID, name)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

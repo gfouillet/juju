@@ -85,10 +85,10 @@ func (st *RootKeyState) FindLatestKey(ctx context.Context, createdAfter, expires
 
 	q := `
 SELECT &rootKey.*
-FROM   macaroon_root_key
-WHERE  created_at >= $M.created_after
-AND    expires_at >= $M.expires_after
-AND    expires_at <= $M.expires_before
+FROM macaroon_root_key
+WHERE created_at >= $M.created_after
+AND expires_at >= $M.expires_after
+AND expires_at <= $M.expires_before
 ORDER BY created_at DESC
 `
 	stmt, err := st.Prepare(q, rootKey{}, m)

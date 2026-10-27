@@ -49,12 +49,12 @@ func (st *State) GetMachinesForExport(ctx context.Context) ([]machine.ExportMach
 	}
 
 	query := `
-SELECT    &exportMachine.*
-FROM      machine AS m
-JOIN      machine_cloud_instance mci ON m.uuid = mci.machine_uuid
+SELECT &exportMachine.*
+FROM machine AS m
+JOIN machine_cloud_instance mci ON m.uuid = mci.machine_uuid
 LEFT JOIN machine_placement AS mp ON m.uuid = mp.machine_uuid
 LEFT JOIN v_machine_platform AS mpl ON m.uuid = mpl.machine_uuid
-WHERE     mci.instance_id IS NOT NULL AND mci.instance_id != '';`
+WHERE mci.instance_id IS NOT NULL AND mci.instance_id != '';`
 	stmt, err := st.Prepare(query, exportMachine{})
 	if err != nil {
 		return nil, errors.Errorf("preparing query for machine export: %w", err)

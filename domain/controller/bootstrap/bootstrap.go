@@ -24,11 +24,11 @@ func InsertInitialController(cert, privateKey, caPrivateKey, systemIdentity stri
 			SystemIdentity: systemIdentity,
 		}
 		controllerStmt, err := sqlair.Prepare(`
-UPDATE controller 
-SET cert=$dbController.cert,
-    private_key=$dbController.private_key,
-	ca_private_key=$dbController.ca_private_key,
-	system_identity=$dbController.system_identity;
+UPDATE controller
+SET cert = $dbController.cert,
+    private_key = $dbController.private_key,
+	ca_private_key = $dbController.ca_private_key,
+	system_identity = $dbController.system_identity;
 `, controllerData)
 		if err != nil {
 			return errors.Capture(err)

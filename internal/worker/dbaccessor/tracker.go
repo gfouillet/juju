@@ -178,7 +178,7 @@ func (w *trackedDBWorker) ensureModelDBInitialised(ctx context.Context) error {
 	// Check if the DB has metadata for one of our known tables.
 	var runDBMigration bool
 	if err := errors.Trace(w.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, "SELECT 1 FROM sqlite_master WHERE name='change_log'")
+		row := tx.QueryRowContext(ctx, "SELECT 1 FROM sqlite_master WHERE name = 'change_log'")
 
 		var dummy int
 		if err := row.Scan(&dummy); err == nil {

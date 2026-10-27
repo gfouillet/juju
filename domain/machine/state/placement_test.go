@@ -861,8 +861,8 @@ func (s *placementSuite) TestPlaceMachineWithIPFamilyConstraint(c *tc.C) {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT ip_family
-FROM   v_machine_constraint
-WHERE  machine_uuid = ?`, machineUUID.String()).Scan(&ipFamily)
+FROM v_machine_constraint
+WHERE machine_uuid = ?`, machineUUID.String()).Scan(&ipFamily)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Assert(ipFamily, tc.Not(tc.IsNil))
@@ -927,7 +927,7 @@ func (s *placementSuite) checkPlatformForMachine(c *tc.C, name machine.Name, exp
 	var platform deployment.Platform
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
-SELECT mp.os_id, COALESCE(mp.channel,''), mp.architecture_id
+SELECT mp.os_id, COALESCE(mp.channel, ''), mp.architecture_id
 FROM machine AS m
 LEFT JOIN machine_platform AS mp ON m.uuid = mp.machine_uuid
 WHERE m.name = ?

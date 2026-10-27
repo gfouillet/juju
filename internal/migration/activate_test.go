@@ -559,9 +559,9 @@ func (s *controllerImportSuite) setClaimPhase(c *tc.C, modelUUID coremodel.UUID,
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 UPDATE model_migration_import
-SET    phase_type_id = (
+SET phase_type_id = (
            SELECT id FROM model_migration_import_phase_type WHERE type = ?)
-WHERE  model_uuid = ?`, phase, modelUUID.String())
+WHERE model_uuid = ?`, phase, modelUUID.String())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

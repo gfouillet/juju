@@ -36,18 +36,18 @@ func (st *State) GetHardwareCharacteristics(
 	}
 
 	query := `
-SELECT    &instanceDataResult.*
-FROM      v_hardware_characteristics AS v
-WHERE     v.machine_uuid = $machineUUID.machine_uuid`
+SELECT &instanceDataResult.*
+FROM v_hardware_characteristics AS v
+WHERE v.machine_uuid = $machineUUID.machine_uuid`
 	stmt, err := st.Prepare(query, instanceDataResult{}, machineUUID)
 	if err != nil {
 		return instance.HardwareCharacteristics{}, errors.Errorf("preparing retrieve hardware characteristics statement: %w", err)
 	}
 
 	tagsQuery := `
-SELECT    &tag.tag
-FROM      instance_tag
-WHERE     machine_uuid = $machineUUID.machine_uuid`
+SELECT &tag.tag
+FROM instance_tag
+WHERE machine_uuid = $machineUUID.machine_uuid`
 	tagsStmt, err := st.Prepare(tagsQuery, tag{}, machineUUID)
 	if err != nil {
 		return instance.HardwareCharacteristics{}, errors.Errorf("preparing retrieve instance tags statement: %w", err)
@@ -105,9 +105,9 @@ func (st *State) AvailabilityZone(
 	}
 
 	query := `
-SELECT    &instanceDataResult.availability_zone_name
-FROM      v_hardware_characteristics AS v
-WHERE     v.machine_uuid = $instanceDataResult.machine_uuid`
+SELECT &instanceDataResult.availability_zone_name
+FROM v_hardware_characteristics AS v
+WHERE v.machine_uuid = $instanceDataResult.machine_uuid`
 	machineUUIDQuery := instanceDataResult{
 		MachineUUID: machineUUID,
 	}
@@ -176,17 +176,17 @@ func (st *State) SetMachineCloudInstance(
 	setInstanceData := `
 UPDATE machine_cloud_instance
 SET
-	  instance_id=$instanceData.instance_id,
-	  display_name=$instanceData.display_name,
-	  arch=$instanceData.arch,
-	  mem=$instanceData.mem,
-	  root_disk=$instanceData.root_disk,
-	  root_disk_source=$instanceData.root_disk_source,
-	  cpu_cores=$instanceData.cpu_cores,
-	  cpu_power=$instanceData.cpu_power,
-	  virt_type=$instanceData.virt_type,
-	  availability_zone_uuid=$instanceData.availability_zone_uuid
-WHERE machine_uuid=$instanceData.machine_uuid
+	  instance_id = $instanceData.instance_id,
+	  display_name = $instanceData.display_name,
+	  arch = $instanceData.arch,
+	  mem = $instanceData.mem,
+	  root_disk = $instanceData.root_disk,
+	  root_disk_source = $instanceData.root_disk_source,
+	  cpu_cores = $instanceData.cpu_cores,
+	  cpu_power = $instanceData.cpu_power,
+	  virt_type = $instanceData.virt_type,
+	  availability_zone_uuid = $instanceData.availability_zone_uuid
+WHERE machine_uuid = $instanceData.machine_uuid
 `
 	setInstanceDataStmt, err := st.Prepare(setInstanceData, instanceData{})
 	if err != nil {
@@ -199,9 +199,9 @@ WHERE machine_uuid=$instanceData.machine_uuid
 	}
 	setNonceStmt, err := st.Prepare(`
 UPDATE machine
-SET    nonce = $machineNonce.nonce
-WHERE  uuid = $machineNonce.machine_uuid
-AND    (nonce IS NULL OR nonce = '')
+SET nonce = $machineNonce.nonce
+WHERE uuid = $machineNonce.machine_uuid
+AND (nonce IS NULL OR nonce = '')
 `, mNonce)
 	if err != nil {
 		return errors.Capture(err)
@@ -237,8 +237,8 @@ WHERE machine_name IN (
 	}
 	retrieveAZUUID := `
 SELECT &availabilityZoneName.uuid
-FROM   availability_zone
-WHERE  availability_zone.name = $availabilityZoneName.name
+FROM availability_zone
+WHERE availability_zone.name = $availabilityZoneName.name
 `
 	retrieveAZUUIDStmt, err := st.Prepare(retrieveAZUUID, azName)
 	if err != nil {
@@ -380,10 +380,10 @@ func (st *State) GetInstanceIDByMachineName(ctx context.Context, mName machine.N
 
 	machineNameParam := machineName{Name: mName.String()}
 	query := `
-SELECT     &instanceID.instance_id
-FROM       machine AS m
-LEFT JOIN  machine_cloud_instance AS mci ON m.uuid = mci.machine_uuid
-WHERE      m.name = $machineName.name
+SELECT &instanceID.instance_id
+FROM machine AS m
+LEFT JOIN machine_cloud_instance AS mci ON m.uuid = mci.machine_uuid
+WHERE m.name = $machineName.name
 `
 	queryStmt, err := st.Prepare(query, machineNameParam, instanceID{})
 	if err != nil {
@@ -415,8 +415,8 @@ func (st *State) getInstanceID(ctx context.Context, tx *sqlair.TX, mUUID string)
 	mUUIDParam := entityUUID{UUID: mUUID}
 	query := `
 SELECT &instanceID.instance_id
-FROM   machine_cloud_instance
-WHERE  machine_uuid = $entityUUID.uuid;`
+FROM machine_cloud_instance
+WHERE machine_uuid = $entityUUID.uuid;`
 	queryStmt, err := st.Prepare(query, mUUIDParam, instanceID{})
 	if err != nil {
 		return "", errors.Capture(err)
@@ -446,8 +446,8 @@ func (st *State) GetInstanceIDAndName(ctx context.Context, mUUID string) (string
 	mUUIDParam := entityUUID{UUID: mUUID}
 	query := `
 SELECT &instanceIDAndDisplayName.*
-FROM   machine_cloud_instance
-WHERE  machine_uuid = $entityUUID.uuid;`
+FROM machine_cloud_instance
+WHERE machine_uuid = $entityUUID.uuid;`
 	queryStmt, err := st.Prepare(query, mUUIDParam, instanceIDAndDisplayName{})
 	if err != nil {
 		return "", "", errors.Capture(err)

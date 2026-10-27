@@ -1496,8 +1496,8 @@ func (s *filesystemSuite) changeFilesystemLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_filesystem
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid.String())
 	c.Assert(err, tc.ErrorIsNil)
@@ -1513,8 +1513,8 @@ func (s *filesystemSuite) changeFilesystemAttachmentLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_filesystem_attachment
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid.String())
 	c.Assert(err, tc.ErrorIsNil)
@@ -1539,7 +1539,7 @@ func (s *filesystemSuite) newMachineFilesystemWithSize(
 	_, err := s.DB().Exec(`
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, size_mib, provision_scope_id)
 VALUES (?, ?, 0, ?, 1)
-	`,
+`,
 		fsUUID.String(), fsID, size)
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -1651,8 +1651,8 @@ func (s *filesystemSuite) setFilesystemProviderID(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_filesystem
-SET    provider_id = ?
-WHERE  uuid = ?
+SET provider_id = ?
+WHERE uuid = ?
 `,
 		providerID, fsUUID.String(),
 	)
@@ -1665,7 +1665,7 @@ func (s *filesystemSuite) removeFilesystemWithObliterateValue(
 	obliterateValue bool,
 ) {
 	_, err := s.DB().Exec(
-		`UPDATE storage_filesystem SET life_id=?, obliterate_on_cleanup=? WHERE uuid=?`,
+		`UPDATE storage_filesystem SET life_id = ?, obliterate_on_cleanup = ? WHERE uuid = ?`,
 		domainlife.Dying, obliterateValue, uuid)
 	c.Assert(err, tc.ErrorIsNil)
 }
@@ -1682,7 +1682,7 @@ func (s *filesystemSuite) newModelFilesystem(c *tc.C) (
 	_, err := s.DB().Exec(`
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 0)
-	`,
+`,
 		fsUUID.String(), fsID)
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -1714,8 +1714,8 @@ VALUES (?, ?, ?, ?, ?)
 func (s *filesystemSuite) setFilesystemAttachmentProviderID(c *tc.C, attachmentUUID string,
 	providerID string) {
 	_, err := s.DB().Exec(`
-UPDATE storage_filesystem_attachment 
-SET    provider_id = ? 
-WHERE  uuid = ?`, providerID, attachmentUUID)
+UPDATE storage_filesystem_attachment
+SET provider_id = ?
+WHERE uuid = ?`, providerID, attachmentUUID)
 	c.Assert(err, tc.ErrorIsNil)
 }

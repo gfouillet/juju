@@ -50,14 +50,14 @@ func (s *charmStateSuite) TestGetCharmIDCharmhubCharm(c *tc.C) {
 
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO charm (uuid, reference_name, architecture_id, revision) 
+INSERT INTO charm (uuid, reference_name, architecture_id, revision)
 VALUES (?, 'foo', 0, 1)`, id.String())
 		if err != nil {
 			return errors.Capture(err)
 		}
 
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO charm_metadata (charm_uuid, name) 
+INSERT INTO charm_metadata (charm_uuid, name)
 VALUES (?, 'foo')
 `, id.String())
 		if err != nil {
@@ -80,14 +80,14 @@ func (s *charmStateSuite) TestGetCharmIDLocalCharm(c *tc.C) {
 
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO charm (uuid, reference_name, architecture_id, revision, source_id) 
+INSERT INTO charm (uuid, reference_name, architecture_id, revision, source_id)
 VALUES (?, 'foo', 0, 1, 0)`, id.String())
 		if err != nil {
 			return errors.Capture(err)
 		}
 
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO charm_metadata (charm_uuid, name) 
+INSERT INTO charm_metadata (charm_uuid, name)
 VALUES (?, 'foo')`, id.String())
 		if err != nil {
 			return errors.Capture(err)
@@ -707,7 +707,7 @@ VALUES (?, 0, 'data'), (?, 1, 'kubernetes'), (?, 2, 'kubernetes')
 
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO charm_tag (charm_uuid, array_index, value)
-VALUES (?, 0, 'foo'), (?, 1, 'foo'), (?, 2,'bar')
+VALUES (?, 0, 'foo'), (?, 1, 'foo'), (?, 2, 'bar')
 `, uuid, uuid, uuid)
 		if err != nil {
 			return errors.Capture(err)
@@ -3733,7 +3733,7 @@ VALUES (?, ?, 'test-model', 'admin', 'iaas', 'test-cloud', 'ec2')
 	err = s.modelRunner.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model_migrating (uuid, model_uuid) VALUES (?, ?)
-		`, utils.MustNewUUID().String(), s.modelUUID)
+`, utils.MustNewUUID().String(), s.modelUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

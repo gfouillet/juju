@@ -54,8 +54,8 @@ func (st *State) reconcileApplicationResourcesForCharm(
 	targetStmt, err := st.Prepare(`
 SELECT cr.name AS &charmResourceIdentity.name,
        cr.kind_id AS &charmResourceIdentity.kind_id
-FROM   charm_resource AS cr
-WHERE  cr.charm_uuid = $charmResourceIdentity.charm_uuid
+FROM charm_resource AS cr
+WHERE cr.charm_uuid = $charmResourceIdentity.charm_uuid
 `, charmResourceIdentity{})
 	if err != nil {
 		return errors.Capture(err)
@@ -65,14 +65,14 @@ SELECT r.uuid AS &resourceReconciliation.resource_uuid,
        r.charm_uuid AS &resourceReconciliation.charm_uuid,
        r.charm_resource_name AS &resourceReconciliation.charm_resource_name,
        cr.kind_id AS &resourceReconciliation.kind_id
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-JOIN   resource_state AS rs ON rs.id = r.state_id
-JOIN   charm_resource AS cr
-ON     cr.charm_uuid = r.charm_uuid
-AND    cr.name = r.charm_resource_name
-WHERE  ar.application_uuid = $resourceReconciliation.application_uuid
-AND    rs.name = 'available'
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+JOIN resource_state AS rs ON rs.id = r.state_id
+JOIN charm_resource AS cr
+ON cr.charm_uuid = r.charm_uuid
+AND cr.name = r.charm_resource_name
+WHERE ar.application_uuid = $resourceReconciliation.application_uuid
+AND rs.name = 'available'
 `, resourceReconciliation{})
 	if err != nil {
 		return errors.Capture(err)
@@ -82,16 +82,16 @@ SELECT r.uuid AS &resourceReconciliation.resource_uuid,
        r.charm_uuid AS &resourceReconciliation.charm_uuid,
        r.charm_resource_name AS &resourceReconciliation.charm_resource_name,
        cr.kind_id AS &resourceReconciliation.kind_id
-FROM   resource AS r
-JOIN   resource_state AS rs ON rs.id = r.state_id
-JOIN   charm_resource AS cr
-ON     cr.charm_uuid = r.charm_uuid
-AND    cr.name = r.charm_resource_name
-JOIN   pending_application_resource AS par ON par.resource_uuid = r.uuid
-JOIN   application AS a ON a.name = par.application_name
-WHERE  r.uuid = $resourceReconciliation.resource_uuid
-AND    a.uuid = $resourceReconciliation.application_uuid
-AND    rs.name = 'available'
+FROM resource AS r
+JOIN resource_state AS rs ON rs.id = r.state_id
+JOIN charm_resource AS cr
+ON cr.charm_uuid = r.charm_uuid
+AND cr.name = r.charm_resource_name
+JOIN pending_application_resource AS par ON par.resource_uuid = r.uuid
+JOIN application AS a ON a.name = par.application_name
+WHERE r.uuid = $resourceReconciliation.resource_uuid
+AND a.uuid = $resourceReconciliation.application_uuid
+AND rs.name = 'available'
 `, resourceReconciliation{})
 	if err != nil {
 		return errors.Capture(err)
@@ -159,9 +159,9 @@ AND    rs.name = 'available'
 
 	updateLinkStmt, err := st.Prepare(`
 UPDATE application_resource
-SET    resource_uuid = $resourceReconciliation.resource_uuid
-WHERE  application_uuid = $resourceReconciliation.application_uuid
-AND    resource_uuid = $resourceReconciliation.old_resource_uuid
+SET resource_uuid = $resourceReconciliation.resource_uuid
+WHERE application_uuid = $resourceReconciliation.application_uuid
+AND resource_uuid = $resourceReconciliation.old_resource_uuid
 `, resourceReconciliation{})
 	if err != nil {
 		return errors.Capture(err)
@@ -176,7 +176,7 @@ VALUES ($resourceReconciliation.application_uuid, $resourceReconciliation.resour
 	deleteLinkStmt, err := st.Prepare(`
 DELETE FROM application_resource
 WHERE application_uuid = $resourceReconciliation.application_uuid
-AND   resource_uuid = $resourceReconciliation.resource_uuid
+AND resource_uuid = $resourceReconciliation.resource_uuid
 `, resourceReconciliation{})
 	if err != nil {
 		return errors.Capture(err)
@@ -250,11 +250,11 @@ func (st *State) reconcileRepositoryResourcesForCharm(
 SELECT r.uuid AS &resourceReconciliation.resource_uuid,
        r.charm_uuid AS &resourceReconciliation.charm_uuid,
        r.charm_resource_name AS &resourceReconciliation.charm_resource_name
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-JOIN   resource_state AS rs ON rs.id = r.state_id
-WHERE  ar.application_uuid = $resourceReconciliation.application_uuid
-AND    rs.name = 'potential'
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+JOIN resource_state AS rs ON rs.id = r.state_id
+WHERE ar.application_uuid = $resourceReconciliation.application_uuid
+AND rs.name = 'potential'
 `, resourceReconciliation{})
 	if err != nil {
 		return errors.Capture(err)
@@ -262,7 +262,7 @@ AND    rs.name = 'potential'
 	deleteLinkStmt, err := st.Prepare(`
 DELETE FROM application_resource
 WHERE application_uuid = $resourceReconciliation.application_uuid
-AND   resource_uuid = $resourceReconciliation.resource_uuid
+AND resource_uuid = $resourceReconciliation.resource_uuid
 `, resourceReconciliation{})
 	if err != nil {
 		return errors.Capture(err)
@@ -284,9 +284,9 @@ VALUES ($linkResourceApplication.*)
 	}
 	charmSourceStmt, err := st.Prepare(`
 SELECT cs.name AS &charmSource.source
-FROM   charm AS c
-JOIN   charm_source AS cs ON cs.id = c.source_id
-WHERE  c.uuid = $charmSource.uuid
+FROM charm AS c
+JOIN charm_source AS cs ON cs.id = c.source_id
+WHERE c.uuid = $charmSource.uuid
 `, charmSource{})
 	if err != nil {
 		return errors.Capture(err)
@@ -383,18 +383,18 @@ SELECT r.uuid AS &replacement.old_uuid,
        r.charm_resource_name AS &replacement.charm_resource_name,
        old_cr.kind_id AS &replacement.old_kind_id,
        new_cr.kind_id AS &replacement.new_kind_id
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-JOIN   resource_state AS rs ON rs.id = r.state_id
-JOIN   charm_resource AS old_cr
-ON     old_cr.charm_uuid = r.charm_uuid
-AND    old_cr.name = r.charm_resource_name
-JOIN   charm_resource AS new_cr
-ON     new_cr.charm_uuid = $replacement.charm_uuid
-AND    new_cr.name = r.charm_resource_name
-WHERE  ar.application_uuid = $replacement.application_uuid
-AND    rs.name = 'available'
-AND    r.charm_uuid != $replacement.charm_uuid
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+JOIN resource_state AS rs ON rs.id = r.state_id
+JOIN charm_resource AS old_cr
+ON old_cr.charm_uuid = r.charm_uuid
+AND old_cr.name = r.charm_resource_name
+JOIN charm_resource AS new_cr
+ON new_cr.charm_uuid = $replacement.charm_uuid
+AND new_cr.name = r.charm_resource_name
+WHERE ar.application_uuid = $replacement.application_uuid
+AND rs.name = 'available'
+AND r.charm_uuid != $replacement.charm_uuid
 `, replacement{})
 	if err != nil {
 		return errors.Capture(err)
@@ -413,8 +413,8 @@ SELECT $replacement.new_uuid,
        r.state_id,
        $replacement.created_at,
        r.last_polled
-FROM   resource AS r
-WHERE  r.uuid = $replacement.old_uuid
+FROM resource AS r
+WHERE r.uuid = $replacement.old_uuid
 `, replacement{})
 	if err != nil {
 		return errors.Capture(err)
@@ -423,8 +423,8 @@ WHERE  r.uuid = $replacement.old_uuid
 	copyFileStoreStmt, err := st.Prepare(`
 INSERT INTO resource_file_store (resource_uuid, store_uuid, size, sha384)
 SELECT $replacement.new_uuid, rfs.store_uuid, rfs.size, rfs.sha384
-FROM   resource_file_store AS rfs
-WHERE  rfs.resource_uuid = $replacement.old_uuid
+FROM resource_file_store AS rfs
+WHERE rfs.resource_uuid = $replacement.old_uuid
 `, replacement{})
 	if err != nil {
 		return errors.Capture(err)
@@ -438,8 +438,8 @@ SELECT $replacement.new_uuid,
        ris.store_storage_key,
        ris.size,
        ris.sha384
-FROM   resource_image_store AS ris
-WHERE  ris.resource_uuid = $replacement.old_uuid
+FROM resource_image_store AS ris
+WHERE ris.resource_uuid = $replacement.old_uuid
 `, replacement{})
 	if err != nil {
 		return errors.Capture(err)
@@ -448,8 +448,8 @@ WHERE  ris.resource_uuid = $replacement.old_uuid
 	copyRetrievedByStmt, err := st.Prepare(`
 INSERT INTO resource_retrieved_by (resource_uuid, retrieved_by_type_id, name)
 SELECT $replacement.new_uuid, rrb.retrieved_by_type_id, rrb.name
-FROM   resource_retrieved_by AS rrb
-WHERE  rrb.resource_uuid = $replacement.old_uuid
+FROM resource_retrieved_by AS rrb
+WHERE rrb.resource_uuid = $replacement.old_uuid
 `, replacement{})
 	if err != nil {
 		return errors.Capture(err)
@@ -457,9 +457,9 @@ WHERE  rrb.resource_uuid = $replacement.old_uuid
 
 	replaceApplicationResourceStmt, err := st.Prepare(`
 UPDATE application_resource
-SET    resource_uuid = $replacement.new_uuid
-WHERE  application_uuid = $replacement.application_uuid
-AND    resource_uuid = $replacement.old_uuid
+SET resource_uuid = $replacement.new_uuid
+WHERE application_uuid = $replacement.application_uuid
+AND resource_uuid = $replacement.old_uuid
 `, replacement{})
 	if err != nil {
 		return errors.Capture(err)
@@ -660,7 +660,7 @@ VALUES ($linkResourceApplication.*)`, linkResourceApplication{})
 }
 
 var insertResourceQuery = `
-INSERT INTO resource (uuid, charm_uuid, charm_resource_name, revision, 
+INSERT INTO resource (uuid, charm_uuid, charm_resource_name, revision,
        origin_type_id, state_id, created_at)
 SELECT $resourceToAdd.uuid,
        $resourceToAdd.charm_uuid,
@@ -669,10 +669,10 @@ SELECT $resourceToAdd.uuid,
        rot.id,
        rs.id,
        $resourceToAdd.created_at
-FROM   resource_origin_type rot,
+FROM resource_origin_type rot,
        resource_state rs
-WHERE  rot.name = $resourceToAdd.origin_type_name
-AND    rs.name = $resourceToAdd.state_name`
+WHERE rot.name = $resourceToAdd.origin_type_name
+AND rs.name = $resourceToAdd.state_name`
 
 type uuids []string
 
@@ -764,11 +764,11 @@ SELECT r.uuid AS &resourceToAdd.uuid,
        r.charm_uuid AS &resourceToAdd.charm_uuid,
        r.charm_resource_name AS &resourceToAdd.charm_resource_name,
        rot.name AS &resourceToAdd.origin_type_name,
-       rs.name  AS &resourceToAdd.state_name
-FROM   resource AS r
-JOIN   resource_origin_type AS rot ON r.origin_type_id = rot.id
-JOIN   resource_state AS rs ON r.state_id = rs.id
-WHERE  r.uuid IN ($uuids[:])`, uuids{}, resourceToAdd{},
+       rs.name AS &resourceToAdd.state_name
+FROM resource AS r
+JOIN resource_origin_type AS rot ON r.origin_type_id = rot.id
+JOIN resource_state AS rs ON r.state_id = rs.id
+WHERE r.uuid IN ($uuids[:])`, uuids{}, resourceToAdd{},
 	)
 	if err != nil {
 		return nil, errors.Capture(err)

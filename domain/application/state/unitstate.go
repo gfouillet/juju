@@ -276,9 +276,9 @@ func (st *State) getApplicationName(
 	}
 	stmt, err := st.Prepare(`
 SELECT a.name AS &applicationUUIDAndName.name
-FROM   application AS a
-JOIN   charm AS c ON c.uuid = a.charm_uuid
-WHERE  a.uuid = $applicationUUIDAndName.uuid AND c.source_id < 2;
+FROM application AS a
+JOIN charm AS c ON c.uuid = a.charm_uuid
+WHERE a.uuid = $applicationUUIDAndName.uuid AND c.source_id < 2;
 `, arg)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -303,9 +303,9 @@ func (st *State) checkApplicationAlive(ctx context.Context, tx *sqlair.TX, appUU
 	ident := entityUUID{UUID: appUUID}
 	query := `
 SELECT &life.*
-FROM   application AS a
-JOIN   life as l ON a.life_id = l.id
-WHERE  a.uuid = $entityUUID.uuid
+FROM application AS a
+JOIN life as l ON a.life_id = l.id
+WHERE a.uuid = $entityUUID.uuid
 `
 	stmt, err := st.Prepare(query, ident, life{})
 	if err != nil {
@@ -501,8 +501,8 @@ INSERT INTO link_layer_device (*) VALUES ($k8sPodDevice.*)
 
 	selectAddressUUIDStmt, err := st.Prepare(`
 SELECT &ipAddress.uuid
-FROM   ip_address
-WHERE  device_uuid = $ipAddress.device_uuid;
+FROM ip_address
+WHERE device_uuid = $ipAddress.device_uuid;
 `, ipAddr)
 	if err != nil {
 		return errors.Capture(err)
@@ -511,7 +511,7 @@ WHERE  device_uuid = $ipAddress.device_uuid;
 	upsertAddressStmt, err := st.Prepare(`
 INSERT INTO ip_address (*)
 VALUES ($ipAddress.*)
-ON CONFLICT(uuid) DO UPDATE SET
+ON CONFLICT (uuid) DO UPDATE SET
     address_value = excluded.address_value,
     subnet_uuid = excluded.subnet_uuid,
     type_id = excluded.type_id,
@@ -555,11 +555,11 @@ func (st *State) ensureNetNodeFQDNAddress(ctx context.Context, tx *sqlair.TX, ne
 	addrIn := fqdnAddress{Address: address, ScopeID: scopeID}
 	existsStmt, err := st.Prepare(`
 SELECT fa.uuid AS &netNodeFQDNAddress.address_uuid
-FROM   fqdn_address AS fa
-JOIN   net_node_fqdn_address AS nnfa ON nnfa.address_uuid = fa.uuid
-WHERE  fa.address = $fqdnAddress.address
-AND    fa.scope_id = $fqdnAddress.scope_id
-AND    nnfa.net_node_uuid = $netNodeFQDNAddress.net_node_uuid`, addrIn, lookup)
+FROM fqdn_address AS fa
+JOIN net_node_fqdn_address AS nnfa ON nnfa.address_uuid = fa.uuid
+WHERE fa.address = $fqdnAddress.address
+AND fa.scope_id = $fqdnAddress.scope_id
+AND nnfa.net_node_uuid = $netNodeFQDNAddress.net_node_uuid`, addrIn, lookup)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -624,7 +624,7 @@ AND unit_uuid = $unitK8sPodPort.unit_uuid;
 	upsertStmt, err := st.Prepare(`
 INSERT INTO k8s_pod_port (*)
 VALUES ($unitK8sPodPort.*)
-ON CONFLICT(unit_uuid, port)
+ON CONFLICT (unit_uuid, port)
 DO NOTHING
 `, ccPort)
 	if err != nil {
@@ -721,7 +721,7 @@ SELECT a.uuid AS &entityUUID.uuid
 FROM application AS a
 JOIN unit AS u ON u.application_uuid = a.uuid
 WHERE u.uuid = $unitUUID.uuid
-	`, entityUUID{}, unitUUID)
+`, entityUUID{}, unitUUID)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -843,7 +843,7 @@ func (st *State) setUnitAgentStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO unit_agent_status (*) VALUES ($unitStatusInfo.*)
-ON CONFLICT(unit_uuid) DO UPDATE SET
+ON CONFLICT (unit_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at,
@@ -888,7 +888,7 @@ func (st *State) setUnitWorkloadStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO unit_workload_status (*) VALUES ($unitStatusInfo.*)
-ON CONFLICT(unit_uuid) DO UPDATE SET
+ON CONFLICT (unit_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at,

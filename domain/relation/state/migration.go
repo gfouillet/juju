@@ -191,7 +191,7 @@ func (st *State) ExportRelations(ctx context.Context) ([]domainrelation.ExportRe
 	}
 	stmt, err := st.Prepare(`
 SELECT (r.uuid, r.relation_id) AS (&getRelation.*)
-FROM   relation r
+FROM relation r
 `, getRelation{})
 	if err != nil {
 		return nil, errors.Capture(err)

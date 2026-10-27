@@ -69,7 +69,7 @@ func (s *namespaceSuite) TestInitialStateSent(c *tc.C) {
 			return err
 		}
 
-		_, err := tx.ExecContext(ctx, "INSERT INTO random_namespace(key_name) VALUES ('some-key')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO random_namespace (key_name) VALUES ('some-key')")
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -124,7 +124,7 @@ func (s *namespaceSuite) TestInitialStateSentByMapper(c *tc.C) {
 			return err
 		}
 
-		_, err := tx.ExecContext(ctx, "INSERT INTO random_namespace(key_name) VALUES ('some-key')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO random_namespace (key_name) VALUES ('some-key')")
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -437,11 +437,11 @@ func (schemaDDLApplier) Apply(c *tc.C, ctx context.Context, runner database.TxnR
 	schema := schema.New(
 		schema.MakePatch(`
 CREATE TABLE external_controller (
-	uuid            TEXT NOT NULL PRIMARY KEY,
-	alias           TEXT,
-	ca_cert         TEXT NOT NULL
+	uuid TEXT NOT NULL PRIMARY KEY,
+	alias TEXT,
+	ca_cert TEXT NOT NULL
 );
-		`),
+`),
 	)
 	_, err := schema.Ensure(ctx, runner)
 	c.Assert(err, tc.ErrorIsNil)

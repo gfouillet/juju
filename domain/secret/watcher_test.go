@@ -57,7 +57,7 @@ func (s *watcherSuite) SetUpTest(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, "test", "prod", "iaas", "fluffy", "ec2")
-		`, s.ModelUUID(), coretesting.ControllerTag.Id())
+`, s.ModelUUID(), coretesting.ControllerTag.Id())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -657,14 +657,14 @@ func (s *watcherSuite) TestWatchConsumedSecretsChanges(c *tc.C) {
 
 func (s *watcherSuite) updateRemoteSecretRevisionInConsumingModel(c *tc.C, uri *coresecrets.URI, latestRevision int, appUUID string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO secret (id) VALUES (?) ON CONFLICT(id) DO NOTHING`, uri.ID)
+		_, err := tx.ExecContext(ctx, `INSERT INTO secret (id) VALUES (?) ON CONFLICT (id) DO NOTHING`, uri.ID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO secret_reference (secret_id, latest_revision, owner_application_uuid, updated_at) VALUES (?, ?, ?, ?)
-ON CONFLICT(secret_id) DO UPDATE SET
-    latest_revision=excluded.latest_revision
+ON CONFLICT (secret_id) DO UPDATE SET
+    latest_revision = excluded.latest_revision
 `,
 			uri.ID, latestRevision, appUUID, time.Now().UTC())
 		return err
@@ -685,24 +685,24 @@ func (s *watcherSuite) TestWatchConsumedRemoteSecretsChanges(c *tc.C) {
 
 	saveConsumer := func(uri *coresecrets.URI, revision int, consumerUUID string) {
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, `INSERT INTO secret (id) VALUES (?) ON CONFLICT(id) DO NOTHING`, uri.ID)
+			_, err := tx.ExecContext(ctx, `INSERT INTO secret (id) VALUES (?) ON CONFLICT (id) DO NOTHING`, uri.ID)
 			if err != nil {
 				return err
 			}
 			_, err = tx.ExecContext(ctx, `
 INSERT INTO secret_reference (secret_id, latest_revision, owner_application_uuid, updated_at) VALUES (?, ?, ?, ?)
-ON CONFLICT(secret_id) DO UPDATE SET
-    latest_revision=excluded.latest_revision
+ON CONFLICT (secret_id) DO UPDATE SET
+    latest_revision = excluded.latest_revision
 `, uri.ID, revision, appUUID, time.Now().UTC())
 			if err != nil {
 				return err
 			}
 			_, err = tx.ExecContext(ctx, `
-INSERT INTO secret_unit_consumer(secret_id, unit_uuid, source_model_uuid, current_revision)
+INSERT INTO secret_unit_consumer (secret_id, unit_uuid, source_model_uuid, current_revision)
 VALUES (?, ?, ?, ?)
-ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET
-    label=excluded.label,
-    current_revision=excluded.current_revision`,
+ON CONFLICT (secret_id, unit_uuid) DO UPDATE SET
+    label = excluded.label,
+    current_revision = excluded.current_revision`,
 				uri.ID, consumerUUID, uri.SourceUUID, revision)
 			return err
 		})

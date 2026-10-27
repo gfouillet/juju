@@ -23,10 +23,10 @@ func (st *State) GetNetNodeAddresses(ctx context.Context, nodeUUID string) (core
 	var address []SpaceAddress
 	ident := entityUUID{UUID: nodeUUID}
 	stmt, err := st.Prepare(`
-SELECT    &SpaceAddress.*
-FROM      v_ip_address_with_names AS ipa
+SELECT &SpaceAddress.*
+FROM v_ip_address_with_names AS ipa
 LEFT JOIN subnet AS sn ON ipa.subnet_uuid = sn.uuid
-WHERE     net_node_uuid = $entityUUID.uuid
+WHERE net_node_uuid = $entityUUID.uuid
 `, SpaceAddress{}, entityUUID{})
 	if err != nil {
 		return nil, errors.Capture(err)

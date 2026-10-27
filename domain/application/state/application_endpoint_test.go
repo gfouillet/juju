@@ -57,14 +57,14 @@ func (s *applicationEndpointStateSuite) SetUpTest(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		var err error
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO charm (uuid, reference_name, source_id) 
+INSERT INTO charm (uuid, reference_name, source_id)
 VALUES (?, 'foo', 0)`, s.charmUUID)
 		if err != nil {
 			return errors.Capture(err)
 		}
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO application (uuid, charm_uuid, name, life_id, space_uuid)
-VALUES (?,?,?,0,?)`, s.appID, s.charmUUID, "foo", network.AlphaSpaceId)
+VALUES (?, ?, ?, 0, ?)`, s.appID, s.charmUUID, "foo", network.AlphaSpaceId)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -1156,7 +1156,7 @@ func (s *applicationEndpointStateSuite) addApplicationEndpoint(c *tc.C, spaceUUI
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO application_endpoint (uuid, application_uuid, space_uuid, charm_relation_uuid)
-VALUES (?,?,?,?)`, endpointUUID, s.appID, spaceUUID, relationUUID)
+VALUES (?, ?, ?, ?)`, endpointUUID, s.appID, spaceUUID, relationUUID)
 		return errors.Capture(err)
 	})
 	c.Assert(err, tc.ErrorIsNil, tc.Commentf("(Arrange) Failed to add application endpoint: %v", err))
@@ -1167,7 +1167,7 @@ func (s *applicationEndpointStateSuite) addApplicationExtraEndpoint(c *tc.C, spa
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO application_extra_endpoint (application_uuid, space_uuid, charm_extra_binding_uuid)
-VALUES (?,?,?)`, s.appID, spaceUUID, extraEndpointUUID)
+VALUES (?, ?, ?)`, s.appID, spaceUUID, extraEndpointUUID)
 		return errors.Capture(err)
 	})
 	c.Assert(err, tc.ErrorIsNil, tc.Commentf("(Arrange) Failed to add application extra endpoint: %v", err))
@@ -1178,7 +1178,7 @@ func (s *applicationEndpointStateSuite) addApplicationEndpointNullSpace(c *tc.C,
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO application_endpoint (uuid, application_uuid, space_uuid, charm_relation_uuid)
-VALUES (?,?,?,?)`, endpointUUID, s.appID, nil, relationUUID)
+VALUES (?, ?, ?, ?)`, endpointUUID, s.appID, nil, relationUUID)
 		return errors.Capture(err)
 	})
 	c.Assert(err, tc.ErrorIsNil, tc.Commentf("(Arrange) Failed to add application endpoint: %v", err))
@@ -1189,7 +1189,7 @@ func (s *applicationEndpointStateSuite) addApplicationExtraEndpointNullSpace(c *
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO application_extra_endpoint (application_uuid, space_uuid, charm_extra_binding_uuid)
-VALUES (?,?,?)`, s.appID, nil, extraEndpointUUID)
+VALUES (?, ?, ?)`, s.appID, nil, extraEndpointUUID)
 		return errors.Capture(err)
 	})
 	c.Assert(err, tc.ErrorIsNil, tc.Commentf("(Arrange) Failed to add application extra endpoint: %v", err))
@@ -1223,8 +1223,8 @@ func (s *applicationEndpointStateSuite) fetchApplicationEndpoints(c *tc.C) []app
 		rows, err := tx.Query(`
 SELECT ae.charm_relation_uuid, s.name
 FROM application_endpoint ae
-LEFT JOIN space s ON s.uuid=ae.space_uuid
-WHERE ae.application_uuid=?
+LEFT JOIN space s ON s.uuid = ae.space_uuid
+WHERE ae.application_uuid = ?
 ORDER BY s.name`, s.appID)
 		defer func() { _ = rows.Close() }()
 		if err != nil {
@@ -1262,7 +1262,7 @@ SELECT cr.name, s.name
 FROM application_endpoint AS ae
 JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
 LEFT JOIN space AS s ON s.uuid = ae.space_uuid
-WHERE ae.application_uuid=?
+WHERE ae.application_uuid = ?
 ORDER BY s.name`, appID)
 		defer func() { _ = rows.Close() }()
 		if err != nil {
@@ -1295,7 +1295,7 @@ SELECT cr.name, s.name
 FROM application_extra_endpoint AS ae
 JOIN charm_extra_binding AS cr ON ae.charm_extra_binding_uuid = cr.uuid
 LEFT JOIN space AS s ON s.uuid = ae.space_uuid
-WHERE ae.application_uuid=?
+WHERE ae.application_uuid = ?
 ORDER BY s.name`, appID)
 		defer func() { _ = rows.Close() }()
 		if err != nil {
@@ -1326,8 +1326,8 @@ func (s *applicationEndpointStateSuite) fetchApplicationExtraEndpoints(c *tc.C) 
 		rows, err := tx.Query(`
 SELECT ae.charm_extra_binding_uuid, s.name
 FROM application_extra_endpoint ae
-LEFT JOIN space s ON s.uuid=ae.space_uuid
-WHERE ae.application_uuid=?
+LEFT JOIN space s ON s.uuid = ae.space_uuid
+WHERE ae.application_uuid = ?
 ORDER BY s.name`, s.appID)
 		defer func() { _ = rows.Close() }()
 		if err != nil {
@@ -1354,8 +1354,8 @@ func (s *applicationEndpointStateSuite) setApplicationDefaultSpace(c *tc.C, spac
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 UPDATE application
-SET    space_uuid = ? 
-WHERE  uuid = ?`, spaceUUID, s.appID)
+SET space_uuid = ?
+WHERE uuid = ?`, spaceUUID, s.appID)
 		return errors.Capture(err)
 	})
 	c.Assert(err, tc.ErrorIsNil, tc.Commentf("(Arrange) Failed to set application default space: %v", err))
@@ -1368,7 +1368,7 @@ func (s *applicationEndpointStateSuite) addRelation(c *tc.C, name string) string
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO charm_relation (uuid, charm_uuid, scope_id, role_id, name)
-VALUES (?,?,0,0,?)`, relUUID, s.charmUUID, name)
+VALUES (?, ?, 0, 0, ?)`, relUUID, s.charmUUID, name)
 		return errors.Capture(err)
 	})
 	c.Assert(err, tc.ErrorIsNil, tc.Commentf("(Arrange) Failed to add charm relation: %v", err))
@@ -1382,8 +1382,8 @@ func (s *applicationEndpointStateSuite) addExtraBinding(c *tc.C, name string) st
 	bindingUUID := uuid.MustNewUUID().String()
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO charm_extra_binding (uuid, charm_uuid, name) 
-VALUES (?,?,?)`, bindingUUID, s.charmUUID, name)
+INSERT INTO charm_extra_binding (uuid, charm_uuid, name)
+VALUES (?, ?, ?)`, bindingUUID, s.charmUUID, name)
 		return errors.Capture(err)
 	})
 	c.Assert(err, tc.ErrorIsNil, tc.Commentf("(Arrange) Failed to add charm extra binding: %v", err))
@@ -1396,8 +1396,8 @@ func (s *applicationEndpointStateSuite) getApplicationDefaultSpace(c *tc.C, appI
 		return tx.QueryRow(`
 SELECT s.name
 FROM application a
-JOIN space s ON s.uuid=a.space_uuid
-WHERE a.uuid=?`, appID).Scan(&spaceName)
+JOIN space s ON s.uuid = a.space_uuid
+WHERE a.uuid = ?`, appID).Scan(&spaceName)
 	})
 	c.Assert(err, tc.ErrorIsNil, tc.Commentf("(Assert) Failed to fetch default space: %v", err))
 	return spaceName

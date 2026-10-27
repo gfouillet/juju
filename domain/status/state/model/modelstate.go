@@ -62,7 +62,7 @@ func (st *ModelState) GetModelStatusInfo(ctx context.Context) (status.ModelStatu
 
 	stmt, err := st.Prepare(`
 SELECT &modelInfo.*
-FROM   model
+FROM model
 `, modelInfo{})
 	if err != nil {
 		return status.ModelStatusInfo{}, errors.Capture(err)
@@ -98,7 +98,7 @@ func (st *ModelState) IsControllerModel(ctx context.Context) (bool, error) {
 
 	stmt, err := st.Prepare(`
 SELECT &controllerModelInfo.*
-FROM   model
+FROM model
 `, controllerModelInfo{})
 	if err != nil {
 		return false, errors.Capture(err)
@@ -133,8 +133,8 @@ func (st *ModelState) GetAllRelationStatuses(ctx context.Context) ([]status.Rela
 
 	stmt, err := st.Prepare(`
 SELECT &relationStatusAndID.*
-FROM   relation_status rs
-JOIN   relation r ON r.uuid = rs.relation_uuid
+FROM relation_status rs
+JOIN relation r ON r.uuid = rs.relation_uuid
 `, relationStatusAndID{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -309,7 +309,7 @@ func (st *ModelState) SetApplicationStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO application_status (*) VALUES ($applicationStatusInfo.*)
-ON CONFLICT(application_uuid) DO UPDATE SET
+ON CONFLICT (application_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at,
@@ -361,7 +361,7 @@ func (st *ModelState) SetOperatorStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO operator_status (*) VALUES ($applicationStatusInfo.*)
-ON CONFLICT(application_uuid) DO UPDATE SET
+ON CONFLICT (application_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at,
@@ -401,8 +401,8 @@ func (st *ModelState) getRelationStatus(
 
 	stmt, err := st.Prepare(`
 SELECT &relationStatus.*
-FROM   relation_status
-WHERE  relation_uuid = $relationUUID.relation_uuid
+FROM relation_status
+WHERE relation_uuid = $relationUUID.relation_uuid
 `, id, sts)
 	if err != nil {
 		return empty, errors.Capture(err)
@@ -541,8 +541,8 @@ func (st *ModelState) GetRelationUUIDByID(
 
 	stmt, err := st.Prepare(`
 SELECT &relationID.uuid
-FROM   relation
-WHERE  relation_id = $relationID.relation_id
+FROM relation
+WHERE relation_id = $relationID.relation_id
 `, arg)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -582,7 +582,7 @@ func (st *ModelState) updateRelationStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO relation_status (*) VALUES ($relationStatus.*)
-ON CONFLICT(relation_uuid) DO UPDATE SET
+ON CONFLICT (relation_uuid) DO UPDATE SET
     relation_status_type_id = excluded.relation_status_type_id,
     message = excluded.message,
     updated_at = excluded.updated_at
@@ -787,9 +787,9 @@ func (st *ModelState) GetUnitK8sPodStatus(ctx context.Context, uuid coreunit.UUI
 	unitUUID := unitUUID{UnitUUID: uuid.String()}
 	getUnitStatusStmt, err := st.Prepare(`
 SELECT &statusInfo.*
-FROM   k8s_pod_status
-WHERE  unit_uuid = $unitUUID.uuid
-	`, statusInfo{}, unitUUID)
+FROM k8s_pod_status
+WHERE unit_uuid = $unitUUID.uuid
+`, statusInfo{}, unitUUID)
 	if err != nil {
 		return status.StatusInfo[status.K8sPodStatusType]{}, errors.Capture(err)
 	}
@@ -1116,7 +1116,7 @@ func (st *ModelState) SetUnitPresence(ctx context.Context, name coreunit.Name) e
 
 	recordUnit := `
 INSERT INTO unit_agent_presence (*) VALUES ($unitPresence.*)
-ON CONFLICT(unit_uuid) DO UPDATE SET
+ON CONFLICT (unit_uuid) DO UPDATE SET
 	last_seen = excluded.last_seen;
 `
 	var presence unitPresence
@@ -1200,7 +1200,7 @@ func (st *ModelState) SetMachinePresence(ctx context.Context, name coremachine.N
 
 	recordMachine := `
 INSERT INTO machine_agent_presence (*) VALUES ($machinePresence.*)
-ON CONFLICT(machine_uuid) DO UPDATE SET
+ON CONFLICT (machine_uuid) DO UPDATE SET
 	last_seen = excluded.last_seen;
 `
 	var presence machinePresence
@@ -1366,8 +1366,8 @@ func (st *ModelState) getUnitWorkloadStatusesForApplication(
 ) {
 	getUnitStatusesStmt, err := st.Prepare(`
 SELECT &statusInfoAndUnitNameAndPresence.*
-FROM   v_unit_workload_status
-WHERE  application_uuid = $applicationUUID.uuid
+FROM v_unit_workload_status
+WHERE application_uuid = $applicationUUID.uuid
 `, statusInfoAndUnitNameAndPresence{}, ident)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1412,8 +1412,8 @@ func (st *ModelState) getUnitAgentStatusesForApplication(
 ) {
 	getUnitAgentStatusesStmt, err := st.Prepare(`
 SELECT &statusInfoAndUnitName.*
-FROM   v_unit_agent_status
-WHERE  application_uuid = $applicationUUID.uuid
+FROM v_unit_agent_status
+WHERE application_uuid = $applicationUUID.uuid
 `, statusInfoAndUnitName{}, ident)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1471,7 +1471,7 @@ func (st *ModelState) setUnitAgentStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO unit_agent_status (*) VALUES ($unitStatusInfo.*)
-ON CONFLICT(unit_uuid) DO UPDATE SET
+ON CONFLICT (unit_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at,
@@ -1512,7 +1512,7 @@ func (st *ModelState) setUnitWorkloadStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO unit_workload_status (*) VALUES ($unitStatusInfo.*)
-ON CONFLICT(unit_uuid) DO UPDATE SET
+ON CONFLICT (unit_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at,
@@ -1553,7 +1553,7 @@ func (st *ModelState) setK8sPodStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO k8s_pod_status (*) VALUES ($unitStatusInfo.*)
-ON CONFLICT(unit_uuid) DO UPDATE SET
+ON CONFLICT (unit_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at,
@@ -1625,13 +1625,13 @@ WITH selected_k8s_service_address AS (
     svc.application_uuid,
     (
       SELECT ipa.address_value
-      FROM   k8s_service AS candidate_svc
-      JOIN   link_layer_device AS lld
+      FROM k8s_service AS candidate_svc
+      JOIN link_layer_device AS lld
              ON lld.net_node_uuid = candidate_svc.net_node_uuid
-      JOIN   ip_address AS ipa ON ipa.device_uuid = lld.uuid
-      WHERE  candidate_svc.application_uuid = svc.application_uuid
-      AND    ipa.scope_id IN (1, 2) /* public, local-cloud */
-      AND    ipa.type_id IN (0, 1) /* IPv4, IPv6 */
+      JOIN ip_address AS ipa ON ipa.device_uuid = lld.uuid
+      WHERE candidate_svc.application_uuid = svc.application_uuid
+      AND ipa.scope_id IN (1, 2) /* public, local-cloud */
+      AND ipa.type_id IN (0, 1) /* IPv4, IPv6 */
       ORDER BY
         CASE
           WHEN ipa.scope_id = 1 AND ipa.type_id = 0 THEN 1
@@ -1642,7 +1642,7 @@ WITH selected_k8s_service_address AS (
         ipa.address_value
       LIMIT 1
     ) AS address_value
-  FROM   k8s_service AS svc
+  FROM k8s_service AS svc
 )
 SELECT
   a.name AS &applicationStatusDetails.name,
@@ -2101,7 +2101,7 @@ func (st *ModelState) GetAllMachineStatuses(ctx context.Context) (map[string]sta
 SELECT &machineNameStatus.*
 FROM v_machine_status AS ms
 JOIN machine AS m ON ms.machine_uuid = m.uuid
-	`, machineNameStatus{})
+`, machineNameStatus{})
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -2163,13 +2163,13 @@ SELECT
   mci.instance_id AS &machineStatusDetails.instance_id,
   mci.display_name AS &machineStatusDetails.display_name,
   mci.arch AS &machineStatusDetails.instance_arch,
-  mci.cpu_cores AS &machineStatusDetails.instance_cpu_cores, 
+  mci.cpu_cores AS &machineStatusDetails.instance_cpu_cores,
   mci.cpu_power AS &machineStatusDetails.instance_cpu_power,
   mci.mem AS &machineStatusDetails.instance_mem,
   mci.root_disk AS &machineStatusDetails.instance_root_disk,
   mci.root_disk_source AS &machineStatusDetails.instance_root_disk_source,
   mci.virt_type AS &machineStatusDetails.instance_virt_type,
-  az.name AS &machineStatusDetails.availability_zone_name, 
+  az.name AS &machineStatusDetails.availability_zone_name,
   p.os_id AS &machineStatusDetails.platform_os_id,
   p.channel AS &machineStatusDetails.platform_channel,
   p.architecture_id AS &machineStatusDetails.platform_architecture_id,
@@ -2217,7 +2217,7 @@ LEFT JOIN container_type AS ct ON c.container_type_id = ct.id;
 	}
 
 	addressesStmt, err := st.Prepare(`
-SELECT 
+SELECT
 	m.uuid AS &machineSpaceAddress.machine_uuid,
 	ipa.address_value AS &machineSpaceAddress.address_value,
 	ipa.config_type_name AS &machineSpaceAddress.config_type_name,
@@ -2518,7 +2518,7 @@ func (st *ModelState) GetAllInstanceStatuses(ctx context.Context) (map[string]st
 SELECT &instanceNameStatus.*
 FROM v_machine_cloud_instance_status AS ms
 JOIN machine AS m ON ms.machine_uuid = m.uuid
-	`, instanceNameStatus{})
+`, instanceNameStatus{})
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -2584,9 +2584,9 @@ func (st *ModelState) SetInstanceStatus(ctx context.Context, mName string, newSt
 INSERT INTO machine_cloud_instance_status (*)
 VALUES ($setMachineStatus.*)
   ON CONFLICT (machine_uuid)
-  DO UPDATE SET 
-    status_id = excluded.status_id, 
-    message = excluded.message, 
+  DO UPDATE SET
+    status_id = excluded.status_id,
+    message = excluded.message,
     updated_at = excluded.updated_at,
     data = excluded.data;
 `

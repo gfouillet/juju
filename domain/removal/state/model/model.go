@@ -31,8 +31,8 @@ func (st *State) ModelExists(ctx context.Context, mUUID string) (bool, error) {
 	modelUUID := entityUUID{UUID: mUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   model
-WHERE  uuid = $entityUUID.uuid`, modelUUID)
+FROM model
+WHERE uuid = $entityUUID.uuid`, modelUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing model exists query: %w", err)
 	}
@@ -500,9 +500,9 @@ func (st *State) MarkModelAsDead(ctx context.Context, mUUID string, force bool) 
 	modelUUID := entityUUID{UUID: mUUID}
 	updateStmt, err := st.Prepare(`
 UPDATE model_life
-SET    life_id = 2
-WHERE  model_uuid = $entityUUID.uuid
-AND    life_id = 1`, modelUUID)
+SET life_id = 2
+WHERE model_uuid = $entityUUID.uuid
+AND life_id = 1`, modelUUID)
 	if err != nil {
 		return errors.Errorf("preparing model life update: %w", err)
 	}
@@ -576,8 +576,8 @@ func (st *State) getModelLife(ctx context.Context, tx *sqlair.TX, mUUID string) 
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   model_life
-WHERE  model_uuid = $entityUUID.uuid;`, model, modelUUID)
+FROM model_life
+WHERE model_uuid = $entityUUID.uuid;`, model, modelUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing model life query: %w", err)
 	}

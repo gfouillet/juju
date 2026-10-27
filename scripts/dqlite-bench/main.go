@@ -67,11 +67,11 @@ CREATE INDEX idx_agent_model_name ON agent (model_name);
 CREATE INDEX idx_agent_status ON agent (status);
 
 CREATE TABLE agent_events (
- 	agent_uuid TEXT NOT NULL,   
+ 	agent_uuid TEXT NOT NULL,
  	event TEXT NOT NULL,
  	CONSTRAINT fk_agent_uuid
     	FOREIGN KEY (agent_uuid)
-        REFERENCES agent(uuid)
+        REFERENCES agent (uuid)
 );
 
 CREATE INDEX idx_agent_events_event ON agent_events (event);

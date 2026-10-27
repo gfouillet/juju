@@ -257,7 +257,7 @@ func (st *State) getStoragePoolUUIDsByName(
 ) (map[string]string, error) {
 	stmt, err := st.Prepare(`
 SELECT &storagePoolNameUUID.*
-FROM   storage_pool
+FROM storage_pool
 `, storagePoolNameUUID{})
 	if err != nil {
 		return nil, errors.Capture(err)

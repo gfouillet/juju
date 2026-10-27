@@ -186,9 +186,9 @@ func (s *State) GetImportedOfferUUIDs(ctx context.Context, modelUUID string) ([]
 	arg := modelUUIDArg{ModelUUID: modelUUID}
 	stmt, err := s.Prepare(`
 SELECT mio.offer_uuid AS &importOfferRow.offer_uuid
-FROM   model_migration_import_offer AS mio
-JOIN   model_migration_import AS mi ON mi.uuid = mio.migration_uuid
-WHERE  mi.model_uuid = $modelUUIDArg.model_uuid
+FROM model_migration_import_offer AS mio
+JOIN model_migration_import AS mi ON mi.uuid = mio.migration_uuid
+WHERE mi.model_uuid = $modelUUIDArg.model_uuid
 `, importOfferRow{}, arg)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -237,10 +237,10 @@ source_phase AS (
     SELECT id FROM model_migration_import_phase_type WHERE type = $importPhaseUpdate.source
 )
 UPDATE model_migration_import
-SET    phase_type_id = (SELECT id FROM target_phase),
-       updated_at    = $importPhaseUpdate.updated_at
-WHERE  model_uuid = $importPhaseUpdate.model_uuid
-AND    phase_type_id = (SELECT id FROM source_phase)
+SET phase_type_id = (SELECT id FROM target_phase),
+       updated_at = $importPhaseUpdate.updated_at
+WHERE model_uuid = $importPhaseUpdate.model_uuid
+AND phase_type_id = (SELECT id FROM source_phase)
 `, update)
 	if err != nil {
 		return errors.Capture(err)
@@ -296,8 +296,8 @@ WITH claim AS (
     SELECT uuid FROM model_migration_import WHERE model_uuid = $modelUUIDArg.model_uuid
 )
 DELETE FROM model_migration_import_offer
-WHERE  migration_uuid IN (SELECT uuid FROM claim)
-	`, mUUID)
+WHERE migration_uuid IN (SELECT uuid FROM claim)
+`, mUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -306,15 +306,15 @@ WITH claim AS (
     SELECT uuid FROM model_migration_import WHERE model_uuid = $modelUUIDArg.model_uuid
 )
 DELETE FROM model_migration_import_external_controller_model
-WHERE  migration_uuid IN (SELECT uuid FROM claim)
-	`, mUUID)
+WHERE migration_uuid IN (SELECT uuid FROM claim)
+`, mUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
 	deleteClaimStmt, err := s.Prepare(`
 DELETE FROM model_migration_import
 WHERE model_uuid = $modelUUIDArg.model_uuid
-	`, mUUID)
+`, mUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -429,16 +429,16 @@ func (s *State) ensureExternalControllerExists(
 
 	selectCtrlStmt, err := s.Prepare(`
 SELECT &externalControllerInfo.*
-FROM   external_controller
-WHERE  uuid = $entityUUID.uuid
+FROM external_controller
+WHERE uuid = $entityUUID.uuid
 `, ctrlUUID, externalControllerInfo{})
 	if err != nil {
 		return errors.Capture(err)
 	}
 	selectAddrsStmt, err := s.Prepare(`
 SELECT &addressValue.address
-FROM   external_controller_address
-WHERE  controller_uuid = $entityUUID.uuid
+FROM external_controller_address
+WHERE controller_uuid = $entityUUID.uuid
 `, ctrlUUID, addressValue{})
 	if err != nil {
 		return errors.Capture(err)
@@ -481,8 +481,8 @@ func (s *State) ensureExternalModelMatchesOrInsert(
 	arg := externalModelArg{ModelUUID: modelUUID}
 	selectStmt, err := s.Prepare(`
 SELECT &externalModelArg.controller_uuid
-FROM   external_model
-WHERE  uuid = $externalModelArg.uuid
+FROM external_model
+WHERE uuid = $externalModelArg.uuid
 `, arg)
 	if err != nil {
 		return errors.Capture(err)
@@ -598,10 +598,10 @@ func (s *State) ExternalControllerModelsForImport(
 
 	stmt, err := s.Prepare(`
 SELECT mmiecm.offerer_model_uuid AS &importExternalControllerModelArg.offerer_model_uuid,
-       mmiecm.controller_uuid    AS &importExternalControllerModelArg.controller_uuid
-FROM   model_migration_import_external_controller_model AS mmiecm
-JOIN   model_migration_import AS mmi ON mmi.uuid = mmiecm.migration_uuid
-WHERE  mmi.model_uuid = $modelUUIDArg.model_uuid`,
+       mmiecm.controller_uuid AS &importExternalControllerModelArg.controller_uuid
+FROM model_migration_import_external_controller_model AS mmiecm
+JOIN model_migration_import AS mmi ON mmi.uuid = mmiecm.migration_uuid
+WHERE mmi.model_uuid = $modelUUIDArg.model_uuid`,
 		importExternalControllerModelArg{}, modelUUIDArg{})
 	if err != nil {
 		return nil, errors.Capture(err)

@@ -374,11 +374,11 @@ func (s *netConfigSuite) TestSetMachineNetConfigWithParentDevices(c *tc.C) {
 	c.Assert(err, tc.ErrorIsNil)
 
 	parentSQL := `
-SELECT dp.name 
-FROM   link_layer_device AS dp
+SELECT dp.name
+FROM link_layer_device AS dp
 	   JOIN link_layer_device_parent AS p ON dp.uuid = p.parent_uuid
-	   JOIN link_layer_device AS dc ON p.device_uuid = dc.uuid	
-WHERE  dc.name = 'eth0'`
+	   JOIN link_layer_device AS dc ON p.device_uuid = dc.uuid
+WHERE dc.name = 'eth0'`
 
 	checkScalarResult(c, db, parentSQL, brName)
 }
@@ -515,9 +515,9 @@ func (s *netConfigSuite) TestSetMachineNetConfigUpdateProviderAddressMovesDevice
 
 	q := `
 SELECT d.name
-FROM   link_layer_device d
+FROM link_layer_device d
        JOIN ip_address a ON d.uuid = a.device_uuid
-WHERE  a.address_value = '192.168.0.50/24'`
+WHERE a.address_value = '192.168.0.50/24'`
 
 	checkScalarResult(c, db, q, brName)
 }

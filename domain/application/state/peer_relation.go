@@ -25,14 +25,14 @@ func (st *State) getPeerEndpoints(ctx context.Context, tx *sqlair.TX, uuid strin
 	app := application{UUID: uuid}
 
 	stmt, err := st.Prepare(`
-SELECT 
+SELECT
     ae.uuid AS &peerEndpoint.uuid,
     cr.name AS &peerEndpoint.name
-FROM   application_endpoint ae
-JOIN   charm_relation cr ON cr.uuid = ae.charm_relation_uuid
-JOIN   charm_relation_role crr ON crr.id = cr.role_id
-WHERE  ae.application_uuid = $application.uuid
-AND    crr.name = 'peer'
+FROM application_endpoint ae
+JOIN charm_relation cr ON cr.uuid = ae.charm_relation_uuid
+JOIN charm_relation_role crr ON crr.id = cr.role_id
+WHERE ae.application_uuid = $application.uuid
+AND crr.name = 'peer'
 ORDER BY cr.name -- ensure that peer endpoints relation id are always generated in alphabetical order
 `, app,
 		peerEndpoint{})

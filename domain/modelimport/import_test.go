@@ -145,8 +145,8 @@ func (s *importSuite) TestImportSanitizesCharmBlobResidency(c *tc.C) {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT available, archive_path, object_store_uuid
-FROM   charm
-WHERE  uuid = ?
+FROM charm
+WHERE uuid = ?
 `, charmUUID).Scan(&gotAvailable, &gotArchivePath, &gotObjectStoreUUID)
 	})
 	c.Assert(err, tc.ErrorIsNil)

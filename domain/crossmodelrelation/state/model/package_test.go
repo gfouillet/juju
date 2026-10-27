@@ -108,7 +108,7 @@ func (s *baseSuite) addApplicationEndpoint(c *tc.C, applicationUUID coreapplicat
 	charmRelationUUID string) string {
 	applicationEndpointUUID := internaluuid.MustNewUUID().String()
 	s.query(c, `
-INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid,space_uuid)
+INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid, space_uuid)
 VALUES (?, ?, ?, ?)
 `, applicationEndpointUUID, applicationUUID, charmRelationUUID, network.AlphaSpaceId)
 	return applicationEndpointUUID
@@ -138,7 +138,7 @@ func (s *baseSuite) addCMRCharm(c *tc.C) corecharm.ID {
 	// constraint on the reference_name, revision.
 	s.query(c, `
 INSERT INTO charm (uuid, reference_name, source_id, revision)
-VALUES (?, ?, 
+VALUES (?, ?,
         (SELECT id FROM charm_source WHERE name = 'cmr'),
         42)
 `, charmUUID, charmUUID)
@@ -178,7 +178,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 func (s *baseSuite) addRelation(c *tc.C) corerelation.UUID {
 	relationUUID := tc.Must(c, corerelation.NewUUID)
 	s.query(c, `
-INSERT INTO relation (uuid, life_id, relation_id, scope_id) 
+INSERT INTO relation (uuid, life_id, relation_id, scope_id)
 VALUES (?, 0, ?, 0)
 `, relationUUID, s.relationCount)
 	s.relationCount++
@@ -377,10 +377,10 @@ func (s *baseSuite) assertApplicationRemoteOfferer(c *tc.C, uuid string) {
 	)
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `
-SELECT aro.life_id, aro.macaroon 
+SELECT aro.life_id, aro.macaroon
 FROM application_remote_offerer AS aro
 JOIN application AS a ON aro.application_uuid = a.uuid
-WHERE a.uuid=?`, uuid).
+WHERE a.uuid = ?`, uuid).
 			Scan(&gotLifeID, &gotMacaroon)
 		if err != nil {
 			return err
@@ -398,11 +398,11 @@ func (s *baseSuite) assertApplicationRemoteOffererStatus(c *tc.C, uuid string) {
 	var gotStatusID int
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `
-SELECT aros.status_id 
+SELECT aros.status_id
 FROM application_remote_offerer_status AS aros
 JOIN application_remote_offerer AS aro ON aros.application_remote_offerer_uuid = aro.uuid
 JOIN application AS a ON aro.application_uuid = a.uuid
-WHERE a.uuid=?`, uuid).
+WHERE a.uuid = ?`, uuid).
 			Scan(&gotStatusID)
 		if err != nil {
 			return err
@@ -418,7 +418,7 @@ func (s *baseSuite) assertApplication(c *tc.C, uuid string) {
 
 	var gotName string
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT name FROM application WHERE uuid=?", uuid).
+		err := tx.QueryRowContext(ctx, "SELECT name FROM application WHERE uuid = ?", uuid).
 			Scan(&gotName)
 		if err != nil {
 			return err
@@ -441,7 +441,7 @@ func (s *baseSuite) assertRelation(c *tc.C, relationUUID string, relationID int)
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT uuid, relation_id, life_id, scope_id
-FROM relation WHERE relation_id=?
+FROM relation WHERE relation_id = ?
 `, relationID).
 			Scan(&gotUUID, &gotID, &gotLifID, &gotScopeID)
 	})
@@ -462,7 +462,7 @@ func (s *baseSuite) assertRelationSuspended(c *tc.C, relationUUID string, suspen
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT suspended, COALESCE(suspended_reason, '')
-FROM relation WHERE uuid=?
+FROM relation WHERE uuid = ?
 `, relationUUID).
 			Scan(&gotSuspended, &gotSuspendedReason)
 	})
@@ -482,9 +482,9 @@ func (s *baseSuite) assertRelationEndpoints(c *tc.C, relationUUID, app1UUID, app
 
 		rows, err := tx.QueryContext(ctx, `
 SELECT ae.application_uuid
-FROM   relation_endpoint AS re
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-WHERE  relation_uuid = ?
+FROM relation_endpoint AS re
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+WHERE relation_uuid = ?
 `, relationUUID)
 		if err != nil {
 			return err
@@ -518,8 +518,8 @@ func (s *baseSuite) assertRelationStatusJoining(c *tc.C, relationUUID string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `
 SELECT relation_status_type_id
-FROM   relation_status
-WHERE  relation_uuid = ?
+FROM relation_status
+WHERE relation_uuid = ?
 `, relationUUID).Scan(&statusID)
 
 		return err
@@ -551,7 +551,7 @@ FROM application
 JOIN charm AS ch ON application.charm_uuid = ch.uuid
 JOIN charm_metadata AS cm ON ch.uuid = cm.charm_uuid
 JOIN charm_source AS cs ON ch.source_id = cs.id
-WHERE application.uuid=?`, appUUID).
+WHERE application.uuid = ?`, appUUID).
 			Scan(&gotReferenceName, &gotSourceName, &gotCharmName)
 		if err != nil {
 			return err
@@ -644,9 +644,9 @@ func (s *baseSuite) fetchApplicationEndpoints(c *tc.C, appID string) []applicati
 		rows, err := tx.Query(`
 SELECT ae.charm_relation_uuid, s.name, cr.name AS charm_relation_name
 FROM application_endpoint ae
-JOIN charm_relation cr ON cr.uuid=ae.charm_relation_uuid
-LEFT JOIN space s ON s.uuid=ae.space_uuid
-WHERE ae.application_uuid=?
+JOIN charm_relation cr ON cr.uuid = ae.charm_relation_uuid
+LEFT JOIN space s ON s.uuid = ae.space_uuid
+WHERE ae.application_uuid = ?
 ORDER BY cr.name`, appID)
 		defer func() { _ = rows.Close() }()
 		if err != nil {

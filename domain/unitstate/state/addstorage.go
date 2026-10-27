@@ -173,10 +173,10 @@ func (st *State) getUnitStorageCount(
 ) (uint32, error) {
 	stmt, err := st.Prepare(`
 SELECT count(*) AS &storageCount.count
-FROM   storage_instance si
-JOIN   storage_unit_owner suo ON si.uuid = suo.storage_instance_uuid
-WHERE  suo.unit_uuid = $storageCount.unit_uuid
-AND    si.storage_name = $storageCount.storage_name
+FROM storage_instance si
+JOIN storage_unit_owner suo ON si.uuid = suo.storage_instance_uuid
+WHERE suo.unit_uuid = $storageCount.unit_uuid
+AND si.storage_name = $storageCount.storage_name
 `, storageCount{})
 	if err != nil {
 		return 0, errors.Capture(err)

@@ -272,8 +272,8 @@ func getMetadata(c *tc.C, db *sql.DB, objStoreUUID objectstore.UUID) agentbinary
 	var data agentbinary.Metadata
 	err := db.QueryRow(`
 SELECT version, architecture_name, size, sha_256
-FROM   v_agent_binary_store
-WHERE  object_store_uuid = ?`, objStoreUUID).Scan(&data.Version, &data.Arch, &data.Size, &data.SHA256)
+FROM v_agent_binary_store
+WHERE object_store_uuid = ?`, objStoreUUID).Scan(&data.Version, &data.Arch, &data.Size, &data.SHA256)
 	c.Assert(err, tc.ErrorIsNil)
 	return data
 }
@@ -282,8 +282,8 @@ func getObjectSHA256(c *tc.C, db *sql.DB, objStoreUUID objectstore.UUID) string 
 	var sha string
 	err := db.QueryRow(`
 SELECT sha_256
-FROM   object_store_metadata
-WHERE  uuid = ?`, objStoreUUID).Scan(&sha)
+FROM object_store_metadata
+WHERE uuid = ?`, objStoreUUID).Scan(&sha)
 	c.Assert(err, tc.ErrorIsNil)
 	return sha
 }

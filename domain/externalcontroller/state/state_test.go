@@ -73,7 +73,7 @@ func (s *stateSuite) TestRetrieveExternalControllerWithoutAlias(c *tc.C) {
 	db := s.DB()
 
 	// Insert a single external controller.
-	_, err := db.Exec(`INSERT INTO external_controller(uuid,ca_cert) VALUES	
+	_, err := db.Exec(`INSERT INTO external_controller (uuid, ca_cert) VALUES
 ("ctrl1", "test-cert")`)
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -154,7 +154,7 @@ func (s *stateSuite) TestRetrieveExternalControllerForModelWithoutAlias(c *tc.C)
 	db := s.DB()
 
 	// Insert a single external controller.
-	_, err := db.Exec(`INSERT INTO external_controller(uuid,ca_cert) VALUES	
+	_, err := db.Exec(`INSERT INTO external_controller (uuid, ca_cert) VALUES
 ("ctrl1", "test-cert")`)
 	c.Assert(err, tc.ErrorIsNil)
 	// Insert a model corresponding to that controller.

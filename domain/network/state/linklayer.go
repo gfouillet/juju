@@ -127,7 +127,7 @@ func accumulateToMap[F any, K comparable, V any](from []F, transform func(F) (K,
 // query preparation or execution fails.
 func (st *State) getAllLinkLayerDevices(ctx context.Context, tx *sqlair.TX) ([]getLinkLayerDevice, error) {
 	stmt, err := st.Prepare(`
-SELECT 
+SELECT
 	lld.uuid AS &getLinkLayerDevice.uuid,
 	lld.net_node_uuid AS &getLinkLayerDevice.net_node_uuid,
 	lld.name AS &getLinkLayerDevice.name,
@@ -165,7 +165,7 @@ LEFT JOIN link_layer_device AS lldpn ON lldp.parent_uuid = lldpn.uuid
 // link_layer_device_dns_domain table within a transaction.
 func (st *State) getAllDNSDomains(ctx context.Context, tx *sqlair.TX) ([]dnsSearchDomainRow, error) {
 	stmt, err := st.Prepare(`
-SELECT &dnsSearchDomainRow.* 
+SELECT &dnsSearchDomainRow.*
 FROM link_layer_device_dns_domain
 `, dnsSearchDomainRow{})
 	if err != nil {
@@ -184,7 +184,7 @@ FROM link_layer_device_dns_domain
 // link_layer_device_dns_address table in the database.
 func (st *State) getAllDNSAddresses(ctx context.Context, tx *sqlair.TX) ([]dnsAddressRow, error) {
 	stmt, err := st.Prepare(`
-SELECT &dnsAddressRow.* 
+SELECT &dnsAddressRow.*
 FROM link_layer_device_dns_address
 `, dnsAddressRow{})
 	if err != nil {
@@ -204,7 +204,7 @@ FROM link_layer_device_dns_address
 // Returns a slice of getIpAddress or an error if the operation fails.
 func (st *State) getAllAddresses(ctx context.Context, tx *sqlair.TX) ([]getIpAddress, error) {
 	stmt, err := st.Prepare(`
-SELECT 
+SELECT
  ia.uuid AS &getIpAddress.uuid,
  ia.net_node_uuid AS &getIpAddress.net_node_uuid,
  pia.provider_id AS &getIpAddress.provider_id,

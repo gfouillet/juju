@@ -59,9 +59,9 @@ func (st *State) checkApplicationExists(
 
 	checkStmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   application
-WHERE  uuid = $entityUUID.uuid
-	`,
+FROM application
+WHERE uuid = $entityUUID.uuid
+`,
 		uuidInput,
 	)
 	if err != nil {
@@ -413,8 +413,8 @@ func (st *State) getDefaultSpaceUUID(ctx context.Context, tx *sqlair.TX) (string
 	}
 	stmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   space
-JOIN   model_config ON model_config.key = $KeyValue.key AND model_config.value = space.name`, key, entityUUID{})
+FROM space
+JOIN model_config ON model_config.key = $KeyValue.key AND model_config.value = space.name`, key, entityUUID{})
 	if err != nil {
 		return "", errors.Capture(err)
 	}

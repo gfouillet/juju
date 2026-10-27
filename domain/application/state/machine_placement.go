@@ -72,8 +72,8 @@ func (s *State) IsMachineController(ctx context.Context, mName string) (bool, er
 	var result count
 	query := `
 SELECT COUNT(*) AS &count.count
-FROM   v_machine_is_controller
-WHERE  machine_uuid = $entityUUID.uuid
+FROM v_machine_is_controller
+WHERE machine_uuid = $entityUUID.uuid
 `
 	queryStmt, err := s.Prepare(query, entityUUID{}, result)
 	if err != nil {
@@ -140,7 +140,7 @@ WHERE uuid = $entityUUID.uuid
 	}
 
 	selectMachinesStmt, err := st.Prepare(`
-SELECT machine.name AS  &entityName.name
+SELECT machine.name AS &entityName.name
 FROM machine
 JOIN unit ON machine.net_node_uuid = unit.net_node_uuid
 WHERE unit.application_uuid = $entityUUID.uuid

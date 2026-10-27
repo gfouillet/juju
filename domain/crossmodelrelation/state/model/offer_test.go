@@ -1472,8 +1472,8 @@ func (s *modelOfferSuite) readRelationSuspension(c *tc.C, relUUID string) (bool,
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT suspended, suspended_reason
-FROM   relation
-WHERE  uuid = ?
+FROM relation
+WHERE uuid = ?
 `, relUUID).Scan(&suspended, &reason)
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1495,8 +1495,8 @@ func (s *modelOfferSuite) assertRelationSuspendStatus(c *tc.C, relUUID, message 
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT relation_status_type_id, message, updated_at
-FROM   relation_status
-WHERE  relation_uuid = ?
+FROM relation_status
+WHERE relation_uuid = ?
 `, relUUID).Scan(&statusID, &gotMsg, &updated)
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1515,8 +1515,8 @@ func (s *modelOfferSuite) assertNoRelationStatus(c *tc.C, relUUID string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM   relation_status
-WHERE  relation_uuid = ?
+FROM relation_status
+WHERE relation_uuid = ?
 `, relUUID).Scan(&count)
 	})
 	c.Assert(err, tc.ErrorIsNil)

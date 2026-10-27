@@ -28,8 +28,8 @@ func (st *State) UnitExists(ctx context.Context, uUUID string) (bool, error) {
 	unitUUID := entityUUID{UUID: uUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   unit
-WHERE  uuid = $entityUUID.uuid`, unitUUID)
+FROM unit
+WHERE uuid = $entityUUID.uuid`, unitUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing unit exists query: %w", err)
 	}
@@ -83,9 +83,9 @@ func (st *State) ensureUnitNotAliveCascade(
 	unitUUID := entityUUID{UUID: uUUID}
 	updateUnitStmt, err := st.Prepare(`
 UPDATE unit
-SET    life_id = 1
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 0`, unitUUID)
+SET life_id = 1
+WHERE uuid = $entityUUID.uuid
+AND life_id = 0`, unitUUID)
 	if err != nil {
 		return cascaded, errors.Errorf("preparing unit life update: %w", err)
 	}
@@ -136,9 +136,9 @@ func (st *State) ensureUnitStorageAttachmentsNotAlive(
 
 	stmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_attachment
-WHERE  unit_uuid = $entityUUID.uuid
-AND    life_id < 2`, unitUUID)
+FROM storage_attachment
+WHERE unit_uuid = $entityUUID.uuid
+AND life_id < 2`, unitUUID)
 	if err != nil {
 		return cascaded, errors.Errorf(
 			"preparing live storage attachments query: %w", err,
@@ -162,9 +162,9 @@ AND    life_id < 2`, unitUUID)
 
 	stmt, err = st.Prepare(`
 UPDATE storage_attachment
-SET    life_id = 1
-WHERE  unit_uuid = $entityUUID.uuid
-AND    life_id = 0`, unitUUID)
+SET life_id = 1
+WHERE unit_uuid = $entityUUID.uuid
+AND life_id = 0`, unitUUID)
 	if err != nil {
 		return cascaded, errors.Errorf(
 			"preparing live storage attachments update: %w", err,
@@ -179,11 +179,11 @@ AND    life_id = 0`, unitUUID)
 
 	sfaStmt, err := st.Prepare(`
 SELECT sfa.uuid AS &entityUUID.uuid
-FROM   storage_attachment sa
+FROM storage_attachment sa
        JOIN storage_instance_filesystem sif ON sa.storage_instance_uuid = sif.storage_instance_uuid
        JOIN storage_filesystem_attachment sfa ON sif.storage_filesystem_uuid = sfa.storage_filesystem_uuid
-WHERE  sa.unit_uuid = $entityUUID.uuid
-AND    sfa.life_id < 2`, entityUUID{})
+WHERE sa.unit_uuid = $entityUUID.uuid
+AND sfa.life_id < 2`, entityUUID{})
 	if err != nil {
 		return cascaded, errors.Errorf(
 			"preparing live unit filesystem attachments query: %w", err,
@@ -205,11 +205,11 @@ AND    sfa.life_id < 2`, entityUUID{})
 
 	svaStmt, err := st.Prepare(`
 SELECT sva.uuid AS &entityUUID.uuid
-FROM   storage_attachment sa
+FROM storage_attachment sa
        JOIN storage_instance_volume siv ON sa.storage_instance_uuid = siv.storage_instance_uuid
        JOIN storage_volume_attachment sva ON siv.storage_volume_uuid = sva.storage_volume_uuid
-WHERE  sa.unit_uuid = $entityUUID.uuid
-AND    sva.life_id < 2`, entityUUID{})
+WHERE sa.unit_uuid = $entityUUID.uuid
+AND sva.life_id < 2`, entityUUID{})
 	if err != nil {
 		return cascaded, errors.Errorf(
 			"preparing live unit volume attachments query: %w", err,
@@ -231,11 +231,11 @@ AND    sva.life_id < 2`, entityUUID{})
 
 	svapStmt, err := st.Prepare(`
 SELECT svap.uuid AS &entityUUID.uuid
-FROM   storage_attachment sa
+FROM storage_attachment sa
        JOIN storage_instance_volume siv ON sa.storage_instance_uuid = siv.storage_instance_uuid
        JOIN storage_volume_attachment_plan svap ON siv.storage_volume_uuid = svap.storage_volume_uuid
-WHERE  sa.unit_uuid = $entityUUID.uuid
-AND    svap.life_id < 2`, unitUUID)
+WHERE sa.unit_uuid = $entityUUID.uuid
+AND svap.life_id < 2`, unitUUID)
 	if err != nil {
 		return cascaded, errors.Errorf(
 			"preparing live unit volume attachment plans query: %w", err,
@@ -267,10 +267,10 @@ func (st *State) ensureUnitOwnedStorageInstancesNotAlive(
 
 	stmt, err := st.Prepare(`
 SELECT si.uuid AS &entityUUID.uuid
-FROM   storage_unit_owner so 
-JOIN   storage_instance si ON so.storage_instance_uuid = si.uuid
-WHERE  so.unit_uuid = $entityUUID.uuid
-AND    si.life_id < 2`, entityUUID{})
+FROM storage_unit_owner so
+JOIN storage_instance si ON so.storage_instance_uuid = si.uuid
+WHERE so.unit_uuid = $entityUUID.uuid
+AND si.life_id < 2`, entityUUID{})
 	if err != nil {
 		return cascaded, errors.Errorf(
 			"preparing live storage instances query: %w", err,
@@ -301,33 +301,33 @@ func (st *State) markMachineAsDyingIfAllUnitsAreNotAlive(
 	lastUnitStmt, err := st.Prepare(`
 WITH units_alive AS (
     SELECT uuid, net_node_uuid
-    FROM   unit
-    WHERE  life_id = 0
+    FROM unit
+    WHERE life_id = 0
 ), units_not_alive AS (
     SELECT uuid, net_node_uuid
-    FROM   unit
-    WHERE  life_id != 0
+    FROM unit
+    WHERE life_id != 0
 ), machines AS (
-    SELECT    m.uuid AS machine_uuid,
+    SELECT m.uuid AS machine_uuid,
               m.net_node_uuid,
               COUNT(ua.uuid) AS unit_alive_count,
               COUNT(una.uuid) AS unit_not_alive_count,
 			  COUNT(mp.parent_uuid) AS machine_parent_count
-    FROM      machine AS m
-    JOIN      net_node AS nn ON nn.uuid = m.net_node_uuid
+    FROM machine AS m
+    JOIN net_node AS nn ON nn.uuid = m.net_node_uuid
     LEFT JOIN units_alive AS ua ON ua.net_node_uuid = nn.uuid
     LEFT JOIN units_not_alive AS una ON una.net_node_uuid = nn.uuid
 	LEFT JOIN machine_parent AS mp ON mp.parent_uuid = m.uuid
-    GROUP BY  m.uuid
+    GROUP BY m.uuid
 )
 SELECT unit_alive_count AS &unitMachineLifeSummary.alive_count,
        unit_not_alive_count AS &unitMachineLifeSummary.not_alive_count,
 	   machine_parent_count AS &unitMachineLifeSummary.machine_parent_count,
        machine_uuid AS &unitMachineLifeSummary.uuid
-FROM   machines
+FROM machines
 LEFT JOIN unit AS u ON u.net_node_uuid = machines.net_node_uuid
-WHERE  u.uuid = $entityUUID.uuid;
-    `, unitUUID, unitMachineLifeSummary{})
+WHERE u.uuid = $entityUUID.uuid;
+`, unitUUID, unitMachineLifeSummary{})
 	if err != nil {
 		return "", cascaded, errors.Errorf("preparing unit count query: %w", err)
 	}
@@ -352,9 +352,9 @@ WHERE  u.uuid = $entityUUID.uuid;
 
 	updateMachineStmt, err := st.Prepare(`
 UPDATE machine
-SET    life_id = 1
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 0`, entityUUID{})
+SET life_id = 1
+WHERE uuid = $entityUUID.uuid
+AND life_id = 0`, entityUUID{})
 	if err != nil {
 		return "", cascaded, errors.Errorf("preparing machine life update: %w", err)
 	}
@@ -381,9 +381,9 @@ AND    life_id = 0`, entityUUID{})
 
 	updateInstanceStmt, err := st.Prepare(`
 UPDATE machine_cloud_instance
-SET    life_id = 1
-WHERE  machine_uuid = $entityUUID.uuid
-AND    life_id = 0`, entityUUID{})
+SET life_id = 1
+WHERE machine_uuid = $entityUUID.uuid
+AND life_id = 0`, entityUUID{})
 	if err != nil {
 		return "", cascaded, errors.Errorf("preparing machine cloud instance life update: %w", err)
 	}
@@ -493,11 +493,11 @@ func (st *State) GetApplicationNameAndUnitNameByUnitUUID(ctx context.Context, uU
 
 	unitUUID := entityUUID{UUID: uUUID}
 	stmt, err := st.Prepare(`
-SELECT    a.name AS &applicationUnitName.application_name,
+SELECT a.name AS &applicationUnitName.application_name,
           u.name AS &applicationUnitName.unit_name
-FROM      unit AS u
+FROM unit AS u
 LEFT JOIN application AS a ON a.uuid = u.application_uuid
-WHERE     u.uuid = $entityUUID.uuid;`, applicationUnitName{}, unitUUID)
+WHERE u.uuid = $entityUUID.uuid;`, applicationUnitName{}, unitUUID)
 	if err != nil {
 		return "", "", errors.Errorf("preparing unit application name and unit name query: %w", err)
 	}
@@ -527,9 +527,9 @@ func (st *State) MarkUnitAsDead(ctx context.Context, uUUID string) error {
 	unitUUID := entityUUID{UUID: uUUID}
 	updateStmt, err := st.Prepare(`
 UPDATE unit
-SET    life_id = 2
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 1`, unitUUID)
+SET life_id = 2
+WHERE uuid = $entityUUID.uuid
+AND life_id = 1`, unitUUID)
 	if err != nil {
 		return errors.Errorf("preparing unit life update: %w", err)
 	}
@@ -562,9 +562,9 @@ func (st *State) MarkUnitAsDeadWithNoEntities(ctx context.Context, uUUID string)
 	unitUUID := entityAssociationCount{UUID: uUUID}
 	updateStmt, err := st.Prepare(`
 UPDATE unit
-SET    life_id = 2
-WHERE  uuid = $entityAssociationCount.uuid
-AND    life_id = 1`, unitUUID)
+SET life_id = 2
+WHERE uuid = $entityAssociationCount.uuid
+AND life_id = 1`, unitUUID)
 	if err != nil {
 		return errors.Errorf("preparing unit life update: %w", err)
 	}
@@ -576,8 +576,8 @@ AND    life_id = 1`, unitUUID)
 
 	relationStmt, err := st.Prepare(`
 SELECT count(*) AS &entityAssociationCount.count
-FROM   relation_unit
-WHERE  unit_uuid = $entityAssociationCount.uuid
+FROM relation_unit
+WHERE unit_uuid = $entityAssociationCount.uuid
 `, unitUUID)
 	if err != nil {
 		return errors.Capture(err)
@@ -585,8 +585,8 @@ WHERE  unit_uuid = $entityAssociationCount.uuid
 
 	storageAttachmentStmt, err := st.Prepare(`
 SELECT count(*) AS &entityAssociationCount.count
-FROM   storage_attachment
-WHERE  unit_uuid = $entityAssociationCount.uuid
+FROM storage_attachment
+WHERE unit_uuid = $entityAssociationCount.uuid
 `, unitUUID)
 	if err != nil {
 		return errors.Capture(err)
@@ -641,10 +641,10 @@ func (st *State) DeleteUnit(ctx context.Context, unitUUID string, force bool) er
 func (st *State) deleteUnit(ctx context.Context, tx *sqlair.TX, unitUUID string, force bool) error {
 	// Get the net node UUID for the unit.
 	selectNetNodeStmt, err := st.Prepare(`
-SELECT    nn.uuid AS &entityUUID.uuid
-FROM      unit AS u
+SELECT nn.uuid AS &entityUUID.uuid
+FROM unit AS u
 LEFT JOIN net_node AS nn ON nn.uuid = u.net_node_uuid
-WHERE     u.uuid = $entityUUID.uuid;`, entityUUID{})
+WHERE u.uuid = $entityUUID.uuid;`, entityUUID{})
 	if err != nil {
 		return errors.Errorf("preparing unit net node query: %w", err)
 	}
@@ -671,7 +671,7 @@ WHERE unit_uuid = $entityAssociationCount.uuid
 	unitUUIDRec := entityUUID{UUID: unitUUID}
 	deleteUnitStmt, err := st.Prepare(`
 DELETE FROM unit
-WHERE  uuid = $entityUUID.uuid;`, unitUUIDRec)
+WHERE uuid = $entityUUID.uuid;`, unitUUIDRec)
 	if err != nil {
 		return errors.Errorf("preparing unit delete: %w", err)
 	}
@@ -758,8 +758,8 @@ func (st *State) getUnitLife(ctx context.Context, tx *sqlair.TX, uUUID string) (
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   unit
-WHERE  uuid = $entityUUID.uuid;`, unitLife, unitUUID)
+FROM unit
+WHERE uuid = $entityUUID.uuid;`, unitLife, unitUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing unit life query: %w", err)
 	}
@@ -779,7 +779,7 @@ func (st *State) deleteUnitAnnotations(ctx context.Context, tx *sqlair.TX, uUUID
 
 	deleteUnitAnnotationStmt, err := st.Prepare(`
 DELETE FROM annotation_unit
-WHERE  uuid = $unitUUID.unit_uuid`, unitUUIDRec)
+WHERE uuid = $unitUUID.unit_uuid`, unitUUIDRec)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -799,8 +799,8 @@ func (st *State) deleteK8sPod(ctx context.Context, tx *sqlair.TX, uUUID, netNode
 
 	selectK8sPodStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &entityAssociationCount.count
-FROM   k8s_pod
-WHERE  unit_uuid = $unitUUID.unit_uuid`, unitUUIDRec, entityAssociationCount{})
+FROM k8s_pod
+WHERE unit_uuid = $unitUUID.unit_uuid`, unitUUIDRec, entityAssociationCount{})
 	if err != nil {
 		return errors.Capture(err)
 	}

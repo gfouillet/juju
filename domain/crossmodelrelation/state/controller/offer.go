@@ -91,14 +91,14 @@ SELECT $permission.uuid,
        ot.id,
        u.uuid,
        $permission.grant_on
-FROM   v_user_auth u,
+FROM v_user_auth u,
        permission_access_type at,
        permission_object_type ot
-WHERE  u.uuid = $permission.grant_to
-AND    u.disabled = false
-AND    u.removed = false
-AND    at.type = $permission.access_type
-AND    ot.type = $permission.object_type
+WHERE u.uuid = $permission.grant_to
+AND u.disabled = false
+AND u.removed = false
+AND at.type = $permission.access_type
+AND ot.type = $permission.object_type
 `
 	insertPermissionStmt, err := sqlair.Prepare(newPermission, permission{})
 	if err != nil {
@@ -184,12 +184,12 @@ func (st *State) grantOfferPermission(
 
 	readStmt, err := st.Prepare(`
 SELECT p.access_type AS &permInOut.access_type
-FROM   v_permission_offer AS p
-JOIN   v_user_auth AS u ON p.grant_to = u.uuid
-WHERE  u.name = $permInOut.name
-AND    u.disabled = false
-AND    u.removed = false
-AND    p.grant_on = $permInOut.grant_on
+FROM v_permission_offer AS p
+JOIN v_user_auth AS u ON p.grant_to = u.uuid
+WHERE u.name = $permInOut.name
+AND u.disabled = false
+AND u.removed = false
+AND p.grant_on = $permInOut.grant_on
 `, inOut)
 	if err != nil {
 		return errors.Errorf("preparing read current offer permission: %w", err)
@@ -235,12 +235,12 @@ func (st *State) revokeOfferPermission(
 	}
 	readStmt, err := st.Prepare(`
 SELECT p.access_type AS &permInOut.access_type
-FROM   v_permission_offer AS p
-JOIN   v_user_auth AS u ON p.grant_to = u.uuid
-WHERE  u.name = $permInOut.name
-AND    u.disabled = false
-AND    u.removed = false
-AND    p.grant_on = $permInOut.grant_on
+FROM v_permission_offer AS p
+JOIN v_user_auth AS u ON p.grant_to = u.uuid
+WHERE u.name = $permInOut.name
+AND u.disabled = false
+AND u.removed = false
+AND p.grant_on = $permInOut.grant_on
 `, inOut)
 	if err != nil {
 		return errors.Errorf("preparing read current offer permission: %w", err)
@@ -279,18 +279,18 @@ func (st *State) updateOfferPermission(
 
 	updateStmt, err := st.Prepare(`
 UPDATE permission
-SET    access_type_id = (
+SET access_type_id = (
            SELECT id
-           FROM   permission_access_type
-           WHERE  type = $permInOut.access_type
+           FROM permission_access_type
+           WHERE type = $permInOut.access_type
        )
-WHERE  grant_on = $permInOut.grant_on
-AND    grant_to IN (
+WHERE grant_on = $permInOut.grant_on
+AND grant_to IN (
            SELECT uuid
-           FROM   v_user_auth
-           WHERE  name = $permInOut.name
-           AND    removed = false
-           AND    disabled = false
+           FROM v_user_auth
+           WHERE name = $permInOut.name
+           AND removed = false
+           AND disabled = false
        )
 `, inOut)
 	if err != nil {
@@ -315,13 +315,13 @@ func (st *State) deleteOfferPermission(
 
 	deleteStmt, err := st.Prepare(`
 DELETE FROM permission
-WHERE  grant_on = $permInOut.grant_on
-AND    grant_to IN (
+WHERE grant_on = $permInOut.grant_on
+AND grant_to IN (
            SELECT uuid
-           FROM   v_user_auth
-           WHERE  name = $permInOut.name
-           AND    removed = false
-           AND    disabled = false
+           FROM v_user_auth
+           WHERE name = $permInOut.name
+           AND removed = false
+           AND disabled = false
        )
 `, inOut)
 	if err != nil {
@@ -344,8 +344,8 @@ func (st *State) getUserUUIDByName(ctx context.Context, tx *sqlair.TX, userName 
 
 	getUserQuery := `
 SELECT (u.uuid, u.disabled) AS (&user.*)
-FROM   v_user_auth AS u
-WHERE  u.removed = false
+FROM v_user_auth AS u
+WHERE u.removed = false
        AND u.name = $name.name`
 
 	selectUserStmt, err := st.Prepare(getUserQuery, user{}, uName)
@@ -380,12 +380,12 @@ func (st *State) GetOfferUUIDsForUsersWithConsume(
 
 	stmt, err := st.Prepare(`
 SELECT p.grant_on AS &entityUUID.uuid
-FROM   v_permission_offer AS p
-JOIN   v_user_auth AS u ON p.grant_to = u.uuid
-WHERE  u.name IN ($names[:])
-AND    u.disabled = false
-AND    u.removed = false
-AND    (p.access_type = 'consume' OR p.access_type = 'admin')
+FROM v_permission_offer AS p
+JOIN v_user_auth AS u ON p.grant_to = u.uuid
+WHERE u.name IN ($names[:])
+AND u.disabled = false
+AND u.removed = false
+AND (p.access_type = 'consume' OR p.access_type = 'admin')
 `, names{}, entityUUID{})
 	if err != nil {
 		return nil, errors.Errorf("preparing get user with permission query: %w", err)
@@ -426,11 +426,11 @@ func (st *State) GetUsersForOfferUUIDs(ctx context.Context, offerUUIDs []string)
 
 	stmt, err := st.Prepare(`
 SELECT * AS &offerUser.*
-FROM   v_permission_offer AS p
-JOIN   v_user_auth AS u ON p.grant_to = u.uuid
-WHERE  p.grant_on IN ($uuids[:])
-AND    u.disabled = false
-AND    u.removed = false
+FROM v_permission_offer AS p
+JOIN v_user_auth AS u ON p.grant_to = u.uuid
+WHERE p.grant_on IN ($uuids[:])
+AND u.disabled = false
+AND u.removed = false
 `, uuids{}, offerUser{})
 	if err != nil {
 		return nil, errors.Errorf("preparing get user with permission query: %w", err)
@@ -490,12 +490,12 @@ func (st *State) IsUserControllerOrModelAdmin(
 
 	adminStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   v_user_auth u
-JOIN   v_permission p ON u.uuid = p.grant_to
-WHERE  u.name = $name.name
-AND    u.disabled = false
-AND    u.removed = false
-AND    (
+FROM v_user_auth u
+JOIN v_permission p ON u.uuid = p.grant_to
+WHERE u.name = $name.name
+AND u.disabled = false
+AND u.removed = false
+AND (
            (p.object_type = 'controller' AND p.access_type = 'superuser')
            OR
            (p.object_type = 'model' AND p.grant_on = $modelUUID.model_uuid AND p.access_type IN ('admin', 'superuser'))

@@ -47,9 +47,9 @@ func (s *ModelState) SetUnitPasswordHash(ctx context.Context, unitUUID unit.UUID
 
 	query := `
 UPDATE unit
-SET    password_hash = $entityPasswordHash.password_hash,
+SET password_hash = $entityPasswordHash.password_hash,
        password_hash_algorithm_id = 0
-WHERE  uuid = $entityPasswordHash.uuid;
+WHERE uuid = $entityPasswordHash.uuid;
 `
 	stmt, err := s.Prepare(query, args)
 	if err != nil {
@@ -90,8 +90,8 @@ func (s *ModelState) MatchesUnitPasswordHash(ctx context.Context, unitUUID unit.
 
 	query := `
 SELECT COUNT(*) AS &validatePasswordHash.count FROM unit
-WHERE  uuid = $validatePasswordHash.uuid
-AND    password_hash = $validatePasswordHash.password_hash;
+WHERE uuid = $validatePasswordHash.uuid
+AND password_hash = $validatePasswordHash.password_hash;
 `
 	stmt, err := s.Prepare(query, args)
 	if err != nil {
@@ -159,8 +159,8 @@ func (s *ModelState) getUnitUUID(ctx context.Context, tx *sqlair.TX, name string
 
 	stmt, err := s.Prepare(`
 SELECT &entityName.uuid
-FROM   unit
-WHERE  name=$entityName.name`, u)
+FROM unit
+WHERE name = $entityName.name`, u)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -188,9 +188,9 @@ func (s *ModelState) SetMachinePasswordHash(ctx context.Context, machineUUID mac
 
 	query := `
 UPDATE machine
-SET    password_hash = $entityPasswordHash.password_hash,
+SET password_hash = $entityPasswordHash.password_hash,
        password_hash_algorithm_id = 0
-WHERE  uuid = $entityPasswordHash.uuid;
+WHERE uuid = $entityPasswordHash.uuid;
 `
 	stmt, err := s.Prepare(query, args)
 	if err != nil {
@@ -240,11 +240,11 @@ func (s *ModelState) MatchesMachinePasswordHashWithNonce(
 SELECT
     COUNT(m.uuid) AS &machinePassword.machine_count,
     mci.instance_id AS &machinePassword.instance_id
-FROM      machine m
+FROM machine m
 LEFT JOIN machine_cloud_instance mci ON mci.machine_uuid = m.uuid
-WHERE     m.uuid = $validatePasswordHashWithNonce.uuid
-AND       m.password_hash = $validatePasswordHashWithNonce.password_hash
-AND       m.nonce = $validatePasswordHashWithNonce.nonce;
+WHERE m.uuid = $validatePasswordHashWithNonce.uuid
+AND m.password_hash = $validatePasswordHashWithNonce.password_hash
+AND m.nonce = $validatePasswordHashWithNonce.nonce;
 `
 	passwordStmt, err := s.Prepare(passwordQuery, args, result)
 	if err != nil {
@@ -327,8 +327,8 @@ func (s *ModelState) getMachineUUID(ctx context.Context, tx *sqlair.TX, name str
 
 	stmt, err := s.Prepare(`
 SELECT &entityName.uuid
-FROM   machine
-WHERE  name=$entityName.name`, u)
+FROM machine
+WHERE name = $entityName.name`, u)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -355,8 +355,8 @@ func (s *ModelState) MatchesModelPasswordHash(
 	args := validateModelPasswordHash{PasswordHash: passwordHash}
 	query := `
 SELECT COUNT(*) AS &validateModelPasswordHash.count
-FROM   model_agent
-WHERE  password_hash = $validateModelPasswordHash.password_hash;
+FROM model_agent
+WHERE password_hash = $validateModelPasswordHash.password_hash;
 `
 	stmt, err := s.Prepare(query, args)
 	if err != nil {
@@ -389,7 +389,7 @@ func (s *ModelState) SetModelPasswordHash(ctx context.Context, passwordHash agen
 	passwordHashInput := modelPasswordHash{PasswordHash: passwordHash}
 	updateModelPassword, err := s.Prepare(`
 UPDATE model_agent
-SET    password_hash = $modelPasswordHash.password_hash,
+SET password_hash = $modelPasswordHash.password_hash,
 	   password_hash_algorithm_id = 0
 `,
 		passwordHashInput)
@@ -434,8 +434,8 @@ func (s *ModelState) IsMachineController(ctx context.Context, mName machine.Name
 	var result count
 	query := `
 SELECT COUNT(*) AS &count.count
-FROM   v_machine_is_controller
-WHERE  machine_uuid = $machineUUID.uuid
+FROM v_machine_is_controller
+WHERE machine_uuid = $machineUUID.uuid
 `
 	queryStmt, err := s.Prepare(query, machineUUID{}, result)
 	if err != nil {
@@ -508,9 +508,9 @@ WHERE uuid = $applicationID.uuid
 
 	query := `
 INSERT INTO application_agent (application_uuid, password_hash, password_hash_algorithm_id)
-VALUES      ($entityPasswordHash.uuid, $entityPasswordHash.password_hash, 0)
+VALUES ($entityPasswordHash.uuid, $entityPasswordHash.password_hash, 0)
 ON CONFLICT (application_uuid) DO
-UPDATE SET  password_hash = $entityPasswordHash.password_hash,
+UPDATE SET password_hash = $entityPasswordHash.password_hash,
             password_hash_algorithm_id = 0
 `
 	stmt, err := s.Prepare(query, args)
@@ -551,8 +551,8 @@ func (s *ModelState) MatchesApplicationPasswordHash(
 
 	query := `
 SELECT COUNT(*) AS &validatePasswordHash.count FROM application_agent
-WHERE  application_uuid = $validatePasswordHash.uuid
-AND    password_hash = $validatePasswordHash.password_hash;
+WHERE application_uuid = $validatePasswordHash.uuid
+AND password_hash = $validatePasswordHash.password_hash;
 `
 	stmt, err := s.Prepare(query, args)
 	if err != nil {

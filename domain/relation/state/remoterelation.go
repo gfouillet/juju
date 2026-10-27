@@ -112,13 +112,13 @@ func (st *State) isRemoteRelation(ctx context.Context, tx *sqlair.TX, relationUU
 
 	selectStmt, err := st.Prepare(`
 SELECT COUNT(cs.name) AS &count.count
-FROM   charm_source AS cs
-JOIN   charm AS c ON cs.id = c.source_id
-JOIN   application AS a ON c.uuid = a.charm_uuid
-JOIN   application_endpoint AS ae ON a.uuid = ae.application_uuid
-JOIN   relation_endpoint AS re ON ae.uuid = re.endpoint_uuid
-WHERE  re.relation_uuid = $entityUUID.uuid
-AND    cs.name = 'cmr'
+FROM charm_source AS cs
+JOIN charm AS c ON cs.id = c.source_id
+JOIN application AS a ON c.uuid = a.charm_uuid
+JOIN application_endpoint AS ae ON a.uuid = ae.application_uuid
+JOIN relation_endpoint AS re ON ae.uuid = re.endpoint_uuid
+WHERE re.relation_uuid = $entityUUID.uuid
+AND cs.name = 'cmr'
 `, count{}, entityUUID{})
 	if err != nil {
 		return false, errors.Capture(err)
@@ -164,9 +164,9 @@ func (st *State) updateRemoteRelationSuspendedState(
 
 	updateStmt, err := st.Prepare(`
 UPDATE relation
-SET    suspended = $suspension.suspended,
+SET suspended = $suspension.suspended,
 	   suspended_reason = $suspension.suspended_reason
-WHERE  uuid = $entityUUID.uuid
+WHERE uuid = $entityUUID.uuid
 `, suspension{}, entityUUID{})
 	if err != nil {
 		return errors.Capture(err)
@@ -174,7 +174,7 @@ WHERE  uuid = $entityUUID.uuid
 
 	statusStmt, err := st.Prepare(`
 INSERT INTO relation_status (*) VALUES ($relationStatus.*)
-ON CONFLICT(relation_uuid) DO UPDATE SET
+ON CONFLICT (relation_uuid) DO UPDATE SET
     relation_status_type_id = excluded.relation_status_type_id,
     message = excluded.message,
     updated_at = excluded.updated_at
@@ -245,10 +245,10 @@ func (st *State) SetRelationRemoteApplicationAndUnitSettings(
 
 	getUnitsStmt, err := st.Prepare(`
 SELECT &unitUUIDNameLife.*
-FROM   unit u
-LEFT   JOIN life AS l ON l.id = u.life_id AND l.value != 'dead'
-WHERE  u.name IN ($names[:])
-AND    u.application_uuid = $entityUUID.uuid
+FROM unit u
+LEFT JOIN life AS l ON l.id = u.life_id AND l.value != 'dead'
+WHERE u.name IN ($names[:])
+AND u.application_uuid = $entityUUID.uuid
 `, unitUUIDNameLife{}, names{}, appUUID)
 	if err != nil {
 		return errors.Capture(err)
@@ -358,10 +358,10 @@ func (st *State) isApplicationInRelation(
 
 	stmt, err := st.Prepare(`
 SELECT &applicationUUID.application_uuid
-FROM   relation_endpoint re
-JOIN   application_endpoint ae ON re.endpoint_uuid = ae.uuid
-WHERE  re.relation_uuid = $entityUUID.uuid
-AND    ae.application_uuid = $applicationUUID.application_uuid
+FROM relation_endpoint re
+JOIN application_endpoint ae ON re.endpoint_uuid = ae.uuid
+WHERE re.relation_uuid = $entityUUID.uuid
+AND ae.application_uuid = $applicationUUID.application_uuid
 `, relUUID, app)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -387,8 +387,8 @@ func (st *State) isPeerRelation(
 
 	stmt, err := st.Prepare(`
 SELECT count(*) AS &rows.count
-FROM   relation_endpoint
-WHERE  relation_uuid = $entityUUID.uuid
+FROM relation_endpoint
+WHERE relation_uuid = $entityUUID.uuid
 `, rows{}, relUUID)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -459,7 +459,7 @@ func (st *State) replaceUnitSettings(
 	id := entityUUID{UUID: relUnitUUID}
 	deleteStmt, err := st.Prepare(`
 DELETE FROM relation_unit_setting
-WHERE       relation_unit_uuid = $entityUUID.uuid
+WHERE relation_unit_uuid = $entityUUID.uuid
 `, id)
 	if err != nil {
 		return errors.Capture(err)
@@ -523,7 +523,7 @@ func (st *State) updateRelationStatus(
 	}
 	stmt, err := st.Prepare(`
 INSERT INTO relation_status (*) VALUES ($relationStatus.*)
-ON CONFLICT(relation_uuid) DO UPDATE SET
+ON CONFLICT (relation_uuid) DO UPDATE SET
     relation_status_type_id = excluded.relation_status_type_id,
     message = excluded.message,
     updated_at = excluded.updated_at

@@ -33,9 +33,9 @@ func (s *State) GetModelRedirection(
 	arg := dbRedirectModelUUID{ModelUUID: modelUUID.String()}
 	stmt, err := s.Prepare(`
 SELECT &dbModelRedirect.*
-FROM   model_migration_redirect
-WHERE  model_uuid = $dbRedirectModelUUID.model_uuid
-AND    completed_at IS NOT NULL
+FROM model_migration_redirect
+WHERE model_uuid = $dbRedirectModelUUID.model_uuid
+AND completed_at IS NOT NULL
 `, arg, dbModelRedirect{})
 	if err != nil {
 		return model.ModelRedirection{}, errors.Capture(err)
@@ -93,11 +93,11 @@ func (s *State) GetModelRedirectUsers(
 	arg := dbRedirectModelUUID{ModelUUID: modelUUID.String()}
 	stmt, err := s.Prepare(`
 SELECT (mmru.user_name, mmru.access) AS (&dbRedirectUser.*)
-FROM   model_migration_redirect_user AS mmru
+FROM model_migration_redirect_user AS mmru
        JOIN v_user_auth AS u ON u.uuid = mmru.user_uuid
-WHERE  mmru.model_uuid = $dbRedirectModelUUID.model_uuid
-AND    u.removed = false
-AND    u.disabled = false
+WHERE mmru.model_uuid = $dbRedirectModelUUID.model_uuid
+AND u.removed = false
+AND u.disabled = false
 `, arg, dbRedirectUser{})
 	if err != nil {
 		return nil, errors.Capture(err)

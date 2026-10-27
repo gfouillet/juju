@@ -226,11 +226,11 @@ func (st *State) GetMachineCountNotUsingBase(
 
 	stmt, err := st.Prepare(`
 WITH machine_bases AS (
-    SELECT     CONCAT(os.name, '@', mp.channel) AS base
-    FROM       machine AS m
-    LEFT JOIN  machine_platform AS mp ON mp.machine_uuid = m.uuid
-    LEFT JOIN  os ON mp.os_id = os.id
-    WHERE      os.name IS NOT NULL AND os.name != ''
+    SELECT CONCAT(os.name, '@', mp.channel) AS base
+    FROM machine AS m
+    LEFT JOIN machine_platform AS mp ON mp.machine_uuid = m.uuid
+    LEFT JOIN os ON mp.os_id = os.id
+    WHERE os.name IS NOT NULL AND os.name != ''
 )
 SELECT COUNT(*) AS &machineCount.count
 FROM machine_bases AS mb
@@ -275,19 +275,19 @@ func (st *State) GetMachineAgentBinaryMetadata(ctx context.Context, mName string
 
 	ident := machineName{Name: mName}
 	stmt, err := st.Prepare(`
-SELECT    mav.version AS &agentBinaryMetadata.version,
+SELECT mav.version AS &agentBinaryMetadata.version,
           a.name AS &agentBinaryMetadata.architecture_name,
           osm.size AS &agentBinaryMetadata.size,
           osm.sha_256 AS &agentBinaryMetadata.sha_256,
           osm.sha_384 AS &agentBinaryMetadata.sha_384
-FROM      machine AS m
-JOIN      machine_agent_version AS mav ON mav.machine_uuid = m.uuid
-JOIN      architecture AS a ON a.id = mav.architecture_id
+FROM machine AS m
+JOIN machine_agent_version AS mav ON mav.machine_uuid = m.uuid
+JOIN architecture AS a ON a.id = mav.architecture_id
 LEFT JOIN agent_binary_store AS abs ON (
           mav.version = abs.version
-AND       mav.architecture_id = abs.architecture_id)
+AND mav.architecture_id = abs.architecture_id)
 LEFT JOIN object_store_metadata AS osm ON abs.object_store_uuid = osm.uuid
-WHERE     m.name = $machineName.name
+WHERE m.name = $machineName.name
 `, agentBinaryMetadata{}, ident)
 	if err != nil {
 		return coreagentbinary.Metadata{}, errors.Capture(err)
@@ -370,16 +370,16 @@ func (st *State) GetMachinesAgentBinaryMetadata(
 	}
 
 	stmt, err := st.Prepare(`
-SELECT    mav.name AS &machineAgentBinaryMetadata.name,
+SELECT mav.name AS &machineAgentBinaryMetadata.name,
           mav.version AS &machineAgentBinaryMetadata.version,
           mav.architecture_name AS &machineAgentBinaryMetadata.architecture_name,
           osm.size AS &machineAgentBinaryMetadata.size,
           osm.sha_256 AS &machineAgentBinaryMetadata.sha_256,
           osm.sha_384 AS &machineAgentBinaryMetadata.sha_384
-FROM      v_machine_agent_version AS mav
+FROM v_machine_agent_version AS mav
 LEFT JOIN agent_binary_store AS abs ON (
           mav.version = abs.version
-AND       mav.architecture_id = abs.architecture_id)
+AND mav.architecture_id = abs.architecture_id)
 LEFT JOIN object_store_metadata AS osm ON abs.object_store_uuid = osm.uuid
 `, machineAgentBinaryMetadata{})
 	if err != nil {
@@ -389,7 +389,7 @@ LEFT JOIN object_store_metadata AS osm ON abs.object_store_uuid = osm.uuid
 	machineCount := rowCount{}
 	stmtMachineCount, err := st.Prepare(`
 SELECT (count(*)) AS (&rowCount.count)
-FROM   machine
+FROM machine
 `, machineCount)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -729,22 +729,22 @@ func (st *State) GetUnitsAgentBinaryMetadata(
 	// count queries to IAAS so CAAS returns empty metadata while IAAS continues
 	// to detect missing agent binaries.
 	stmt, err := st.Prepare(`
-SELECT    u.name AS &unitAgentBinaryMetadata.name,
+SELECT u.name AS &unitAgentBinaryMetadata.name,
           uav.version AS &unitAgentBinaryMetadata.version,
           a.name AS &unitAgentBinaryMetadata.architecture_name,
           osm.size AS &unitAgentBinaryMetadata.size,
           osm.sha_256 AS &unitAgentBinaryMetadata.sha_256,
           osm.sha_384 AS &unitAgentBinaryMetadata.sha_384
-FROM      unit_agent_version AS uav
-JOIN      unit AS u ON uav.unit_uuid = u.uuid
-JOIN      charm AS c ON c.uuid = u.charm_uuid
-JOIN      architecture AS a ON uav.architecture_id = a.id
-JOIN      model AS m ON m.type = 'iaas'
+FROM unit_agent_version AS uav
+JOIN unit AS u ON uav.unit_uuid = u.uuid
+JOIN charm AS c ON c.uuid = u.charm_uuid
+JOIN architecture AS a ON uav.architecture_id = a.id
+JOIN model AS m ON m.type = 'iaas'
 LEFT JOIN agent_binary_store AS abs ON (
           uav.version = abs.version
-AND       uav.architecture_id = abs.architecture_id)
+AND uav.architecture_id = abs.architecture_id)
 LEFT JOIN object_store_metadata AS osm ON abs.object_store_uuid = osm.uuid
-WHERE     c.source_id < 2
+WHERE c.source_id < 2
 `, unitAgentBinaryMetadata{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -755,10 +755,10 @@ WHERE     c.source_id < 2
 	unitCount := rowCount{}
 	stmtUnitCount, err := st.Prepare(`
 SELECT (count(*)) AS (&rowCount.count)
-FROM   unit AS u
-JOIN   charm AS c ON c.uuid = u.charm_uuid
-JOIN   model AS m ON m.type = 'iaas'
-WHERE  c.source_id < 2
+FROM unit AS u
+JOIN charm AS c ON c.uuid = u.charm_uuid
+JOIN model AS m ON m.type = 'iaas'
+WHERE c.source_id < 2
 `, unitCount)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1277,7 +1277,7 @@ func (st *State) SetModelTargetAgentVersion(
 
 	checkAgentVersionStmt, err := st.Prepare(`
 SELECT &agentVersionTarget.*
-FROM   agent_version
+FROM agent_version
 `,
 		agentVersionTarget{})
 	if err != nil {
@@ -1287,7 +1287,7 @@ FROM   agent_version
 	toVersionInput := setAgentVersionTarget{TargetVersion: toVersion.String()}
 	setAgentVersionStmt, err := st.Prepare(`
 UPDATE agent_version
-SET    target_version = $setAgentVersionTarget.target_version
+SET target_version = $setAgentVersionTarget.target_version
 `,
 		toVersionInput,
 	)
@@ -1358,7 +1358,7 @@ func (st *State) SetModelTargetAgentVersionAndStream(
 
 	checkAgentVersionStmt, err := st.Prepare(`
 SELECT &agentVersionTarget.*
-FROM   agent_version
+FROM agent_version
 `,
 		agentVersionTarget{})
 	if err != nil {
@@ -1371,7 +1371,7 @@ FROM   agent_version
 	}
 	setAgentVersionStreamStmt, err := st.Prepare(`
 UPDATE agent_version
-SET    target_version = $setAgentVersionTargetStream.target_version,
+SET target_version = $setAgentVersionTargetStream.target_version,
        stream_id = $setAgentVersionTargetStream.stream_id
 `,
 		toVersionStreamInput,
@@ -1426,7 +1426,7 @@ func (st *State) UpdateLatestAgentVersion(ctx context.Context, version semversio
 
 	checkLatestAgentVersion, err := st.Prepare(`
 SELECT &agentVersionInfo.*
-FROM   agent_version
+FROM agent_version
 `, agentVersionInfo{})
 	if err != nil {
 		return errors.Capture(err)
@@ -1437,7 +1437,7 @@ FROM   agent_version
 	}
 	stmt, err := st.Prepare(`
 UPDATE agent_version
-SET    latest_version = $latestAgentVersion.latest_version
+SET latest_version = $latestAgentVersion.latest_version
 `, modelAgentLatestVersion)
 	if err != nil {
 		return errors.Capture(err)
@@ -1590,8 +1590,8 @@ func (st *State) GetAllMachinesWithBase(ctx context.Context) (map[string]corebas
 SELECT mp.machine_uuid AS &machineBase.machine_uuid,
        os.name AS &machineBase.os,
        mp.channel AS &machineBase.channel
-FROM   machine_platform AS mp
-JOIN   os ON mp.os_id = os.id
+FROM machine_platform AS mp
+JOIN os ON mp.os_id = os.id
 `, machineBase{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1642,8 +1642,8 @@ func (st *State) GetAllMachinesArchitectures(ctx context.Context) ([]string, err
 
 	stmt, err := st.Prepare(`
 SELECT DISTINCT a.name AS &name.name
-FROM   machine_platform AS mp
-JOIN   architecture AS a ON mp.architecture_id = a.id
+FROM machine_platform AS mp
+JOIN architecture AS a ON mp.architecture_id = a.id
 `, name{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1686,9 +1686,9 @@ func (st *State) GetAllMachineTargetAgentVersionByArches(
 
 	stmt, err := st.Prepare(`
 SELECT DISTINCT a.name AS &agentBinaryStore.architecture_name
-FROM   agent_binary_store AS abs
-JOIN   architecture AS a ON abs.architecture_id = a.id
-WHERE  version = $agentBinaryStore.version 
+FROM agent_binary_store AS abs
+JOIN architecture AS a ON abs.architecture_id = a.id
+WHERE version = $agentBinaryStore.version
 `, key)
 	if err != nil {
 		return nil, errors.Capture(err)

@@ -398,8 +398,8 @@ func (s *State) getCharmMetadataName(
 
 	query := `
 SELECT &charmName.*
-FROM   charm_metadata
-WHERE  charm_uuid = $entityUUID.uuid;`
+FROM charm_metadata
+WHERE charm_uuid = $entityUUID.uuid;`
 
 	var dbVal charmName
 	stmt, err := s.Prepare(query, dbVal, ident)
@@ -638,7 +638,7 @@ SELECT
 FROM charm AS c
 JOIN charm_source AS cs ON c.source_id = cs.id
 WHERE c.uuid = $entityUUID.uuid;
-	`
+`
 	locatorStmt, err := s.Prepare(locatorQuery, charmUUID, locator)
 	if err != nil {
 		return "", charm.CharmLocator{}, errors.Errorf("preparing query: %w", err)
@@ -894,9 +894,9 @@ func (s *State) IsImportingModel(ctx context.Context) (bool, error) {
 	var migrationCheck modelMigrating
 	migrationStmt, err := s.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM model_migrating 
+FROM model_migrating
 WHERE model_uuid = $modelMigrating.model_uuid
-	`, count, migrationCheck)
+`, count, migrationCheck)
 	if err != nil {
 		return false, errors.Capture(err)
 	}
@@ -969,7 +969,7 @@ SELECT
 FROM charm AS c
 JOIN charm_source AS cs ON c.source_id = cs.id
 WHERE c.uuid = $entityUUID.uuid;
-	`
+`
 	locatorStmt, err := s.Prepare(locatorQuery, charmUUID, locator)
 	if err != nil {
 		return charm.CharmLocator{}, errors.Errorf("preparing query: %w", err)

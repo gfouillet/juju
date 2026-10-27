@@ -517,8 +517,8 @@ func (s *applicationSuite) TestApplicationRemovalNotExistsSuccess(c *tc.C) {
 	// We rely on the worker to handle that fact.
 	row := s.DB().QueryRow(`
 SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, "removal-uuid",
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, "removal-uuid",
 	)
 
 	var (
@@ -1143,11 +1143,11 @@ func (s *applicationSuite) TestDeleteOrphanedResourcesRetainsUnitResource(c *tc.
 	var resourceUUID, resourceName, unitUUID string
 	err := s.DB().QueryRowContext(c.Context(), `
 SELECT r.uuid, r.charm_resource_name, u.uuid
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-JOIN   unit AS u ON u.application_uuid = ar.application_uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 0`, appUUID).Scan(&resourceUUID, &resourceName, &unitUUID)
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+JOIN unit AS u ON u.application_uuid = ar.application_uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 0`, appUUID).Scan(&resourceUUID, &resourceName, &unitUUID)
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().ExecContext(c.Context(), `
@@ -1215,7 +1215,7 @@ func (s *applicationSuite) TestDeleteCharmReturnConstraintError(c *tc.C) {
 			uuid TEXT PRIMARY KEY,
 			charm_uuid TEXT,
 			created_at DATETIME,
-			FOREIGN KEY(charm_uuid) REFERENCES charm(uuid)
+			FOREIGN KEY (charm_uuid) REFERENCES charm (uuid)
 		)`)
 		if err != nil {
 			return err
@@ -1419,7 +1419,7 @@ SELECT COUNT(*) FROM sequence WHERE namespace = CONCAT('application_', ?)`, appN
 
 func (s *applicationSuite) checkUnitDyingState(c *tc.C, unitUUIDs []unit.UUID) {
 	// Ensure that there are no units left with life "alive".
-	row := s.DB().QueryRow("SELECT COUNT(*) FROM unit WHERE  life_id = 0")
+	row := s.DB().QueryRow("SELECT COUNT(*) FROM unit WHERE life_id = 0")
 	var count int
 	err := row.Scan(&count)
 	c.Assert(err, tc.ErrorIsNil)

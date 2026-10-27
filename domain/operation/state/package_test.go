@@ -184,7 +184,7 @@ func (s *baseSuite) addMachine(c *tc.C, name string) string {
 	netNodeUUID := internaluuid.MustNewUUID().String()
 	machineUUID := internaluuid.MustNewUUID().String()
 	s.query(c, `INSERT INTO net_node (uuid) VALUES (?)`, netNodeUUID)
-	s.query(c, "INSERT INTO machine (uuid, net_node_uuid, name, life_id) VALUES (?, ?, ? ,?)",
+	s.query(c, "INSERT INTO machine (uuid, net_node_uuid, name, life_id) VALUES (?, ?, ?, ?)",
 		machineUUID, netNodeUUID, name, 0)
 	return machineUUID
 }
@@ -242,8 +242,8 @@ func (s *baseSuite) addOperationWithExecutionGroup(c *tc.C, execGroup string) st
 	opUUID := internaluuid.MustNewUUID().String()
 	opID := s.nextID()
 	enqueued := s.state.clock.Now()
-	s.query(c, `INSERT INTO operation (uuid, operation_id, summary, execution_group, enqueued_at) 
-VALUES (?, ?, ?, ?,?)`, opUUID, opID,
+	s.query(c, `INSERT INTO operation (uuid, operation_id, summary, execution_group, enqueued_at)
+VALUES (?, ?, ?, ?, ?)`, opUUID, opID,
 		"", execGroup, enqueued)
 	return opUUID
 }
@@ -360,7 +360,7 @@ func (s *baseSuite) linkOperationTaskOutput(c *tc.C, taskUUID, path string) {
 func (s *baseSuite) addOperationTaskStatus(c *tc.C, taskUUID, status string) {
 	beforeCount := s.getRowCount(c, "operation_task_status")
 	// Map status to id via the table
-	s.query(c, `INSERT INTO operation_task_status (task_uuid, status_id, updated_at) 
+	s.query(c, `INSERT INTO operation_task_status (task_uuid, status_id, updated_at)
 		SELECT ?, id, ? FROM operation_task_status_value WHERE status = ?`, taskUUID, s.state.clock.Now(), status)
 	afterCount := s.getRowCount(c, "operation_task_status")
 	c.Assert(afterCount, tc.Equals, beforeCount+1, tc.Commentf("status %q is not valid, is any of %v", status,

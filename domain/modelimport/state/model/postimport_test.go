@@ -82,8 +82,8 @@ func (s *postImportSuite) modelAgentPassword(c *tc.C) (sql.NullString, sql.NullI
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT password_hash, password_hash_algorithm_id
-FROM   model_agent
-WHERE  model_uuid = ?
+FROM model_agent
+WHERE model_uuid = ?
 `, s.ModelUUID()).Scan(&hash, &algorithmID)
 	})
 	c.Assert(err, tc.ErrorIsNil)

@@ -39,11 +39,11 @@ func (s *State) GetMachineInstanceIDs(ctx context.Context) (map[string]string, e
 
 	stmt, err := s.Prepare(`
 SELECT (m.name, mci.instance_id) AS (&machineInstanceID.*)
-FROM   machine_cloud_instance AS mci
-JOIN   machine AS m ON m.uuid = mci.machine_uuid
-WHERE  mci.instance_id != ''
-AND    NOT EXISTS (SELECT 1 FROM machine_parent AS mp WHERE mp.machine_uuid = m.uuid)
-AND    NOT EXISTS (SELECT 1 FROM machine_manual AS mm WHERE mm.machine_uuid = m.uuid)
+FROM machine_cloud_instance AS mci
+JOIN machine AS m ON m.uuid = mci.machine_uuid
+WHERE mci.instance_id != ''
+AND NOT EXISTS (SELECT 1 FROM machine_parent AS mp WHERE mp.machine_uuid = m.uuid)
+AND NOT EXISTS (SELECT 1 FROM machine_manual AS mm WHERE mm.machine_uuid = m.uuid)
 `, machineInstanceID{})
 	if err != nil {
 		return nil, errors.Errorf("preparing machine instance IDs statement: %w", err)
@@ -112,7 +112,7 @@ WITH used_backend AS (
     SELECT backend_uuid FROM secret_deleted_value_ref
 )
 SELECT ub.backend_uuid AS &secretBackendUUID.backend_uuid
-FROM   used_backend AS ub
+FROM used_backend AS ub
 `, secretBackendUUID{})
 	if err != nil {
 		return nil, errors.Errorf("preparing secret backends in use statement: %w", err)
@@ -150,7 +150,7 @@ func (s *State) GetExternalSecretRevisionBackends(ctx context.Context) (map[stri
 
 	stmt, err := s.Prepare(`
 SELECT (revision_uuid, backend_uuid) AS (&revisionBackend.*)
-FROM   secret_value_ref
+FROM secret_value_ref
 `, revisionBackend{})
 	if err != nil {
 		return nil, errors.Errorf("preparing external secret revision backends statement: %w", err)
@@ -192,8 +192,8 @@ WITH running_arch AS (
     SELECT architecture_id FROM unit_agent_version
 )
 SELECT a.name AS &architectureName.name
-FROM   running_arch AS ra
-JOIN   architecture AS a ON a.id = ra.architecture_id
+FROM running_arch AS ra
+JOIN architecture AS a ON a.id = ra.architecture_id
 `, architectureName{})
 	if err != nil {
 		return nil, errors.Errorf("preparing running agent architectures statement: %w", err)
@@ -236,17 +236,17 @@ func (s *State) GetRelationValidationData(ctx context.Context) ([]modelmigration
 	stmt, err := s.Prepare(`
 WITH cmr_relations AS (
     SELECT DISTINCT re.relation_uuid
-    FROM   relation_endpoint AS re
-    JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-    JOIN   application AS a ON ae.application_uuid = a.uuid
-    JOIN   charm AS c ON a.charm_uuid = c.uuid
-    JOIN   charm_source AS cs ON c.source_id = cs.id
-    WHERE  cs.name = 'cmr'
+    FROM relation_endpoint AS re
+    JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+    JOIN application AS a ON ae.application_uuid = a.uuid
+    JOIN charm AS c ON a.charm_uuid = c.uuid
+    JOIN charm_source AS cs ON c.source_id = cs.id
+    WHERE cs.name = 'cmr'
 )
 SELECT (r.uuid, r.relation_id) AS (&relationValidationRow.*)
-FROM   relation AS r
-WHERE  r.life_id = 0
-AND    r.uuid NOT IN (SELECT relation_uuid FROM cmr_relations)
+FROM relation AS r
+WHERE r.life_id = 0
+AND r.uuid NOT IN (SELECT relation_uuid FROM cmr_relations)
 `, relationValidationRow{})
 	if err != nil {
 		return nil, errors.Errorf("preparing relation validation data statement: %w", err)
@@ -314,14 +314,14 @@ SELECT re.relation_uuid AS &relationEndpointRow.relation_uuid,
        cr.name AS &relationEndpointRow.endpoint_name,
        crs.name AS &relationEndpointRow.scope,
        COALESCE(cm.subordinate, FALSE) AS &relationEndpointRow.subordinate
-FROM   relation_endpoint AS re
-JOIN   relation AS r ON re.relation_uuid = r.uuid
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-JOIN   charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
-JOIN   charm_relation_scope AS crs ON cr.scope_id = crs.id
-JOIN   application AS a ON ae.application_uuid = a.uuid
+FROM relation_endpoint AS re
+JOIN relation AS r ON re.relation_uuid = r.uuid
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
+JOIN charm_relation_scope AS crs ON cr.scope_id = crs.id
+JOIN application AS a ON ae.application_uuid = a.uuid
 LEFT JOIN charm_metadata AS cm ON cm.charm_uuid = a.charm_uuid
-WHERE  r.life_id = 0
+WHERE r.life_id = 0
 ORDER BY a.name
 `, relationEndpointRow{})
 	if err != nil {
@@ -364,10 +364,10 @@ func (s *State) GetSubordinateUnitPrincipals(ctx context.Context) (map[string]st
 	stmt, err := s.Prepare(`
 SELECT u.name AS &subordinateUnitPrincipalRow.unit_name,
        pa.name AS &subordinateUnitPrincipalRow.application_name
-FROM   unit_principal AS up
-JOIN   unit AS u ON u.uuid = up.unit_uuid
-JOIN   unit AS pu ON pu.uuid = up.principal_uuid
-JOIN   application AS pa ON pa.uuid = pu.application_uuid
+FROM unit_principal AS up
+JOIN unit AS u ON u.uuid = up.unit_uuid
+JOIN unit AS pu ON pu.uuid = up.principal_uuid
+JOIN application AS pa ON pa.uuid = pu.application_uuid
 `, subordinateUnitPrincipalRow{})
 	if err != nil {
 		return nil, errors.Errorf("preparing subordinate unit principals statement: %w", err)
@@ -406,10 +406,10 @@ func (s *State) GetApplicationUnitNames(ctx context.Context) (map[string][]strin
 	stmt, err := s.Prepare(`
 SELECT a.name AS &applicationUnitRow.application_name,
        u.name AS &applicationUnitRow.unit_name
-FROM   application AS a
-JOIN   unit AS u ON u.application_uuid = a.uuid
-WHERE  a.life_id = 0
-AND    u.life_id = 0
+FROM application AS a
+JOIN unit AS u ON u.application_uuid = a.uuid
+WHERE a.life_id = 0
+AND u.life_id = 0
 `, applicationUnitRow{})
 	if err != nil {
 		return nil, errors.Errorf("preparing application unit names statement: %w", err)
@@ -449,13 +449,13 @@ func (s *State) GetRelationUnitsByApplication(ctx context.Context) (map[string]m
 SELECT re.relation_uuid AS &relationUnitScopeRow.relation_uuid,
        u.name AS &relationUnitScopeRow.unit_name,
        a.name AS &relationUnitScopeRow.application_name
-FROM   relation_unit AS ru
-JOIN   relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
-JOIN   relation AS r ON re.relation_uuid = r.uuid
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-JOIN   application AS a ON ae.application_uuid = a.uuid
-JOIN   unit AS u ON ru.unit_uuid = u.uuid
-WHERE  r.life_id = 0
+FROM relation_unit AS ru
+JOIN relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
+JOIN relation AS r ON re.relation_uuid = r.uuid
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+JOIN application AS a ON ae.application_uuid = a.uuid
+JOIN unit AS u ON ru.unit_uuid = u.uuid
+WHERE r.life_id = 0
 `, relationUnitScopeRow{})
 	if err != nil {
 		return nil, errors.Errorf("preparing relation units by application statement: %w", err)
@@ -499,9 +499,9 @@ func (s *State) GetAgentBinaryArchitecturesForVersion(ctx context.Context, versi
 	arg := versionArg{Version: version}
 	stmt, err := s.Prepare(`
 SELECT a.name AS &architectureName.name
-FROM   agent_binary_store AS abs
-JOIN   architecture AS a ON a.id = abs.architecture_id
-WHERE  abs.version = $versionArg.version
+FROM agent_binary_store AS abs
+JOIN architecture AS a ON a.id = abs.architecture_id
+WHERE abs.version = $versionArg.version
 `, architectureName{}, arg)
 	if err != nil {
 		return nil, errors.Errorf("preparing model agent binary architectures statement: %w", err)
@@ -543,7 +543,7 @@ SELECT m.controller_uuid AS &modelCloudInfo.controller_uuid,
        m.cloud AS &modelCloudInfo.cloud,
        m.cloud_type AS &modelCloudInfo.cloud_type,
        COALESCE(m.cloud_region, '') AS &modelCloudInfo.cloud_region
-FROM   model AS m
+FROM model AS m
 `, modelCloudInfo{})
 	if err != nil {
 		return modelmigration.CredentialValidationInfo{}, errors.Errorf("preparing model cloud info statement: %w", err)
@@ -600,8 +600,8 @@ func (s *State) GetMachineInstanceID(ctx context.Context, machineUUID string) (s
 	arg := machineUUIDArg{UUID: machineUUID}
 	stmt, err := s.Prepare(`
 SELECT mci.instance_id AS &instanceID.instance_id
-FROM   machine_cloud_instance AS mci
-WHERE  mci.machine_uuid = $machineUUIDArg.uuid
+FROM machine_cloud_instance AS mci
+WHERE mci.machine_uuid = $machineUUIDArg.uuid
 `, instanceID{}, arg)
 	if err != nil {
 		return "", errors.Errorf("preparing machine instance ID statement: %w", err)

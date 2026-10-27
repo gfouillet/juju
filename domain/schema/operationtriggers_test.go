@@ -152,8 +152,8 @@ VALUES (?, ?, ?, DATETIME('now'))
 		`
 INSERT INTO operation_task_status (task_uuid, status_id, message, updated_at)
 SELECT ?, otsv.id, ?, DATETIME('now')
-FROM   operation_task_status_value AS otsv
-WHERE  otsv.status = ?
+FROM operation_task_status_value AS otsv
+WHERE otsv.status = ?
 `,
 		taskUUID, msg, status)
 	c.Assert(err, tc.ErrorIsNil)
@@ -166,10 +166,10 @@ func (s *operationSuite) updateOperationTaskStatus(c *tc.C, taskUUID, msg string
 		c.Context(),
 		`
 UPDATE operation_task_status
-SET    status_id = (SELECT id FROM operation_task_status_value WHERE status = ?),
+SET status_id = (SELECT id FROM operation_task_status_value WHERE status = ?),
        message = ?,
        updated_at = DATETIME('now')
-WHERE  task_uuid = ?
+WHERE task_uuid = ?
 `,
 		status, msg, taskUUID)
 	c.Assert(err, tc.ErrorIsNil)
@@ -194,9 +194,9 @@ func (s *operationSuite) assertChangeEventCountNoType(
 
 	row := s.DB().QueryRow(`
 SELECT COUNT(*)
-FROM   change_log
-WHERE  namespace_id = ?
-AND    changed = ?`, nsID, changed)
+FROM change_log
+WHERE namespace_id = ?
+AND changed = ?`, nsID, changed)
 	var count int
 	err := row.Scan(&count)
 	c.Assert(err, tc.ErrorIsNil)

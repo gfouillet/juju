@@ -418,10 +418,10 @@ func (s *subordinateStorageIntegrationSuite) checkRowCount(c *tc.C, table, colum
 func (s *subordinateStorageIntegrationSuite) checkStorageInstanceCount(c *tc.C, unitUUID, storageName string, expected int) {
 	row := s.DB().QueryRow(`
 SELECT count(*)
-FROM   storage_instance AS si
-JOIN   storage_unit_owner AS suo ON suo.storage_instance_uuid = si.uuid
-WHERE  suo.unit_uuid = ?
-AND    si.storage_name = ?
+FROM storage_instance AS si
+JOIN storage_unit_owner AS suo ON suo.storage_instance_uuid = si.uuid
+WHERE suo.unit_uuid = ?
+AND si.storage_name = ?
 `, unitUUID, storageName)
 	var count int
 	err := row.Scan(&count)

@@ -35,13 +35,13 @@ func (st *State) InitialWatchStatementForRemoteConsumedSecretsChangesFromOfferin
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		q := `
 SELECT DISTINCT sr.uuid AS &revisionUUID.uuid
-FROM      secret_remote_unit_consumer sruc
+FROM secret_remote_unit_consumer sruc
 LEFT JOIN secret_revision sr ON sr.secret_id = sruc.secret_id
-JOIN      application app ON app.name = substr(sruc.unit_name, 1, instr(sruc.unit_name, '/')-1)
-JOIN      application_remote_consumer arc ON arc.offer_connection_uuid = app.uuid
-WHERE     arc.offerer_application_uuid = $applicationUUID.uuid
-GROUP BY  sruc.secret_id
-HAVING    sruc.current_revision < MAX(sr.revision)`
+JOIN application app ON app.name = substr(sruc.unit_name, 1, instr(sruc.unit_name, '/') - 1)
+JOIN application_remote_consumer arc ON arc.offer_connection_uuid = app.uuid
+WHERE arc.offerer_application_uuid = $applicationUUID.uuid
+GROUP BY sruc.secret_id
+HAVING sruc.current_revision < MAX(sr.revision)`
 		app := applicationUUID{UUID: appUUID}
 		stmt, err := st.Prepare(q, app, revisionUUID{})
 		if err != nil {
@@ -131,8 +131,8 @@ func (st *State) checkExists(ctx context.Context, tx *sqlair.TX, uri *coresecret
 	modelUUID := modelUUID{UUID: st.modelUUID}
 	queryStmt, err := st.Prepare(`
 SELECT secret_id AS &secretRef.secret_id FROM secret_metadata sm
-WHERE  sm.secret_id = $secretRef.secret_id
-AND    ($secretRef.source_uuid = '' OR $secretRef.source_uuid = $modelUUID.uuid)
+WHERE sm.secret_id = $secretRef.secret_id
+AND ($secretRef.source_uuid = '' OR $secretRef.source_uuid = $modelUUID.uuid)
 `, ref, modelUUID)
 	if err != nil {
 		return errors.Capture(err)
@@ -168,9 +168,9 @@ func (st *State) GetSecretRemoteConsumer(
 
 	query := `
 SELECT suc.current_revision AS &secretRemoteUnitConsumer.current_revision
-FROM   secret_remote_unit_consumer suc
-WHERE  suc.secret_id = $secretRemoteUnitConsumer.secret_id
-AND    suc.unit_name = $secretRemoteUnitConsumer.unit_name`
+FROM secret_remote_unit_consumer suc
+WHERE suc.secret_id = $secretRemoteUnitConsumer.secret_id
+AND suc.unit_name = $secretRemoteUnitConsumer.unit_name`
 
 	queryStmt, err := st.Prepare(query, secretRemoteUnitConsumer{})
 	if err != nil {
@@ -179,8 +179,8 @@ AND    suc.unit_name = $secretRemoteUnitConsumer.unit_name`
 
 	selectLatestRevision := `
 SELECT MAX(revision) AS &secretLatestRevision.latest_revision
-FROM   secret_revision rev
-WHERE  rev.secret_id = $secretLatestRevision.secret_id`
+FROM secret_revision rev
+WHERE rev.secret_id = $secretLatestRevision.secret_id`
 	selectLatestRevisionStmt, err := st.Prepare(selectLatestRevision, secretLatestRevision{})
 	if err != nil {
 		return nil, 0, errors.Capture(err)
@@ -234,8 +234,8 @@ func (st *State) SaveSecretRemoteConsumer(ctx context.Context, uri *coresecrets.
 	insertQuery := `
 INSERT INTO secret_remote_unit_consumer (*)
 VALUES ($secretRemoteUnitConsumer.*)
-ON CONFLICT(secret_id, unit_name) DO UPDATE SET
-    current_revision=excluded.current_revision`
+ON CONFLICT (secret_id, unit_name) DO UPDATE SET
+    current_revision = excluded.current_revision`
 
 	insertStmt, err := st.Prepare(insertQuery, secretRemoteUnitConsumer{})
 	if err != nil {
@@ -271,19 +271,19 @@ ON CONFLICT(secret_id, unit_name) DO UPDATE SET
 func (st *State) markObsoleteRevisions(ctx context.Context, tx *sqlair.TX, uri *coresecrets.URI) error {
 	query, err := st.Prepare(`
 SELECT sr.uuid AS &revisionUUID.uuid
-FROM   secret_revision sr
+FROM secret_revision sr
        LEFT JOIN (
            -- revisions that have local consumers.
            SELECT DISTINCT current_revision AS revision FROM secret_unit_consumer suc
-           WHERE  suc.secret_id = $secretRef.secret_id
+           WHERE suc.secret_id = $secretRef.secret_id
            UNION
            -- revisions that have remote consumers.
            SELECT DISTINCT current_revision AS revision FROM secret_remote_unit_consumer suc
-           WHERE  suc.secret_id = $secretRef.secret_id
+           WHERE suc.secret_id = $secretRef.secret_id
            UNION
            -- the latest revision.
            SELECT MAX(revision) FROM secret_revision rev
-           WHERE  rev.secret_id = $secretRef.secret_id
+           WHERE rev.secret_id = $secretRef.secret_id
        ) in_use ON sr.revision = in_use.revision
 WHERE sr.secret_id = $secretRef.secret_id
 AND (in_use.revision IS NULL OR in_use.revision = 0);
@@ -295,9 +295,9 @@ AND (in_use.revision IS NULL OR in_use.revision = 0);
 	stmt, err := st.Prepare(`
 INSERT INTO secret_revision_obsolete (*)
 VALUES ($secretRevisionObsolete.*)
-ON CONFLICT(revision_uuid) DO UPDATE SET
-    obsolete=excluded.obsolete,
-    pending_delete=excluded.pending_delete`, secretRevisionObsolete{})
+ON CONFLICT (revision_uuid) DO UPDATE SET
+    obsolete = excluded.obsolete,
+    pending_delete = excluded.pending_delete`, secretRevisionObsolete{})
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -340,7 +340,7 @@ func (st *State) UpdateRemoteSecretRevision(
 	insertQuery := `
 INSERT INTO secret (id)
 VALUES ($secretRef.secret_id)
-ON CONFLICT(id) DO NOTHING`
+ON CONFLICT (id) DO NOTHING`
 
 	insertStmt, err := st.Prepare(insertQuery, secretRef{})
 	if err != nil {
@@ -358,11 +358,11 @@ ON CONFLICT(id) DO NOTHING`
 	insertLatestQuery := `
 INSERT INTO secret_reference (*)
 VALUES ($secretLatestRevision.*)
-ON CONFLICT(secret_id) DO UPDATE SET
-    latest_revision=excluded.latest_revision,
-    owner_application_uuid=excluded.owner_application_uuid,
-    updated_at=excluded.updated_at,
-    migrated=false`
+ON CONFLICT (secret_id) DO UPDATE SET
+    latest_revision = excluded.latest_revision,
+    owner_application_uuid = excluded.owner_application_uuid,
+    updated_at = excluded.updated_at,
+    migrated = false`
 
 	insertLatestStmt, err := st.Prepare(insertLatestQuery, secretLatestRevision{})
 	if err != nil {
@@ -429,11 +429,11 @@ ON CONFLICT DO NOTHING`
 
 	offerAppUUIDQuery, err := st.Prepare(`
 SELECT ae.application_uuid AS &secretLatestRevision.owner_application_uuid
-FROM   relation_endpoint re
-JOIN   application_endpoint ae ON ae.uuid = re.endpoint_uuid
-JOIN   application_remote_offerer aro ON aro.application_uuid = ae.application_uuid 
-WHERE  re.relation_uuid = $remoteRelationUUID.uuid
-AND    ae.application_uuid <> $applicationUUID.uuid
+FROM relation_endpoint re
+JOIN application_endpoint ae ON ae.uuid = re.endpoint_uuid
+JOIN application_remote_offerer aro ON aro.application_uuid = ae.application_uuid
+WHERE re.relation_uuid = $remoteRelationUUID.uuid
+AND ae.application_uuid <> $applicationUUID.uuid
 `, rUUID, aUUID, remoteRef)
 	if err != nil {
 		return errors.Capture(err)
@@ -452,9 +452,9 @@ AND    ae.application_uuid <> $applicationUUID.uuid
 INSERT INTO secret_reference (*)
 VALUES ($secretLatestRevision.*)
 ON CONFLICT (secret_id) DO UPDATE SET
-    owner_application_uuid=excluded.owner_application_uuid,
-    updated_at=excluded.updated_at,
-    migrated=false
+    owner_application_uuid = excluded.owner_application_uuid,
+    updated_at = excluded.updated_at,
+    migrated = false
 WHERE secret_reference.migrated IS TRUE`
 
 	insertRemoteSecretReferenceStmt, err := st.Prepare(insertRemoteSecretReferenceQuery, remoteRef)
@@ -494,8 +494,8 @@ func (st *State) saveSecretConsumer(ctx context.Context, tx *sqlair.TX, uri *cor
 
 	selectUnitUUIDStmt, err := st.Prepare(`
 SELECT uuid AS &unit.uuid
-FROM   unit
-WHERE  uuid=$unit.uuid`, u)
+FROM unit
+WHERE uuid = $unit.uuid`, u)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -509,9 +509,9 @@ WHERE  uuid=$unit.uuid`, u)
 	insertQuery := `
 INSERT INTO secret_unit_consumer (*)
 VALUES ($secretUnitConsumer.*)
-ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET
-    label=excluded.label,
-    current_revision=excluded.current_revision`
+ON CONFLICT (secret_id, unit_uuid) DO UPDATE SET
+    label = excluded.label,
+    current_revision = excluded.current_revision`
 
 	insertStmt, err := st.Prepare(insertQuery, secretUnitConsumer{})
 	if err != nil {
@@ -549,8 +549,8 @@ func (st *State) GetUnitUUID(ctx context.Context, unitName string) (string, erro
 
 	selectUnitUUIDStmt, err := st.Prepare(`
 SELECT &unit.uuid
-FROM   unit
-WHERE  name=$unit.name`, u)
+FROM unit
+WHERE name = $unit.name`, u)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -581,10 +581,10 @@ func (st *State) GetSecretValue(
 	// We look for either content or a value reference, which ever is present.
 	contentQuery := `
 SELECT (*) AS (&secretContent.*)
-FROM   secret_content sc
-JOIN   secret_revision rev ON sc.revision_uuid = rev.uuid
-WHERE  rev.secret_id = $secretRevision.secret_id
-AND    rev.revision = $secretRevision.revision`
+FROM secret_content sc
+JOIN secret_revision rev ON sc.revision_uuid = rev.uuid
+WHERE rev.secret_id = $secretRevision.secret_id
+AND rev.revision = $secretRevision.revision`
 
 	contentQueryStmt, err := st.Prepare(contentQuery, secretContent{}, secretRevision{})
 	if err != nil {
@@ -593,10 +593,10 @@ AND    rev.revision = $secretRevision.revision`
 
 	valueRefQuery := `
 SELECT (*) AS (&secretValueRef.*)
-FROM   secret_value_ref val
-JOIN   secret_revision rev ON val.revision_uuid = rev.uuid
-WHERE  rev.secret_id = $secretRevision.secret_id
-AND    rev.revision = $secretRevision.revision`
+FROM secret_value_ref val
+JOIN secret_revision rev ON val.revision_uuid = rev.uuid
+WHERE rev.secret_id = $secretRevision.secret_id
+AND rev.revision = $secretRevision.revision`
 
 	valueRefQueryStmt, err := st.Prepare(valueRefQuery, secretValueRef{}, secretRevision{})
 	if err != nil {
@@ -666,11 +666,11 @@ func (st *State) GetSecretAccess(
 
 	query := `
 SELECT sr.role AS &secretRole.role
-FROM   v_secret_permission sp
+FROM v_secret_permission sp
        JOIN secret_role sr ON sr.id = sp.role_id
-WHERE  secret_id = $secretAccessor.secret_id
-AND    subject_type_id = $secretAccessor.subject_type_id
-AND    subject_id = $secretAccessor.subject_id`
+WHERE secret_id = $secretAccessor.secret_id
+AND subject_type_id = $secretAccessor.subject_type_id
+AND subject_id = $secretAccessor.subject_id`
 
 	access := secretAccessor{
 		SecretID:      uri.ID,
@@ -730,14 +730,14 @@ func (st *State) GetRemoteConsumerSecretGrants(
 SELECT a.name AS &remoteConsumerSecretGrant.application_name,
        sp.scope_uuid AS &remoteConsumerSecretGrant.relation_uuid,
        oc.offer_uuid AS &remoteConsumerSecretGrant.offer_uuid
-FROM   secret_permission sp
+FROM secret_permission sp
        JOIN application a ON a.uuid = sp.subject_uuid
        JOIN offer_connection oc ON oc.uuid = sp.subject_uuid
        JOIN application_remote_consumer arc ON arc.offer_connection_uuid = sp.subject_uuid
-WHERE  sp.secret_id = $secretRef.secret_id
-AND    arc.consumer_application_uuid = $uuid.uuid
-AND    sp.subject_type_id = $secretGrantTypes.subject_type_id
-AND    sp.scope_type_id = $secretGrantTypes.scope_type_id
+WHERE sp.secret_id = $secretRef.secret_id
+AND arc.consumer_application_uuid = $uuid.uuid
+AND sp.subject_type_id = $secretGrantTypes.subject_type_id
+AND sp.scope_type_id = $secretGrantTypes.scope_type_id
 ORDER BY a.name`
 
 	ref := secretRef{ID: uri.ID}

@@ -103,7 +103,7 @@ VALUES (?, ?, 1, ?, ?, ?, ?, 1024)
 		`
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id, size_mib)
 VALUES (?, ?, ?, 0, 1024)
-	`,
+`,
 		filesystemUUID.String(),
 		filesystemUUID.String(),
 		life,
@@ -116,7 +116,7 @@ VALUES (?, ?, ?, 0, 1024)
 INSERT INTO storage_instance_filesystem (storage_instance_uuid,
                                          storage_filesystem_uuid)
 VALUES (?, ?)
-	`,
+`,
 		storageInstanceUUID.String(),
 		filesystemUUID.String(),
 	)
@@ -215,7 +215,7 @@ func (u *unitStorageSuite) TestGetUnitOwnedStorageInstances(c *tc.C) {
 func (u *unitStorageSuite) getUnitCharmUUID(c *tc.C, unitUUID coreunit.UUID) corecharm.ID {
 	var gotUUID string
 	err := u.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT charm_uuid FROM unit WHERE uuid=?", unitUUID).Scan(&gotUUID)
+		err := tx.QueryRowContext(ctx, "SELECT charm_uuid FROM unit WHERE uuid = ?", unitUUID).Scan(&gotUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

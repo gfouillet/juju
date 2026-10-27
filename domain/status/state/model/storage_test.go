@@ -63,7 +63,7 @@ func (s *storageSuite) assertFilesystemStatus(
 	err := s.TxnRunner().StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `
 SELECT status_id, message, updated_at FROM storage_filesystem_status
-WHERE filesystem_uuid=?`, filesystemUUID).Scan(
+WHERE filesystem_uuid = ?`, filesystemUUID).Scan(
 			&got.Status, &got.Message, &got.Since,
 		)
 		if err != nil {
@@ -85,7 +85,7 @@ func (s *storageSuite) assertVolumeStatus(
 	err := s.TxnRunner().StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `
 SELECT status_id, message, updated_at FROM storage_volume_status
-WHERE volume_uuid=?`, volumeUUID).Scan(
+WHERE volume_uuid = ?`, volumeUUID).Scan(
 			&got.Status, &got.Message, &got.Since,
 		)
 		if err != nil {
@@ -429,7 +429,7 @@ func (s *storageStatusSuite) TestGetStorageInstancesPersistent(c *tc.C) {
 
 	_, err := s.DB().ExecContext(
 		c.Context(),
-		`UPDATE storage_volume SET persistent=true WHERE uuid=?`,
+		`UPDATE storage_volume SET persistent = true WHERE uuid = ?`,
 		volUUID.String(),
 	)
 	c.Assert(err, tc.ErrorIsNil)
@@ -503,7 +503,7 @@ func (s *storageStatusSuite) TestGetAllStorageInstancesPersistent(c *tc.C) {
 
 	_, err := s.DB().ExecContext(
 		c.Context(),
-		`UPDATE storage_volume SET persistent=true WHERE uuid=?`,
+		`UPDATE storage_volume SET persistent = true WHERE uuid = ?`,
 		volUUID.String(),
 	)
 	c.Assert(err, tc.ErrorIsNil)
@@ -921,7 +921,7 @@ func (s *storageStatusSuite) newStorageVolumeAttachmentPlan(
 ) string {
 	vapUUID := uuid.MustNewUUID().String()
 	_, err := s.DB().Exec(
-		`INSERT INTO storage_volume_attachment_plan(uuid, storage_volume_uuid, net_node_uuid, life_id, device_type_id, provision_scope_id) VALUES(?, ?, ?, 0, ?, 1)`,
+		`INSERT INTO storage_volume_attachment_plan (uuid, storage_volume_uuid, net_node_uuid, life_id, device_type_id, provision_scope_id) VALUES (?, ?, ?, 0, ?, 1)`,
 		vapUUID, volumeUUID, netNodeUUID, deviceTypeID)
 	c.Assert(err, tc.ErrorIsNil)
 	for key, value := range attrs {

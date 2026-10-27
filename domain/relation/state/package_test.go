@@ -82,7 +82,7 @@ func (s *baseRelationSuite) query(c *tc.C, query string, args ...any) {
 func (s *baseRelationSuite) addApplication(c *tc.C, charmUUID corecharm.ID, appName string) coreapplication.UUID {
 	appUUID := tc.Must(c, coreapplication.NewUUID)
 	s.query(c, `
-INSERT INTO application (uuid, name, life_id, charm_uuid, space_uuid) 
+INSERT INTO application (uuid, name, life_id, charm_uuid, space_uuid)
 VALUES (?, ?, ?, ?, ?)
 `, appUUID, appName, 0 /* alive */, charmUUID.String(), network.AlphaSpaceId)
 	return appUUID
@@ -96,7 +96,7 @@ func (s *baseRelationSuite) addApplicationEndpoint(c *tc.C, applicationUUID core
 	// corerelationtesting
 	applicationEndpointUUID := uuid.MustNewUUID().String()
 	s.query(c, `
-INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid,space_uuid)
+INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid, space_uuid)
 VALUES (?, ?, ?, ?)
 `, applicationEndpointUUID, applicationUUID, charmRelationUUID, network.AlphaSpaceId)
 	return applicationEndpointUUID
@@ -108,7 +108,7 @@ func (s *baseRelationSuite) addCharm(c *tc.C) corecharm.ID {
 	// The UUID is also used as the reference_name as there is a unique
 	// constraint on the reference_name, revision and source_id.
 	s.query(c, `
-INSERT INTO charm (uuid, reference_name, architecture_id) 
+INSERT INTO charm (uuid, reference_name, architecture_id)
 VALUES (?, ?, 0)
 `, charmUUID, charmUUID)
 	return charmUUID
@@ -116,7 +116,7 @@ VALUES (?, ?, 0)
 
 func (s *baseRelationSuite) addCharmMetadata(c *tc.C, charmUUID corecharm.ID, subordinate bool) {
 	s.query(c, `
-INSERT INTO charm_metadata (charm_uuid, name, subordinate) 
+INSERT INTO charm_metadata (charm_uuid, name, subordinate)
 VALUES (?, ?, ?)
 `, charmUUID, charmUUID, subordinate)
 }
@@ -127,7 +127,7 @@ func (s *baseRelationSuite) addCharmRelation(c *tc.C, charmUUID corecharm.ID, r 
 	// TODO(gfouillet): introduce proper UUID for this one, from corecharm and corecharmtesting
 	charmRelationUUID := uuid.MustNewUUID().String()
 	s.query(c, `
-INSERT INTO charm_relation (uuid, charm_uuid, name, role_id, interface, optional, capacity, scope_id) 
+INSERT INTO charm_relation (uuid, charm_uuid, name, role_id, interface, optional, capacity, scope_id)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `, charmRelationUUID, charmUUID, r.Name, s.encodeRoleID(r.Role), r.Interface, r.Optional, r.Limit, s.encodeScopeID(r.Scope))
 	return charmRelationUUID
@@ -139,7 +139,7 @@ func (s *baseRelationSuite) addCharmRelationWithDefaults(c *tc.C, charmUUID core
 	// TODO(gfouillet): introduce proper UUID for this one, from corecharm and corecharmtesting
 	charmRelationUUID := uuid.MustNewUUID().String()
 	s.query(c, `
-INSERT INTO charm_relation (uuid, charm_uuid, scope_id, role_id, name) 
+INSERT INTO charm_relation (uuid, charm_uuid, scope_id, role_id, name)
 VALUES (?, ?, 0, 0, 'fake-provides')
 `, charmRelationUUID, charmUUID)
 	return charmRelationUUID
@@ -150,8 +150,8 @@ func (s *baseRelationSuite) doesUUIDExist(c *tc.C, table, uuid string) bool {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRow(fmt.Sprintf(`
 SELECT uuid
-FROM   %s
-WHERE  uuid = ?
+FROM %s
+WHERE uuid = ?
 `, table), uuid).Scan(&uuid)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -215,8 +215,8 @@ WHERE uuid = ?`, table), dying, uuid)
 func (s *baseRelationSuite) addRelation(c *tc.C) corerelation.UUID {
 	relationUUID := corerelationtesting.GenRelationUUID(c)
 	s.query(c, `
-INSERT INTO relation (uuid, life_id, relation_id, scope_id) 
-VALUES (?,0,?,0)
+INSERT INTO relation (uuid, life_id, relation_id, scope_id)
+VALUES (?, 0, ?, 0)
 `, relationUUID, s.relationCount)
 	s.relationCount++
 	return relationUUID
@@ -230,7 +230,7 @@ func (s *baseRelationSuite) addRelationEndpoint(c *tc.C, relationUUID corerelati
 	relationEndpointUUID := uuid.MustNewUUID().String()
 	s.query(c, `
 INSERT INTO relation_endpoint (uuid, relation_uuid, endpoint_uuid)
-VALUES (?,?,?)
+VALUES (?, ?, ?)
 `, relationEndpointUUID, relationUUID, applicationEndpointUUID)
 	return relationEndpointUUID
 }
@@ -241,7 +241,7 @@ func (s *baseRelationSuite) addRelationUnit(c *tc.C, unitUUID coreunit.UUID, rel
 	relationUnitUUID := corerelationtesting.GenRelationUnitUUID(c)
 	s.query(c, `
 INSERT INTO relation_unit (uuid, relation_endpoint_uuid, unit_uuid)
-VALUES (?,?,?)
+VALUES (?, ?, ?)
 `, relationUnitUUID, relationEndpointUUID, unitUUID)
 	return relationUnitUUID
 }
@@ -251,8 +251,8 @@ VALUES (?,?,?)
 func (s *baseRelationSuite) addRelationWithID(c *tc.C, relationID int) corerelation.UUID {
 	relationUUID := corerelationtesting.GenRelationUUID(c)
 	s.query(c, `
-INSERT INTO relation (uuid, life_id, relation_id, scope_id) 
-VALUES (?,0,?,0)
+INSERT INTO relation (uuid, life_id, relation_id, scope_id)
+VALUES (?, 0, ?, 0)
 `, relationUUID, relationID)
 	// avoid clashes when unit both addRelationHelper in the same method (even it should be avoided)
 	if s.relationCount < relationID {
@@ -287,8 +287,8 @@ func (s *baseRelationSuite) addRelationWithScope(c *tc.C, scope charm.RelationSc
 	relationUUID := corerelationtesting.GenRelationUUID(c)
 	scopeID := s.encodeScopeID(scope)
 	s.query(c, `
-INSERT INTO relation (uuid, life_id, relation_id, scope_id) 
-VALUES (?,0,?,?)
+INSERT INTO relation (uuid, life_id, relation_id, scope_id)
+VALUES (?, 0, ?, ?)
 `, relationUUID, s.relationCount, scopeID)
 	s.relationCount++
 	return relationUUID
@@ -299,7 +299,7 @@ func (s *baseRelationSuite) setRelationStatus(c *tc.C, relationUUID corerelation
 	encodedStatus := s.encodeStatusID(status)
 	s.query(c, `
 INSERT INTO relation_status (relation_uuid, relation_status_type_id, updated_at)
-VALUES (?,?,?)
+VALUES (?, ?, ?)
 ON CONFLICT (relation_uuid) DO UPDATE SET relation_status_type_id = ?, updated_at = ?
 `, relationUUID, encodedStatus, since, encodedStatus, since)
 }

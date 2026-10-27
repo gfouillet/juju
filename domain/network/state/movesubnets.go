@@ -112,16 +112,16 @@ app_bindings AS (
 ),
 machine_bindings AS (
     SELECT m.uuid AS machine_uuid, space_uuid
-    FROM   machine AS m
+    FROM machine AS m
         JOIN unit AS u ON m.net_node_uuid = u.net_node_uuid
         JOIN app_bindings AS b ON u.application_uuid = b.application_uuid
 ),
 machine_constraints AS (
     SELECT m.machine_uuid, s.uuid AS space_uuid
-    FROM   machine_constraint AS m
+    FROM machine_constraint AS m
         JOIN constraint_space AS cs ON m.constraint_uuid = cs.constraint_uuid
         JOIN space AS s ON cs.space = s.name
-    WHERE  cs.exclude IS FALSE
+    WHERE cs.exclude IS FALSE
 ),
 machine_space_reqs AS (
     SELECT machine_uuid, space_uuid FROM machine_bindings
@@ -130,17 +130,17 @@ machine_space_reqs AS (
 ),
 new_machine_spaces AS (
     SELECT DISTINCT m.uuid AS machine_uuid, s.space_uuid
-    FROM   machine AS m
+    FROM machine AS m
         JOIN ip_address AS ip ON m.net_node_uuid = ip.net_node_uuid
         JOIN subnet AS s ON ip.subnet_uuid = s.uuid
-    WHERE  s.uuid NOT IN ($uuids[:])
+    WHERE s.uuid NOT IN ($uuids[:])
 ),
 failed_constraints AS (
     SELECT * from machine_space_reqs
     EXCEPT
     SELECT * from new_machine_spaces
 )
-SELECT 
+SELECT
     m.name AS &positiveSpaceConstraintFailure.machine_name,
     s.name AS &positiveSpaceConstraintFailure.space_name
 FROM failed_constraints AS fc
@@ -175,18 +175,18 @@ func (st *State) validateSubnetsJoiningSpace(
 	destSpace := spaceTo{UUID: spaceUUID}
 
 	query := `
-WITH 
-bound_machines AS (    
+WITH
+bound_machines AS (
     SELECT DISTINCT mc.machine_uuid
     FROM machine_constraint AS mc
         JOIN constraint_space AS cs ON mc.constraint_uuid = cs.constraint_uuid
         JOIN space AS s ON cs.space = s.name
     WHERE s.uuid = $spaceTo.uuid
     AND cs.exclude IS TRUE
-) 
+)
 -- Get all addresses from machines with constraints in any of moved subnet UUID
-SELECT 
-    m.name AS &negativeSpaceConstraintFailure.machine_name, 
+SELECT
+    m.name AS &negativeSpaceConstraintFailure.machine_name,
     a.address_value AS &negativeSpaceConstraintFailure.address_value
 FROM bound_machines
     JOIN machine AS m ON bound_machines.machine_uuid = m.uuid

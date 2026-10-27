@@ -27,9 +27,9 @@ func (s *cloudTypeSuite) TestGetModelCloudType(c *tc.C) {
 
 	// Populate the model table in the model database
 	s.query(c, `
-INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type) 
+INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, 'test-model', 'admin', 'iaas', 'test-cloud', 'ec2')
-		`, tc.Must(c, uuid.NewUUID).String(), "controller-uuid")
+`, tc.Must(c, uuid.NewUUID).String(), "controller-uuid")
 
 	modelCloudType, err := state.GetModelCloudType(c.Context())
 	c.Assert(err, tc.ErrorIsNil)

@@ -77,7 +77,7 @@ func (s *watcherSuite) TestNewNamespaceWatcherSuccess(c *tc.C) {
 			CREATE TABLE some_namespace (
 				uuid TEXT NOT NULL PRIMARY KEY
 			);
-		`)
+`)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -115,7 +115,7 @@ func (s *watcherSuite) TestNewNamespaceMapperWatcherSuccess(c *tc.C) {
 			CREATE TABLE some_namespace (
 				uuid TEXT NOT NULL PRIMARY KEY
 			);
-		`)
+`)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

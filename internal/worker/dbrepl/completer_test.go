@@ -140,7 +140,7 @@ func (s *completerSuite) TestCompleteNilDatabase(c *tc.C) {
 		c.Context(),
 		loggertesting.WrapCheckLog(c),
 	)
-	cands, _ := comp.Do([]rune("SELECT * FROM "), len("SELECT * FROM "))
+	cands, _ := comp.Do([]rune("SELECT * FROM "), len("SELECT * FROM"))
 	c.Check(cands, tc.IsNil)
 }
 

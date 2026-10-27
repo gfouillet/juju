@@ -52,10 +52,10 @@ func (st *State) GetFilesystemUUIDsByMachines(
 	// For that reason we MUST make sure we only return the Filesystem UUID once.
 	selectQ := `
 SELECT DISTINCT sf.uuid AS &entityUUID.uuid
-FROM   storage_filesystem sf
-JOIN   storage_filesystem_attachment sfa ON sf.uuid = sfa.storage_filesystem_uuid
-JOIN   machine m ON sfa.net_node_uuid = m.net_node_uuid
-WHERE  m.uuid IN ($machineUUIDs[:])
+FROM storage_filesystem sf
+JOIN storage_filesystem_attachment sfa ON sf.uuid = sfa.storage_filesystem_uuid
+JOIN machine m ON sfa.net_node_uuid = m.net_node_uuid
+WHERE m.uuid IN ($machineUUIDs[:])
 `
 
 	stmt, err := st.Prepare(selectQ, entityUUID{}, machineUUIDInputs)

@@ -163,7 +163,7 @@ func (s *pollingInfoSuite) addDeviceForMachine(c *tc.C, machineUUID string, devN
 	// Insert a basic ethernet device with NonVirtualPort and defaults.
 	devUUID := uuid.MustNewUUID().String()
 	s.runQuery(c, `
-INSERT INTO link_layer_device (    uuid, net_node_uuid, name, device_type_id, virtual_port_type_id) 
+INSERT INTO link_layer_device (uuid, net_node_uuid, name, device_type_id, virtual_port_type_id)
 VALUES (?, (SELECT net_node_uuid FROM machine WHERE uuid = ?), ?, 2, 0)`, devUUID, machineUUID, devName)
 
 	return devUUID

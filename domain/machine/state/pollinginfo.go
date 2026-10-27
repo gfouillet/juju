@@ -33,16 +33,16 @@ func (st *State) GetPollingInfos(ctx context.Context, machineNames []string) (do
 	type names []string
 
 	stmt, err := st.Prepare(`
-SELECT 
+SELECT
     m.uuid AS &pollingInfo.uuid,
 	m.name AS &pollingInfo.name,
 	mci.instance_id AS &pollingInfo.instance_id,
 	COUNT(lld.uuid) AS &pollingInfo.device_count
-FROM      machine AS m
-JOIN      machine_cloud_instance AS mci ON m.uuid = mci.machine_uuid
+FROM machine AS m
+JOIN machine_cloud_instance AS mci ON m.uuid = mci.machine_uuid
 LEFT JOIN link_layer_device AS lld ON m.net_node_uuid = lld.net_node_uuid
-WHERE     m.name IN ($names[:])
-GROUP BY  m.uuid, m.name, mci.instance_id
+WHERE m.name IN ($names[:])
+GROUP BY m.uuid, m.name, mci.instance_id
 `, names{}, pollingInfo{})
 	if err != nil {
 		return nil, errors.Errorf("preparing query of polling info for machines %s: %w", machineNames, err)

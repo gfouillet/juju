@@ -69,13 +69,13 @@ func (s *State) GetMachineTaskIDsWithStatus(ctx context.Context, machineName str
 
 	stmt, err := s.Prepare(`
 SELECT ot.task_id AS &taskIdent.task_id
-FROM   operation_task AS ot
-JOIN   operation_machine_task AS omt ON ot.uuid = omt.task_uuid
-JOIN   operation_task_status AS ots ON ot.uuid = ots.task_uuid
-JOIN   operation_task_status_value AS status ON ots.status_id = status.id
-JOIN   machine ON omt.machine_uuid = machine.uuid
-WHERE  machine.name = $search.machine
-AND    status.status = $search.status`, term, taskIdent{})
+FROM operation_task AS ot
+JOIN operation_machine_task AS omt ON ot.uuid = omt.task_uuid
+JOIN operation_task_status AS ots ON ot.uuid = ots.task_uuid
+JOIN operation_task_status_value AS status ON ots.status_id = status.id
+JOIN machine ON omt.machine_uuid = machine.uuid
+WHERE machine.name = $search.machine
+AND status.status = $search.status`, term, taskIdent{})
 	if err != nil {
 		return nil, errors.Errorf("preparing statement for fetching tasks with status %q for machine %q: %w", statusFilter, machineName, err)
 	}
@@ -105,10 +105,10 @@ func (st *State) GetTaskStatusByID(ctx context.Context, taskID string) (string, 
 	stmt, err := st.Prepare(
 		`
 SELECT otsv.status AS &taskStatus.*
-FROM   operation_task AS ot
-JOIN   operation_task_status AS ots ON ot.uuid = ots.task_uuid
-JOIN   operation_task_status_value AS otsv ON ots.status_id = otsv.id
-WHERE  ot.task_id = $taskIdent.task_id
+FROM operation_task AS ot
+JOIN operation_task_status AS ots ON ot.uuid = ots.task_uuid
+JOIN operation_task_status_value AS otsv ON ots.status_id = otsv.id
+WHERE ot.task_id = $taskIdent.task_id
 `, taskIdent{}, taskStatus{})
 	if err != nil {
 		return "", errors.Errorf("preparing task status statement: %w", err)
@@ -149,8 +149,8 @@ func (st *State) StartTask(ctx context.Context, taskID string) error {
 	}
 	updateStartedStmt, err := st.Prepare(`
 UPDATE operation_task
-SET    started_at = $taskTime.time
-WHERE  task_id = $taskTime.task_id
+SET started_at = $taskTime.time
+WHERE task_id = $taskTime.task_id
 `, updateStartedAt)
 	if err != nil {
 		return errors.Errorf("preparing status update started at for task ID %q: %w", taskID, err)
@@ -168,14 +168,14 @@ WHERE  task_id = $taskTime.task_id
 
 	updateStatusStmt, err := st.Prepare(`
 UPDATE operation_task_status
-SET    status_id = (
+SET status_id = (
            SELECT id FROM operation_task_status_value WHERE status = $taskStatus.status
-       ), 
+       ),
        updated_at = $taskStatus.updated_at
-WHERE  task_uuid = (
+WHERE task_uuid = (
            SELECT uuid FROM operation_task WHERE task_id = $taskIdent.task_id
        )
-AND    status_id = (
+AND status_id = (
            SELECT id FROM operation_task_status_value WHERE status = $status.status
        )
 `, task, updateStatus, startingStatus)
@@ -274,7 +274,7 @@ func (st *State) updateOperationTaskStatus(
 
 	stmt, err := st.Prepare(`
 UPDATE operation_task_status
-SET    message = $taskStatus.message,
+SET message = $taskStatus.message,
        updated_at = $taskStatus.updated_at,
        status_id = (
            SELECT id FROM operation_task_status_value WHERE status = $taskStatus.status
@@ -348,24 +348,24 @@ WITH
 -- Get the last updated task operation uuid
 task AS (
     SELECT operation_uuid
-    FROM   operation_task
-    WHERE  uuid = $taskUUIDTime.task_uuid
+    FROM operation_task
+    WHERE uuid = $taskUUIDTime.task_uuid
 ),
 -- Check if any of its task is not completed
 not_completed AS (
     SELECT operation_uuid AS uuid
-    FROM   operation_task AS ot
-    JOIN   operation_task_status AS ots ON ot.uuid = ots.task_uuid
-    JOIN   operation_task_status_value AS otsv ON ots.status_id = otsv.id
-    WHERE  ot.operation_uuid = (SELECT operation_uuid FROM task)
-    AND    otsv.status IN ($status[:])
-    LIMIT  1
+    FROM operation_task AS ot
+    JOIN operation_task_status AS ots ON ot.uuid = ots.task_uuid
+    JOIN operation_task_status_value AS otsv ON ots.status_id = otsv.id
+    WHERE ot.operation_uuid = (SELECT operation_uuid FROM task)
+    AND otsv.status IN ($status[:])
+    LIMIT 1
 )
 -- update the task operation only if it is completed
 UPDATE operation
-SET    completed_at = $taskUUIDTime.time
-WHERE  operation.uuid = (SELECT operation_uuid FROM task)
-AND    operation.uuid NOT IN not_completed
+SET completed_at = $taskUUIDTime.time
+WHERE operation.uuid = (SELECT operation_uuid FROM task)
+AND operation.uuid NOT IN not_completed
 `, status{}, taskUUIDTime{})
 	if err != nil {
 		return errors.Errorf("preparing maybe complete operation statement: %w", err)

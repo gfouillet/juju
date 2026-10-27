@@ -37,8 +37,8 @@ func (st *State) GetMachineInstanceID(ctx context.Context, machineUUID string) (
 
 	stmt, err := st.Prepare(`
 SELECT &instanceID.instance_id
-FROM   machine_cloud_instance
-WHERE  machine_uuid = $entityUUID.uuid`, mUUID, instanceID{})
+FROM machine_cloud_instance
+WHERE machine_uuid = $entityUUID.uuid`, mUUID, instanceID{})
 	if err != nil {
 		return "", errors.Errorf("preparing machine instance ID statement: %w", err)
 	}
@@ -77,10 +77,10 @@ func (st *State) GetMachineSpaceConstraints(
 	qry := `
 SELECT (space, exclude) AS (&spaceConstraint.*),
        s.uuid AS &spaceConstraint.uuid
-FROM   constraint_space cs
+FROM constraint_space cs
        JOIN machine_constraint m ON cs.constraint_uuid = m.constraint_uuid
-       JOIN space s ON cs.space = s.name	
-WHERE  m.machine_uuid = $entityUUID.uuid`
+       JOIN space s ON cs.space = s.name
+WHERE m.machine_uuid = $entityUUID.uuid`
 
 	stmt, err := st.Prepare(qry, mUUID, spaceConstraint{})
 	if err != nil {
@@ -130,22 +130,22 @@ func (st *State) GetMachineAppBindings(ctx context.Context, machineUUID string) 
 	qry := `
 WITH all_bound AS (
     SELECT application_uuid, space_uuid
-    FROM   application_endpoint
-    UNION  
+    FROM application_endpoint
+    UNION
     SELECT application_uuid, space_uuid
-    FROM   application_extra_endpoint
+    FROM application_extra_endpoint
 )
-SELECT DISTINCT 
+SELECT DISTINCT
        s.uuid AS &spaceConstraint.uuid,
        s.name AS &spaceConstraint.space
-FROM   machine m
+FROM machine m
        JOIN unit u ON m.net_node_uuid = u.net_node_uuid
        JOIN application a ON u.application_uuid = a.uuid
        JOIN charm_metadata cm on a.charm_uuid = cm.charm_uuid
        JOIN all_bound b ON u.application_uuid = b.application_uuid
        JOIN space s ON IFNULL(b.space_uuid, a.space_uuid) = s.uuid
-WHERE  m.uuid = $entityUUID.uuid
-AND    cm.subordinate = 0`
+WHERE m.uuid = $entityUUID.uuid
+AND cm.subordinate = 0`
 
 	stmt, err := st.Prepare(qry, mUUID, spaceConstraint{})
 	if err != nil {
@@ -200,20 +200,20 @@ func (st *State) NICsInSpaces(ctx context.Context, nodeUUID string) (map[string]
 	mUUID := entityUUID{UUID: nodeUUID}
 
 	qry := `
-SELECT DISTINCT 
-       d.name AS &deviceInSpace.device_name, 
-       t.name AS &deviceInSpace.type_name, 
+SELECT DISTINCT
+       d.name AS &deviceInSpace.device_name,
+       t.name AS &deviceInSpace.type_name,
        v.name AS &deviceInSpace.port_type_name,
-       pd.name AS &deviceInSpace.parent_name, 
+       pd.name AS &deviceInSpace.parent_name,
        (s.space_uuid, d.mac_address) AS (&deviceInSpace.*)
-FROM   link_layer_device d
-       JOIN link_layer_device_type t on d.device_type_id = t.id	
+FROM link_layer_device d
+       JOIN link_layer_device_type t on d.device_type_id = t.id
        JOIN virtual_port_type v on d.virtual_port_type_id = v.id
        LEFT JOIN ip_address a on d.uuid = a.device_uuid
        LEFT JOIN subnet s on a.subnet_uuid = s.uuid
        LEFT JOIN link_layer_device_parent p ON d.uuid = p.device_uuid
        LEFT JOIN link_layer_device pd ON p.parent_uuid = pd.uuid
-WHERE  d.net_node_uuid = $entityUUID.uuid`
+WHERE d.net_node_uuid = $entityUUID.uuid`
 
 	stmt, err := st.Prepare(qry, mUUID, deviceInSpace{})
 	if err != nil {
@@ -308,12 +308,12 @@ func (st *State) GetSubnetCIDRForDevice(ctx context.Context, nodeUUID, deviceNam
 
 	qry := `
 SELECT &subnet.cidr
-FROM   link_layer_device d
+FROM link_layer_device d
        JOIN ip_address a ON d.uuid = a.device_uuid
        JOIN subnet s ON a.subnet_uuid = s.uuid
-WHERE  d.net_node_uuid = $netNodeUUID.net_node_uuid
-AND    d.name = $name.name
-AND    s.space_uuid = $entityUUID.uuid`
+WHERE d.net_node_uuid = $netNodeUUID.net_node_uuid
+AND d.name = $name.name
+AND s.space_uuid = $entityUUID.uuid`
 
 	stmt, err := st.Prepare(qry, nUUID, dName, sUUID, subnet{})
 	if err != nil {

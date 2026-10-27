@@ -41,8 +41,8 @@ func (s *State) GetControllerAgentVersions(ctx context.Context) ([]semversion.Nu
 
 	stmt, err := s.Prepare(`
 SELECT &agentVersion.*
-FROM   controller_node_agent_version
-GROUP  BY version
+FROM controller_node_agent_version
+GROUP BY version
 `, agentVersion{})
 	if err != nil {
 		return []semversion.Number{}, errors.Capture(err)
@@ -91,9 +91,9 @@ func (st *State) GetAllMachineTargetAgentVersionByArches(
 
 	stmt, err := st.Prepare(`
 SELECT DISTINCT a.name AS &agentBinaryStore.architecture_name
-FROM   agent_binary_store AS abs
-JOIN   architecture AS a ON abs.architecture_id = a.id
-WHERE  version = $agentBinaryStore.version 
+FROM agent_binary_store AS abs
+JOIN architecture AS a ON abs.architecture_id = a.id
+WHERE version = $agentBinaryStore.version
 `, key)
 	if err != nil {
 		return nil, errors.Capture(err)

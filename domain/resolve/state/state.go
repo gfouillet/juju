@@ -45,8 +45,8 @@ func (st *State) GetUnitUUID(ctx context.Context, name coreunit.Name) (coreunit.
 
 	stmt, err := st.Prepare(`
 SELECT &unitUUID.*
-FROM   unit
-WHERE  name=$unitName.name
+FROM unit
+WHERE name = $unitName.name
 `, unitUUID{}, unitName)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -79,9 +79,9 @@ func (st *State) UnitResolveMode(ctx context.Context, uuid coreunit.UUID) (strin
 
 	stmt, err := st.Prepare(`
 SELECT rm.name AS &unitResolveMode.mode
-FROM   unit_resolved ur
-JOIN   resolve_mode rm ON ur.mode_id = rm.id
-WHERE  ur.unit_uuid = $unitUUID.uuid
+FROM unit_resolved ur
+JOIN resolve_mode rm ON ur.mode_id = rm.id
+WHERE ur.unit_uuid = $unitUUID.uuid
 `, unitResolveMode{}, unitUUID)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -125,8 +125,8 @@ func (st *State) ResolveUnit(ctx context.Context, uuid coreunit.UUID, mode resol
 
 	getUnitStatusID, err := st.Prepare(`
 SELECT &statusID.*
-FROM   unit_agent_status
-WHERE  unit_uuid = $unitUUID.uuid
+FROM unit_agent_status
+WHERE unit_uuid = $unitUUID.uuid
 `, statusID{}, unitUUID)
 	if err != nil {
 		return errors.Capture(err)
@@ -135,7 +135,7 @@ WHERE  unit_uuid = $unitUUID.uuid
 	resolveStmt, err := st.Prepare(`
 INSERT INTO unit_resolved (*)
 VALUES ($unitResolve.*)
-ON CONFLICT(unit_uuid) DO UPDATE SET
+ON CONFLICT (unit_uuid) DO UPDATE SET
     mode_id = excluded.mode_id
 `, unitResolve{})
 	if err != nil {
@@ -190,8 +190,8 @@ func (st *State) ResolveAllUnits(ctx context.Context, mode resolve.ResolveMode) 
 
 	getUnitsInErrorStatusStmt, err := st.Prepare(`
 SELECT unit_uuid AS &unitUUID.uuid
-FROM   unit_agent_status
-WHERE  status_id = $statusID.status_id
+FROM unit_agent_status
+WHERE status_id = $statusID.status_id
 `, unitUUID{}, statusID{})
 	if err != nil {
 		return errors.Capture(err)
@@ -200,7 +200,7 @@ WHERE  status_id = $statusID.status_id
 	resolveStmt, err := st.Prepare(`
 INSERT INTO unit_resolved (*)
 VALUES ($unitResolve.*)
-ON CONFLICT(unit_uuid) DO UPDATE SET
+ON CONFLICT (unit_uuid) DO UPDATE SET
     mode_id = excluded.mode_id
 `, unitResolve{})
 	if err != nil {
@@ -252,7 +252,7 @@ func (st *State) ClearResolved(ctx context.Context, uuid coreunit.UUID) error {
 
 	stmt, err := st.Prepare(`
 DELETE FROM unit_resolved
-WHERE  unit_uuid = $unitUUID.uuid
+WHERE unit_uuid = $unitUUID.uuid
 `, unitUUID)
 	if err != nil {
 		return errors.Capture(err)

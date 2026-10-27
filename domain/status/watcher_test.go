@@ -54,8 +54,8 @@ func (s *watcherSuite) SetUpTest(c *tc.C) {
 	err := s.ModelTxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
-			VALUES (?, ?, "test", "prod",  "iaas", "test-model", "ec2")
-		`, modelUUID.String(), testing.ControllerTag.Id())
+			VALUES (?, ?, "test", "prod", "iaas", "test-model", "ec2")
+`, modelUUID.String(), testing.ControllerTag.Id())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -373,9 +373,9 @@ func (s *watcherSuite) createOffer(c *tc.C, appUUID coreapplication.UUID, endpoi
 		var endpointUUID string
 		err := tx.QueryRowContext(ctx, `
 SELECT ae.uuid
-FROM   application_endpoint AS ae
-JOIN   charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
-WHERE  ae.application_uuid = ? AND cr.name = ?
+FROM application_endpoint AS ae
+JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
+WHERE ae.application_uuid = ? AND cr.name = ?
 `, appUUID, endpointName).Scan(&endpointUUID)
 		if err != nil {
 			return err

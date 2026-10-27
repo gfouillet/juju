@@ -947,10 +947,10 @@ func (s *remoteRelationSuite) TestSetRelationErrorStatusFirstApplication(c *tc.C
 	var message string
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
-			SELECT relation_status_type_id, message 
-			FROM relation_status 
+			SELECT relation_status_type_id, message
+			FROM relation_status
 			WHERE relation_uuid = ?
-		`, relationUUID.String()).Scan(&statusID, &message)
+`, relationUUID.String()).Scan(&statusID, &message)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(statusID, tc.Equals, 5) // RelationStatusTypeError = 5
@@ -1001,10 +1001,10 @@ func (s *remoteRelationSuite) TestSetRelationErrorStatusSecondApplication(c *tc.
 	var message string
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
-			SELECT relation_status_type_id, message 
-			FROM relation_status 
+			SELECT relation_status_type_id, message
+			FROM relation_status
 			WHERE relation_uuid = ?
-		`, relationUUID.String()).Scan(&statusID, &message)
+`, relationUUID.String()).Scan(&statusID, &message)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(statusID, tc.Equals, 5) // RelationStatusTypeError = 5
@@ -1063,10 +1063,10 @@ func (s *remoteRelationSuite) TestSetRelationErrorStatusUpdateExisting(c *tc.C) 
 	var message string
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
-			SELECT relation_status_type_id, message 
-			FROM relation_status 
+			SELECT relation_status_type_id, message
+			FROM relation_status
 			WHERE relation_uuid = ?
-		`, relationUUID.String()).Scan(&statusID, &message)
+`, relationUUID.String()).Scan(&statusID, &message)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(statusID, tc.Equals, 5) // RelationStatusTypeError = 5

@@ -271,12 +271,12 @@ func (s *modelSuite) TestGetModelMetrics(c *tc.C) {
 
 	_, err := s.DB().ExecContext(c.Context(), `
 		INSERT INTO charm (uuid, reference_name) VALUES ('456', 'foo');
-	`)
+`)
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().ExecContext(c.Context(), `
 		INSERT INTO application (uuid, name, life_id, charm_uuid, space_uuid) VALUES ('123', 'foo', 0, '456', ?);
-		`, network.AlphaSpaceId)
+`, network.AlphaSpaceId)
 	c.Assert(err, tc.ErrorIsNil)
 
 	// Check that it was written correctly.
@@ -1244,9 +1244,9 @@ func (s *modelSuite) TestIsImportingModelNotImporting(c *tc.C) {
 	st := NewState(s.TxnRunnerFactory(), loggertesting.WrapCheckLog(c))
 	err := s.ModelTxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type) 
+INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, 'test-model', 'admin', 'iaas', 'test-cloud', 'ec2')
-		`, modelUUID, "controller-uuid")
+`, modelUUID, "controller-uuid")
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1262,14 +1262,14 @@ func (s *modelSuite) TestIsImportingModelImporting(c *tc.C) {
 	st := NewState(s.TxnRunnerFactory(), loggertesting.WrapCheckLog(c))
 	err := s.ModelTxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type) 
+INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, 'test-model', 'admin', 'iaas', 'test-cloud', 'ec2')
-		`, modelUUID, "controller-uuid"); err != nil {
+`, modelUUID, "controller-uuid"); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model_migrating (uuid, model_uuid) VALUES (?, ?)
-		`, uuid.MustNewUUID().String(), modelUUID)
+`, uuid.MustNewUUID().String(), modelUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

@@ -226,8 +226,8 @@ func (st *State) GetSubordinateUnitCreationInfo(
 		unitArgs := getUnit{Name: unitName}
 		getUnitStmt, err := st.Prepare(`
 SELECT &getUnit.*
-FROM   unit
-WHERE  name = $getUnit.name
+FROM unit
+WHERE name = $getUnit.name
 `, unitArgs)
 		if err != nil {
 			return errors.Capture(err)
@@ -318,11 +318,11 @@ WITH directives AS (
 	       asd.size_mib AS size_mib,
 	       asd.storage_name AS storage_name,
 	       asd.storage_pool_uuid AS storage_pool_uuid
-	FROM   application_storage_directive AS asd
-	JOIN   charm_storage AS cs ON cs.charm_uuid = asd.charm_uuid AND cs.name = asd.storage_name
-	JOIN   charm_metadata AS cm ON cm.charm_uuid = asd.charm_uuid
-	JOIN   charm_storage_kind AS csk ON csk.id = cs.storage_kind_id
-	WHERE  asd.application_uuid = $entityUUID.uuid
+	FROM application_storage_directive AS asd
+	JOIN charm_storage AS cs ON cs.charm_uuid = asd.charm_uuid AND cs.name = asd.storage_name
+	JOIN charm_metadata AS cm ON cm.charm_uuid = asd.charm_uuid
+	JOIN charm_storage_kind AS csk ON csk.id = cs.storage_kind_id
+	WHERE asd.application_uuid = $entityUUID.uuid
 )
 SELECT &applicationStorageDirective.* FROM directives
 `, applicationStorageDirective{}, entityUUID{})
@@ -430,9 +430,9 @@ func (st *State) getUnitMachineIdentifier(
 
 	q := `
 SELECT (m.uuid, m.net_node_uuid, m.name) AS (&machineIdentifier.*)
-FROM   unit AS u
-JOIN   machine AS m ON u.net_node_uuid = m.net_node_uuid
-WHERE  u.uuid = $entityUUID.uuid
+FROM unit AS u
+JOIN machine AS m ON u.net_node_uuid = m.net_node_uuid
+WHERE u.uuid = $entityUUID.uuid
 `
 	stmt, err := st.Prepare(q, input, dbVal)
 	if err != nil {
@@ -467,8 +467,8 @@ func (st *State) getUnitPrincipalUUID(
 	}
 	stmt, err := st.Prepare(`
 SELECT principal_uuid AS &unitPrincipalRow.principal_uuid
-FROM   unit_principal
-WHERE  unit_uuid = $entityUUID.uuid
+FROM unit_principal
+WHERE unit_uuid = $entityUUID.uuid
 `, unitPrincipalRow{}, entityUUID{})
 	if err != nil {
 		return "", false, errors.Capture(err)
@@ -560,15 +560,15 @@ func (st *State) findRelatedSubordinateApplication(
 	}
 	stmt, err := st.Prepare(`
 SELECT (cm.subordinate, ae.application_uuid, l.value) AS (&getSub.*)
-FROM   relation_unit AS ru
-JOIN   relation_endpoint AS re1 ON ru.relation_endpoint_uuid = re1.uuid
-JOIN   relation_endpoint AS re2 ON re1.relation_uuid = re2.relation_uuid AND re1.uuid != re2.uuid 
-JOIN   application_endpoint AS ae ON re2.endpoint_uuid = ae.uuid
-JOIN   charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
-JOIN   charm_metadata AS cm ON cr.charm_uuid = cm.charm_uuid
-JOIN   application AS a ON ae.application_uuid = a.uuid
-JOIN   life AS l ON a.life_id = l.id
-WHERE  ru.uuid = $getSub.unit_uuid
+FROM relation_unit AS ru
+JOIN relation_endpoint AS re1 ON ru.relation_endpoint_uuid = re1.uuid
+JOIN relation_endpoint AS re2 ON re1.relation_uuid = re2.relation_uuid AND re1.uuid != re2.uuid
+JOIN application_endpoint AS ae ON re2.endpoint_uuid = ae.uuid
+JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
+JOIN charm_metadata AS cm ON cr.charm_uuid = cm.charm_uuid
+JOIN application AS a ON ae.application_uuid = a.uuid
+JOIN life AS l ON a.life_id = l.id
+WHERE ru.uuid = $getSub.unit_uuid
 `, arg)
 	if err != nil {
 		return "", false, errors.Capture(err)
@@ -627,18 +627,18 @@ func (st *State) getRelatedSubordinateApplication(
 	}
 	stmt, err := st.Prepare(`
 SELECT (cm.subordinate, ae2.application_uuid, l.value) AS (&relatedSubordinateAppRow.*)
-FROM   relation_endpoint AS re1
-JOIN   relation_endpoint AS re2
+FROM relation_endpoint AS re1
+JOIN relation_endpoint AS re2
        ON re1.relation_uuid = re2.relation_uuid AND re1.uuid != re2.uuid
-JOIN   application_endpoint AS ae1 ON re1.endpoint_uuid = ae1.uuid
-JOIN   application_endpoint AS ae2 ON re2.endpoint_uuid = ae2.uuid
-JOIN   charm_relation AS cr ON ae2.charm_relation_uuid = cr.uuid
-JOIN   charm_metadata AS cm ON cr.charm_uuid = cm.charm_uuid
-JOIN   application AS a ON ae2.application_uuid = a.uuid
-JOIN   life AS l ON a.life_id = l.id
-JOIN   unit AS u ON u.application_uuid = ae1.application_uuid
-WHERE  re1.relation_uuid = $relatedSubordinateAppQuery.relation_uuid
-AND    u.uuid = $relatedSubordinateAppQuery.unit_uuid
+JOIN application_endpoint AS ae1 ON re1.endpoint_uuid = ae1.uuid
+JOIN application_endpoint AS ae2 ON re2.endpoint_uuid = ae2.uuid
+JOIN charm_relation AS cr ON ae2.charm_relation_uuid = cr.uuid
+JOIN charm_metadata AS cm ON cr.charm_uuid = cm.charm_uuid
+JOIN application AS a ON ae2.application_uuid = a.uuid
+JOIN life AS l ON a.life_id = l.id
+JOIN unit AS u ON u.application_uuid = ae1.application_uuid
+WHERE re1.relation_uuid = $relatedSubordinateAppQuery.relation_uuid
+AND u.uuid = $relatedSubordinateAppQuery.unit_uuid
 `, relatedSubordinateAppRow{}, arg)
 	if err != nil {
 		return "", false, errors.Capture(err)
@@ -685,11 +685,11 @@ func (st *State) subordinateUnitExists(
 	}
 	stmt, err := st.Prepare(`
 SELECT (u.application_uuid, l.value) AS (&getSub.*)
-FROM   unit_principal AS up
-JOIN   unit AS u ON up.unit_uuid = u.uuid
-JOIN   life AS l ON u.life_id = l.id
-WHERE  u.application_uuid = $getSub.application_uuid
-AND    up.principal_uuid  = $getSub.unit_uuid
+FROM unit_principal AS up
+JOIN unit AS u ON up.unit_uuid = u.uuid
+JOIN life AS l ON u.life_id = l.id
+WHERE u.application_uuid = $getSub.application_uuid
+AND up.principal_uuid = $getSub.unit_uuid
 `, arg)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -716,8 +716,8 @@ func (st *State) getNetNodeUUID(ctx context.Context, tx *sqlair.TX, unitUUID str
 
 	stmt, err := st.Prepare(`
 SELECT &netNodeUUID.*
-FROM   unit
-WHERE  uuid = $entityUUID.uuid
+FROM unit
+WHERE uuid = $entityUUID.uuid
 `, input, dbVal)
 	if err != nil {
 		return "", errors.Capture(err)

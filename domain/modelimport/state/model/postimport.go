@@ -24,9 +24,9 @@ func (st *State) MergeModelAgentPassword(ctx context.Context, modelAgent v4_1_0.
 
 	stmt, err := sqlair.Prepare(`
 UPDATE model_agent
-SET    password_hash = $ModelAgent.password_hash,
+SET password_hash = $ModelAgent.password_hash,
        password_hash_algorithm_id = $ModelAgent.password_hash_algorithm_id
-WHERE  model_uuid = $ModelAgent.model_uuid
+WHERE model_uuid = $ModelAgent.model_uuid
 `, v4_1_0.ModelAgent{})
 	if err != nil {
 		return fmt.Errorf("preparing model_agent password merge statement: %w", err)

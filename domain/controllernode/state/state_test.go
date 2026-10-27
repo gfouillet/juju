@@ -231,7 +231,7 @@ func (s *stateSuite) TestSetRunningAgentBinaryVersionSuccess(c *tc.C) {
 	INNER JOIN architecture as a
 	ON c.architecture_id = a.id
 	WHERE controller_id = ?
-			`
+`
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 
 		return tx.QueryRowContext(ctx, selectAgentVerQuery, controllerID).Scan(

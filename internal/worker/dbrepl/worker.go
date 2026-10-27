@@ -295,7 +295,7 @@ func (w *dbReplWorker) execSwitch(ctx context.Context, args []string) {
 
 	var uuid string
 	if err := w.controllerDB.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, "SELECT uuid FROM model WHERE name=?", name)
+		row := tx.QueryRowContext(ctx, "SELECT uuid FROM model WHERE name = ?", name)
 		if err := row.Scan(&uuid); err != nil {
 			return err
 		}
@@ -385,7 +385,7 @@ func (w *dbReplWorker) execQueryForModels(ctx context.Context, args []string) {
 }
 
 func (w *dbReplWorker) execTables(ctx context.Context) {
-	if err := w.executeQuery(ctx, w.currentDB, "SELECT name AS table_name FROM sqlite_master WHERE type='table'"); err != nil {
+	if err := w.executeQuery(ctx, w.currentDB, "SELECT name AS table_name FROM sqlite_master WHERE type = 'table'"); err != nil {
 		w.cfg.Logger.Errorf(ctx, "failed to execute query: %v", err)
 	}
 }
@@ -462,14 +462,14 @@ func (w *dbReplWorker) getForeignKeyRelations(ctx context.Context, tableName, co
 		relations = nil
 
 		const fkListQuery = `
-WITH tbls(name) AS ( 
-	SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' 
-) 
-SELECT t.name AS child_table, 
-	fk."from" AS child_column, 
-	fk.id AS fk_id, 
-	fk.seq AS fk_seq 
-FROM tbls t, pragma_foreign_key_list(t.name) AS fk 
+WITH tbls (name) AS (
+	SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+)
+SELECT t.name AS child_table,
+	fk."from" AS child_column,
+	fk.id AS fk_id,
+	fk.seq AS fk_seq
+FROM tbls t, pragma_foreign_key_list(t.name) AS fk
 WHERE fk."table" = ? AND fk."to" = ?
 ORDER BY child_table, fk_id, fk_seq;
 `
@@ -580,7 +580,7 @@ func (w *dbReplWorker) execShowDDL(ctx context.Context, args []string) {
 	name := args[0]
 	var ddl string
 	if err := w.currentDB.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE name=?", name)
+		row := tx.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE name = ?", name)
 		if err := row.Scan(&ddl); err != nil {
 			return err
 		}
@@ -593,13 +593,13 @@ func (w *dbReplWorker) execShowDDL(ctx context.Context, args []string) {
 }
 
 func (w *dbReplWorker) execTriggers(ctx context.Context) {
-	if err := w.executeQuery(ctx, w.currentDB, "SELECT name AS trigger_name FROM sqlite_master WHERE type='trigger'"); err != nil {
+	if err := w.executeQuery(ctx, w.currentDB, "SELECT name AS trigger_name FROM sqlite_master WHERE type = 'trigger'"); err != nil {
 		w.cfg.Logger.Errorf(ctx, "failed to execute query: %v", err)
 	}
 }
 
 func (w *dbReplWorker) execViews(ctx context.Context) {
-	if err := w.executeQuery(ctx, w.currentDB, "SELECT name AS view_name FROM sqlite_master WHERE type='view'"); err != nil {
+	if err := w.executeQuery(ctx, w.currentDB, "SELECT name AS view_name FROM sqlite_master WHERE type = 'view'"); err != nil {
 		w.cfg.Logger.Errorf(ctx, "failed to execute query: %v", err)
 	}
 }
@@ -618,7 +618,7 @@ func (w *dbReplWorker) changeLog(ctx context.Context) {
 		changelogRows = nil
 
 		rows, err := tx.QueryContext(ctx, `
-SELECT c.id, t.edit_type, n.namespace, c.changed, c.created_at 
+SELECT c.id, t.edit_type, n.namespace, c.changed, c.created_at
 FROM change_log AS c
 JOIN change_log_edit_type AS t ON c.edit_type_id = t.id
 JOIN change_log_namespace AS n ON c.namespace_id = n.id;

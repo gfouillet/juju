@@ -49,7 +49,7 @@ func (s *State) Leases(ctx context.Context, keys ...corelease.Key) (map[coreleas
 
 	q := `
 SELECT (t.type, l.model_uuid, l.name, l.holder, l.expiry) AS (&Lease.*)
-FROM   lease l JOIN lease_type t ON l.lease_type_id = t.id`
+FROM lease l JOIN lease_type t ON l.lease_type_id = t.id`
 
 	var args []any
 
@@ -63,9 +63,9 @@ FROM   lease l JOIN lease_type t ON l.lease_type_id = t.id`
 		}
 
 		stmt, err = s.Prepare(q+`
-WHERE  t.type = $Lease.type
-AND    l.model_uuid = $Lease.model_uuid
-AND    l.name = $Lease.name`, lease)
+WHERE t.type = $Lease.type
+AND l.model_uuid = $Lease.model_uuid
+AND l.name = $Lease.name`, lease)
 		if err != nil {
 			return nil, errors.Errorf("preparing select lease with keys statement: %w", err)
 		}
@@ -124,9 +124,9 @@ func (s *State) ClaimLease(ctx context.Context, uuid uuid.UUID, key corelease.Ke
 
 	stmt, err := s.Prepare(`
 INSERT INTO lease (uuid, lease_type_id, model_uuid, name, holder, start, expiry)
-SELECT $Lease.uuid, id, $Lease.model_uuid, $Lease.name, $Lease.holder, datetime('now'), datetime('now', $Lease.duration) 
-FROM   lease_type
-WHERE  type = $Lease.type;`, lease)
+SELECT $Lease.uuid, id, $Lease.model_uuid, $Lease.name, $Lease.holder, datetime('now'), datetime('now', $Lease.duration)
+FROM lease_type
+WHERE type = $Lease.type;`, lease)
 	if err != nil {
 		return errors.Errorf("preparing insert lease statement: %w", err)
 	}
@@ -163,14 +163,14 @@ func (s *State) ExtendLease(ctx context.Context, key corelease.Key, req coreleas
 
 	stmt, err := s.Prepare(`
 UPDATE lease
-SET    expiry = datetime('now', $Lease.duration)
-WHERE  uuid = (
+SET expiry = datetime('now', $Lease.duration)
+WHERE uuid = (
     SELECT l.uuid
-    FROM   lease l JOIN lease_type t ON l.lease_type_id = t.id
-    WHERE  t.type = $Lease.type
-    AND    l.model_uuid = $Lease.model_uuid
-    AND    l.name = $Lease.name
-    AND    l.holder = $Lease.holder
+    FROM lease l JOIN lease_type t ON l.lease_type_id = t.id
+    WHERE t.type = $Lease.type
+    AND l.model_uuid = $Lease.model_uuid
+    AND l.name = $Lease.name
+    AND l.holder = $Lease.holder
 )`, lease)
 	if err != nil {
 		return errors.Errorf("preparing update lease statement: %w", err)
@@ -212,13 +212,13 @@ func (s *State) RevokeLease(ctx context.Context, key corelease.Key, holder strin
 
 	stmt, err := s.Prepare(`
 DELETE FROM lease
-WHERE  uuid = (
+WHERE uuid = (
     SELECT l.uuid
-    FROM   lease l JOIN lease_type t ON l.lease_type_id = t.id
-    WHERE  t.type = $Lease.type
-    AND    l.model_uuid = $Lease.model_uuid
-    AND    l.name = $Lease.name
-    AND    l.holder = $Lease.holder
+    FROM lease l JOIN lease_type t ON l.lease_type_id = t.id
+    WHERE t.type = $Lease.type
+    AND l.model_uuid = $Lease.model_uuid
+    AND l.name = $Lease.name
+    AND l.holder = $Lease.holder
 )`, lease)
 	if err != nil {
 		return errors.Errorf("preparing delete lease statement: %w", err)
@@ -254,9 +254,9 @@ func (s *State) LeaseGroup(ctx context.Context, namespace, modelUUID string) (ma
 
 	stmt, err := s.Prepare(`
 SELECT (t.type, l.model_uuid, l.name, l.holder, l.expiry) AS (&Lease.*)
-FROM   lease l JOIN lease_type t ON l.lease_type_id = t.id
-WHERE  t.type = $Lease.type
-AND    l.model_uuid = $Lease.model_uuid;`, lease)
+FROM lease l JOIN lease_type t ON l.lease_type_id = t.id
+WHERE t.type = $Lease.type
+AND l.model_uuid = $Lease.model_uuid;`, lease)
 	if err != nil {
 		return nil, errors.Errorf("preparing delete lease statement: %w", err)
 	}
@@ -314,10 +314,10 @@ func (s *State) PinLease(ctx context.Context, key corelease.Key, entity string) 
 	stmt, err := s.Prepare(`
 INSERT INTO lease_pin (uuid, lease_uuid, entity_id)
 SELECT $LeasePin.uuid, l.uuid, $LeasePin.entity_id
-FROM   lease l JOIN lease_type t ON l.lease_type_id = t.id
-WHERE  t.type = $Lease.type
-AND    l.model_uuid = $Lease.model_uuid
-AND    l.name = $Lease.name;`, leasePin, lease)
+FROM lease l JOIN lease_type t ON l.lease_type_id = t.id
+WHERE t.type = $Lease.type
+AND l.model_uuid = $Lease.model_uuid
+AND l.name = $Lease.name;`, leasePin, lease)
 	if err != nil {
 		return errors.Errorf("preparing insert lease pin statement: %w", err)
 	}
@@ -357,15 +357,15 @@ func (s *State) UnpinLease(ctx context.Context, key corelease.Key, entity string
 
 	stmt, err := s.Prepare(`
 DELETE FROM lease_pin
-WHERE  uuid = (
+WHERE uuid = (
     SELECT p.uuid
-    FROM   lease_pin p
+    FROM lease_pin p
            JOIN lease l ON l.uuid = p.lease_uuid
            JOIN lease_type t ON l.lease_type_id = t.id
-    WHERE  t.type = $Lease.type
-    AND    l.model_uuid = $Lease.model_uuid
-    AND    l.name = $Lease.name
-    AND    p.entity_id = $LeasePin.entity_id)`, lease, leasePin)
+    WHERE t.type = $Lease.type
+    AND l.model_uuid = $Lease.model_uuid
+    AND l.name = $Lease.name
+    AND p.entity_id = $LeasePin.entity_id)`, lease, leasePin)
 	if err != nil {
 		return errors.Errorf("preparing delete lease pin statement: %w", err)
 	}
@@ -385,9 +385,9 @@ func (s *State) Pinned(ctx context.Context) (map[corelease.Key][]string, error) 
 	}
 
 	stmt, err := s.Prepare(`
-SELECT   (l.uuid, t.type, l.model_uuid, l.name) AS (&Lease.*),
+SELECT (l.uuid, t.type, l.model_uuid, l.name) AS (&Lease.*),
          (p.entity_id) AS (&LeasePin.*)
-FROM     lease l 
+FROM lease l
          JOIN lease_type t ON l.lease_type_id = t.id
 		 JOIN lease_pin p on l.uuid = p.lease_uuid
 ORDER BY l.uuid;`, Lease{}, LeasePin{})

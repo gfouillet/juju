@@ -73,7 +73,7 @@ func (s *importSuite) addSecretBackend(c *tc.C, name, sbType string) {
 			INSERT INTO secret_backend (uuid, name, backend_type_id)
 			VALUES (?, ?,
 			        (SELECT id FROM secret_backend_type WHERE type = ?))
-		`, tc.Must(c, uuid.NewUUID).String(), name, sbType)
+`, tc.Must(c, uuid.NewUUID).String(), name, sbType)
 		return err
 	})
 }
@@ -84,13 +84,13 @@ func (s *importSuite) prepareModel(c *tc.C) description.Model {
 		cloudUUID := tc.Must(c, uuid.NewUUID).String()
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify)
-			VALUES (?,'lxd', 1, 'placeholder', true)`, cloudUUID); err != nil {
+			VALUES (?, 'lxd', 1, 'placeholder', true)`, cloudUUID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, activated, cloud_uuid, model_type_id, life_id, name, qualifier)
 			VALUES (?, true, ?, 0, 1, 'test-model', 'integration')
-		`, s.ModelUUID(), cloudUUID); err != nil {
+`, s.ModelUUID(), cloudUUID); err != nil {
 			return err
 		}
 		return nil
@@ -100,7 +100,7 @@ func (s *importSuite) prepareModel(c *tc.C) description.Model {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 			VALUES (?, ?, 'test-model', 'integration', 'iaas', 'lxd', 'fake')
-		`, s.ModelUUID(), jujutesting.ControllerTag.Id())
+`, s.ModelUUID(), jujutesting.ControllerTag.Id())
 		return err
 	})
 

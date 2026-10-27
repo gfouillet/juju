@@ -935,7 +935,7 @@ func (m *stateSuite) TestDeleteModel(c *tc.C) {
 SELECT model_uuid
 FROM model_authorized_keys
 WHERE model_uuid = ?
-	`, m.uuid)
+`, m.uuid)
 	// ErrNoRows is not returned by row.Err, it is deferred until row.Scan
 	// is called.
 	c.Assert(row.Scan(nil), tc.ErrorIs, sql.ErrNoRows)
@@ -1788,7 +1788,7 @@ func (m *stateSuite) TestGetModelStateDestroying(c *tc.C) {
 	err := m.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 UPDATE model SET life_id = 1 WHERE uuid = ?
-	`, m.uuid)
+`, m.uuid)
 		return err
 	})
 	c.Check(err, tc.ErrorIsNil)
@@ -2119,7 +2119,7 @@ func (m *stateSuite) TestGetModelLifeDying(c *tc.C) {
 	err := m.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 UPDATE model SET life_id = 1 WHERE uuid = ?
-	`, modelUUID.String())
+`, modelUUID.String())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -2603,10 +2603,10 @@ func (m *stateSuite) TestImportModelClaimsInImportingPhase(c *tc.C) {
 	var phase string
 	err = runner.Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
 		stmt, err := sqlair.Prepare(`
-SELECT     mmipt.type AS &M.type
-FROM       model_migration_import AS mmi
-JOIN       model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
-WHERE      mmi.model_uuid = $M.model_uuid`, sqlair.M{})
+SELECT mmipt.type AS &M.type
+FROM model_migration_import AS mmi
+JOIN model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
+WHERE mmi.model_uuid = $M.model_uuid`, sqlair.M{})
 		if err != nil {
 			return err
 		}

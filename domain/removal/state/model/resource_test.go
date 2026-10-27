@@ -149,8 +149,8 @@ INSERT INTO resource (uuid, charm_uuid, charm_resource_name, revision,
                       origin_type_id, state_id, created_at)
 SELECT ?, charm_uuid, charm_resource_name, revision,
        origin_type_id, state_id, created_at
-FROM   resource
-WHERE  uuid = ?`, otherResourceUUID, resourceUUID)
+FROM resource
+WHERE uuid = ?`, otherResourceUUID, resourceUUID)
 	c.Assert(err, tc.ErrorIsNil)
 	_, err = s.DB().ExecContext(c.Context(), `
 INSERT INTO resource_image_store (resource_uuid, store_storage_key)
@@ -184,10 +184,10 @@ func (s *resourceSuite) createResource(c *tc.C, withUnit bool) (string, string) 
 	var resourceUUID, unitUUID string
 	err := s.DB().QueryRowContext(c.Context(), `
 SELECT r.uuid
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 0`, appUUID).Scan(&resourceUUID)
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 0`, appUUID).Scan(&resourceUUID)
 	c.Assert(err, tc.ErrorIsNil)
 	if withUnit {
 		err = s.DB().QueryRowContext(c.Context(), `

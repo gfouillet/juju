@@ -29,9 +29,9 @@ func (s *State) DeleteLeadershipForModel(ctx context.Context, modelUUID string) 
 DELETE FROM lease
 WHERE uuid IN (
     SELECT l.uuid FROM lease AS l
-    JOIN   lease_type AS t ON l.lease_type_id = t.id
-    WHERE  t.type = $Lease.type
-    AND    l.model_uuid = $Lease.model_uuid
+    JOIN lease_type AS t ON l.lease_type_id = t.id
+    WHERE t.type = $Lease.type
+    AND l.model_uuid = $Lease.model_uuid
 )`, lease)
 	if err != nil {
 		return errors.Errorf("preparing delete leadership leases statement: %w", err)

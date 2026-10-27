@@ -951,8 +951,8 @@ func (s *watcherSuite) changeStorageAttachmentLives(
 				ctx,
 				`
 UPDATE storage_attachment
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 				int(life),
 				uuid.String(),
@@ -976,8 +976,8 @@ func (s *watcherSuite) changeFilesystemAttachmentLife(
 			ctx,
 			`
 UPDATE storage_filesystem_attachment
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 			int(life), uuid,
 		)
@@ -992,8 +992,8 @@ func (s *watcherSuite) changeVolumeAttachmentLife(
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 UPDATE storage_volume_attachment
-SET    life_id = ?
-WHERE  uuid = ?`, int(life), uuid,
+SET life_id = ?
+WHERE uuid = ?`, int(life), uuid,
 		)
 		return err
 	})
@@ -1010,8 +1010,8 @@ func (s *watcherSuite) changeFilesystemLife(
 			ctx,
 			`
 UPDATE storage_filesystem
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 			int(life), uuid,
 		)
@@ -1029,8 +1029,8 @@ func (s *watcherSuite) changeFilesystemAttachmentMountPoint(
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 UPDATE storage_filesystem_attachment
-SET    mount_point = 'foobar'
-WHERE  uuid = ?
+SET mount_point = 'foobar'
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1050,8 +1050,8 @@ func (s *watcherSuite) changeFilesystemProviderID(
 			ctx,
 			`
 UPDATE storage_filesystem
-SET    provider_id = 'foobar'
-WHERE  uuid = ?
+SET provider_id = 'foobar'
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1071,8 +1071,8 @@ func (s *watcherSuite) changeFilesystemSizeMiB(
 			ctx,
 			`
 UPDATE storage_filesystem
-SET    size_mib = 9001
-WHERE  uuid = ?
+SET size_mib = 9001
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1093,8 +1093,8 @@ func (s *watcherSuite) changeFilesystemAttachmentProviderID(
 			ctx,
 			`
 UPDATE storage_filesystem_attachment
-SET    provider_id = 'foobar'
-WHERE  uuid = ?
+SET provider_id = 'foobar'
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1115,8 +1115,8 @@ func (s *watcherSuite) changeMachineCloudInstanceDisplayName(
 			ctx,
 			`
 UPDATE machine_cloud_instance
-SET    display_name = 'foobar'
-WHERE  machine_uuid = ?
+SET display_name = 'foobar'
+WHERE machine_uuid = ?
 `,
 			uuid,
 		)
@@ -1136,8 +1136,8 @@ func (s *watcherSuite) changeVolumeProviderID(
 			ctx,
 			`
 UPDATE storage_volume
-SET    provider_id = 'foobar'
-WHERE  uuid = ?
+SET provider_id = 'foobar'
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1156,8 +1156,8 @@ func (s *watcherSuite) changeVolumeAttchmentLife(
 			ctx,
 			`
 UPDATE storage_volume_attachment
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 			int(life), uuid,
 		)
@@ -1176,8 +1176,8 @@ func (s *watcherSuite) changeVolumeAttchmentPlanLife(
 			ctx,
 			`
 UPDATE storage_volume_attachment_plan
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 			int(life),
 			uuid,
@@ -1198,8 +1198,8 @@ func (s *watcherSuite) changeVolumeAttachmentReadOnly(
 			ctx,
 			`
 UPDATE storage_volume_attachment
-SET    read_only = FALSE
-WHERE  uuid = ?
+SET read_only = FALSE
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1218,8 +1218,8 @@ func (s *watcherSuite) changeVolumeLife(
 			ctx,
 			`
 UPDATE storage_volume
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 			int(life),
 			uuid,
@@ -1237,7 +1237,7 @@ func (s *watcherSuite) deleteFilesystem(c *tc.C, uuid string) {
 			ctx,
 			`
 DELETE FROM storage_filesystem
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1254,7 +1254,7 @@ func (s *watcherSuite) deleteFilesystemAttachment(c *tc.C, uuid string) {
 			ctx,
 			`
 DELETE FROM storage_filesystem_attachment
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1271,7 +1271,7 @@ func (s *watcherSuite) deleteMachineCloudInstance(c *tc.C, uuid string) {
 			ctx,
 			`
 DELETE FROM machine_cloud_instance
-WHERE  machine_uuid = ?
+WHERE machine_uuid = ?
 `,
 			uuid,
 		)
@@ -1287,7 +1287,7 @@ func (s *watcherSuite) deleteVolume(c *tc.C, uuid string) {
 			ctx,
 			`
 DELETE FROM storage_volume
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1304,7 +1304,7 @@ func (s *watcherSuite) deleteVolumeAttachment(c *tc.C, uuid string) {
 			ctx,
 			`
 DELETE FROM storage_volume_attachment
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1321,7 +1321,7 @@ func (s *watcherSuite) deleteVolumeAttachmentPlan(c *tc.C, uuid string) {
 			ctx,
 			`
 DELETE FROM storage_volume_attachment_plan
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 			uuid,
 		)
@@ -1407,7 +1407,7 @@ func (s *watcherSuite) newMachineFilesystem(c *tc.C) (domainstorage.FilesystemUU
 			ctx, `
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 1)
-		`,
+`,
 			fsUUID.String(),
 			fsID,
 		)
@@ -1435,7 +1435,7 @@ func (s *watcherSuite) newMachineFilesystemAttachmentForMachine(
 SELECT net_node_uuid
 FROM machine
 WHERE uuid = ?
-			`,
+`,
 			machineUUID,
 		).Scan(&netNodeUUID)
 		if err != nil {
@@ -1475,7 +1475,7 @@ func (s *watcherSuite) newModelFilesystem(c *tc.C) (string, string) {
 			`
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 0)
-		`,
+`,
 			fsUUID.String(),
 			fsID,
 		)
@@ -1503,7 +1503,7 @@ func (s *watcherSuite) newModelFilesystemAttachmentForMachine(
 SELECT net_node_uuid
 FROM machine
 WHERE uuid = ?
-			`,
+`,
 			machineUUID,
 		).Scan(&netNodeUUID)
 		if err != nil {
@@ -1576,7 +1576,7 @@ func (s *watcherSuite) newMachineVolumeAttachmentForMachine(
 SELECT net_node_uuid
 FROM machine
 WHERE uuid = ?
-			`,
+`,
 			machineUUID,
 		).Scan(&netNodeUUID)
 		if err != nil {
@@ -1618,7 +1618,7 @@ func (s *watcherSuite) newVolumeAttachmentPlanForMachine(
 SELECT net_node_uuid
 FROM machine
 WHERE uuid = ?
-			`,
+`,
 			machineUUID,
 		).Scan(&netNodeUUID)
 		if err != nil {
@@ -1657,7 +1657,7 @@ func (s *watcherSuite) newMachineVolume(c *tc.C) (domainstorage.VolumeUUID, stri
 			`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 1)
-		`,
+`,
 			vsUUID.String(),
 			vsID,
 		)
@@ -1681,7 +1681,7 @@ func (s *watcherSuite) newModelVolume(c *tc.C) (string, string) {
 			`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 0)
-		`,
+`,
 			vsUUID.String(),
 			vsID,
 		)

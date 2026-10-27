@@ -398,7 +398,7 @@ WHEN EXISTS (
 BEGIN
     SELECT RAISE(ABORT, 'Task is already linked to a machine, cannot be added for a unit');
 END;
-	`)
+`)
 	})
 
 	patches = append(patches, customModelTriggers()...)

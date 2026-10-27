@@ -158,8 +158,8 @@ func (st *State) SelectDatabaseNamespace(ctx context.Context, namespace string) 
 	dbNamespace := dbNamespace{Namespace: namespace}
 
 	stmt, err := st.Prepare(`
-SELECT &dbNamespace.* from namespace_list 
-WHERE  namespace = $dbNamespace.namespace`, dbNamespace)
+SELECT &dbNamespace.* from namespace_list
+WHERE namespace = $dbNamespace.namespace`, dbNamespace)
 	if err != nil {
 		return "", errors.Errorf("preparing select namespace statement")
 	}
@@ -209,7 +209,7 @@ SELECT controller_id AS &controllerNodeAgentVersion.*
 FROM controller_node
 WHERE controller_id = $controllerNodeAgentVersion.controller_id
 AND life_id = 0
-	`, controllerNodeAgentVersion{})
+`, controllerNodeAgentVersion{})
 	if err != nil {
 		return errors.Capture(err)
 	}

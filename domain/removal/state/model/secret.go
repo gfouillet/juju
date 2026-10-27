@@ -47,8 +47,8 @@ func (st *State) DeleteApplicationOwnedSecretContent(ctx context.Context, aUUID 
 	q := `
 WITH revisions AS (
     SELECT r.uuid
-    FROM   secret_application_owner o JOIN secret_revision r ON o.secret_id = r.secret_id
-    WHERE  application_uuid = $entityUUID.uuid
+    FROM secret_application_owner o JOIN secret_revision r ON o.secret_id = r.secret_id
+    WHERE application_uuid = $entityUUID.uuid
 )
 DELETE FROM secret_content WHERE revision_uuid IN (SELECT uuid FROM revisions)`
 
@@ -79,8 +79,8 @@ func (st *State) DeleteUnitOwnedSecretContent(ctx context.Context, uUUID string)
 	q := `
 WITH revisions AS (
     SELECT r.uuid
-    FROM   secret_unit_owner o JOIN secret_revision r ON o.secret_id = r.secret_id
-    WHERE  unit_uuid = $entityUUID.uuid
+    FROM secret_unit_owner o JOIN secret_revision r ON o.secret_id = r.secret_id
+    WHERE unit_uuid = $entityUUID.uuid
 )
 DELETE FROM secret_content WHERE revision_uuid IN (SELECT uuid FROM revisions)`
 
@@ -104,10 +104,10 @@ func (st *State) GetApplicationOwnedSecretRevisionRefs(ctx context.Context, aUUI
 
 	q := `
 SELECT vr.revision_id AS &entityUUID.uuid
-FROM   secret_application_owner o
+FROM secret_application_owner o
        JOIN secret_revision r ON o.secret_id = r.secret_id
 	   JOIN secret_value_ref vr ON r.uuid = vr.revision_uuid
-WHERE  o.application_uuid = $entityUUID.uuid`
+WHERE o.application_uuid = $entityUUID.uuid`
 	stmt, err := st.Prepare(q, appUUID)
 	if err != nil {
 		return nil, errors.Errorf("preparing revision ID query: %w", err)
@@ -124,10 +124,10 @@ func (st *State) GetUnitOwnedSecretRevisionRefs(ctx context.Context, uUUID strin
 
 	q := `
 SELECT vr.revision_id AS &entityUUID.uuid
-FROM   secret_unit_owner o
+FROM secret_unit_owner o
        JOIN secret_revision r ON o.secret_id = r.secret_id
 	   JOIN secret_value_ref vr ON r.uuid = vr.revision_uuid
-WHERE  o.unit_uuid = $entityUUID.uuid`
+WHERE o.unit_uuid = $entityUUID.uuid`
 	stmt, err := st.Prepare(q, appUUID)
 	if err != nil {
 		return nil, errors.Errorf("preparing revision ID query: %w", err)
@@ -175,8 +175,8 @@ func (st *State) DeleteApplicationOwnedSecrets(ctx context.Context, aUUID string
 	// records.
 	q := `
 SELECT (r.uuid, r.secret_id) AS (&secretRevision.*)
-FROM   secret_application_owner o JOIN secret_revision r ON o.secret_id = r.secret_id
-WHERE  application_uuid = $entityUUID.uuid`
+FROM secret_application_owner o JOIN secret_revision r ON o.secret_id = r.secret_id
+WHERE application_uuid = $entityUUID.uuid`
 	ownedStmt, err := st.Prepare(q, secretRevision{}, appUUID)
 	if err != nil {
 		return errors.Errorf("preparing secret deletion temp table: %w", err)
@@ -234,8 +234,8 @@ func (st *State) DeleteUnitOwnedSecrets(ctx context.Context, uUUID string) error
 	// unit_secret_owner records, we still need to delete the secret records.
 	q := `
 SELECT (r.uuid, r.secret_id) AS (&secretRevision.*)
-FROM   secret_unit_owner o JOIN secret_revision r ON o.secret_id = r.secret_id
-WHERE  unit_uuid = $entityUUID.uuid`
+FROM secret_unit_owner o JOIN secret_revision r ON o.secret_id = r.secret_id
+WHERE unit_uuid = $entityUUID.uuid`
 	ownedStmt, err := st.Prepare(q, secretRevision{}, unitUUID)
 	if err != nil {
 		return errors.Errorf("preparing secret deletion temp table: %w", err)
@@ -356,11 +356,11 @@ func (st *State) DeleteObsoleteUserSecretRevisions(ctx context.Context) ([]strin
 	q := `
 SELECT smo.secret_id AS &secretID.secret_id,
        sr.revision AS &secretExternalRevision.revision
-FROM      secret_model_owner smo
-JOIN      secret_metadata sm ON sm.secret_id = smo.secret_id
-JOIN      secret_revision sr ON sr.secret_id = smo.secret_id
+FROM secret_model_owner smo
+JOIN secret_metadata sm ON sm.secret_id = smo.secret_id
+JOIN secret_revision sr ON sr.secret_id = smo.secret_id
 LEFT JOIN secret_revision_obsolete sro ON sro.revision_uuid = sr.uuid
-WHERE     sm.auto_prune = true AND sro.obsolete = true`
+WHERE sm.auto_prune = true AND sro.obsolete = true`
 
 	stmt, err := st.Prepare(q, secretID{}, secretExternalRevision{})
 	if err != nil {
@@ -415,10 +415,10 @@ func (st *State) deleteSecretRevisions(
 
 	selectRevsStmt, err := st.Prepare(`
 SELECT uuid AS &entityUUID.uuid
-FROM   secret_revision r
-WHERE  r.secret_id = $secretID.secret_id
-AND    ($deleteFlags.has_revisions = 0 OR r.revision IN ($revisions[:]))
-  `, secretID{}, deleteFlags{}, revisions{}, entityUUID{})
+FROM secret_revision r
+WHERE r.secret_id = $secretID.secret_id
+AND ($deleteFlags.has_revisions = 0 OR r.revision IN ($revisions[:]))
+`, secretID{}, deleteFlags{}, revisions{}, entityUUID{})
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -449,9 +449,9 @@ AND    ($deleteFlags.has_revisions = 0 OR r.revision IN ($revisions[:]))
 		`DELETE FROM secret_revision_expire WHERE revision_uuid IN ($uuids[:])`,
 		`DELETE FROM secret_content WHERE revision_uuid IN ($uuids[:])`,
 		`
-INSERT OR IGNORE INTO secret_deleted_value_ref (revision_uuid,backend_uuid,revision_id)
-SELECT revision_uuid,backend_uuid,revision_id 
-FROM secret_value_ref 
+INSERT OR IGNORE INTO secret_deleted_value_ref (revision_uuid, backend_uuid, revision_id)
+SELECT revision_uuid, backend_uuid, revision_id
+FROM secret_value_ref
 WHERE revision_uuid IN ($uuids[:])`,
 		`DELETE FROM secret_value_ref WHERE revision_uuid IN ($uuids[:])`,
 		`DELETE FROM secret_revision_obsolete WHERE revision_uuid IN ($uuids[:])`,
@@ -532,8 +532,8 @@ func (st *State) GetUserSecretRevisionRefs(ctx context.Context, revs []string) (
 
 	q := `
 SELECT revision_id AS &entityUUID.uuid
-FROM   secret_deleted_value_ref
-WHERE  revision_uuid IN ($uuids[:])`
+FROM secret_deleted_value_ref
+WHERE revision_uuid IN ($uuids[:])`
 
 	stmt, err := st.Prepare(q, uuids{}, entityUUID{})
 	if err != nil {
@@ -567,7 +567,7 @@ func (st *State) DeleteUserSecretRevisionRef(ctx context.Context, revisionID str
 
 	stmt, err := st.Prepare(`
 DELETE FROM secret_deleted_value_ref
-WHERE  revision_id = $secretExternalRevision.revision_id
+WHERE revision_id = $secretExternalRevision.revision_id
 `, secretExternalRevision{})
 	if err != nil {
 		return errors.Errorf("preparing deleted value ref deletion query: %w", err)
@@ -585,8 +585,8 @@ WHERE  revision_id = $secretExternalRevision.revision_id
 func (st *State) deleteOwnedSecretReferences(ctx context.Context, tx *sqlair.TX, appUUID entityUUID) error {
 	getConsumedSecretsStmt, err := st.Prepare(`
 SELECT &secretID.*
-FROM   secret_reference
-WHERE  owner_application_uuid = $entityUUID.uuid
+FROM secret_reference
+WHERE owner_application_uuid = $entityUUID.uuid
 `, secretID{}, appUUID)
 	if err != nil {
 		return errors.Errorf("preparing consumed secrets query: %w", err)
@@ -594,7 +594,7 @@ WHERE  owner_application_uuid = $entityUUID.uuid
 
 	deleteSecretUnitConsumerStmt, err := st.Prepare(`
 DELETE FROM secret_unit_consumer
-WHERE  secret_id IN ($secretIDs[:])
+WHERE secret_id IN ($secretIDs[:])
 `, secretIDs{})
 	if err != nil {
 		return errors.Errorf("preparing delete secret unit consumers query: %w", err)
@@ -602,7 +602,7 @@ WHERE  secret_id IN ($secretIDs[:])
 
 	deleteSecretReferencesStmt, err := st.Prepare(`
 DELETE FROM secret_reference
-WHERE  secret_id IN ($secretIDs[:])
+WHERE secret_id IN ($secretIDs[:])
 `, secretIDs{})
 	if err != nil {
 		return errors.Errorf("preparing delete secret references query: %w", err)
@@ -610,7 +610,7 @@ WHERE  secret_id IN ($secretIDs[:])
 
 	deleteSecretStmt, err := st.Prepare(`
 DELETE FROM secret
-WHERE  id IN ($secretIDs[:])
+WHERE id IN ($secretIDs[:])
 `, secretIDs{})
 	if err != nil {
 		return errors.Errorf("preparing delete secrets query: %w", err)

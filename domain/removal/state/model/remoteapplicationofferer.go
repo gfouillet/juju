@@ -30,8 +30,8 @@ func (st *State) GetRemoteApplicationOffererUUIDByApplicationUUID(ctx context.Co
 	ident := entityUUID{UUID: appUUID}
 	stmt, err := st.Prepare(`
 SELECT aro.uuid AS &entityUUID.uuid
-FROM   application_remote_offerer AS aro
-WHERE  aro.application_uuid = $entityUUID.uuid
+FROM application_remote_offerer AS aro
+WHERE aro.application_uuid = $entityUUID.uuid
 `, ident)
 	if err != nil {
 		return "", errors.Errorf("preparing remote application offerer UUID query: %w", err)
@@ -63,8 +63,8 @@ func (st *State) RemoteApplicationOffererExists(ctx context.Context, rUUID strin
 	remoteAppOffererUUID := entityUUID{UUID: rUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   application_remote_offerer
-WHERE  uuid = $entityUUID.uuid`, remoteAppOffererUUID)
+FROM application_remote_offerer
+WHERE uuid = $entityUUID.uuid`, remoteAppOffererUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing remote application offerer exists query: %w", err)
 	}
@@ -101,9 +101,9 @@ func (st *State) EnsureRemoteApplicationOffererNotAliveCascade(
 	remoteAppOffererUUID := entityUUID{UUID: rUUID}
 	updateRemoteAppOffererStmt, err := st.Prepare(`
 UPDATE application_remote_offerer
-SET    life_id = 1
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 0`, remoteAppOffererUUID)
+SET life_id = 1
+WHERE uuid = $entityUUID.uuid
+AND life_id = 0`, remoteAppOffererUUID)
 	if err != nil {
 		return res, errors.Errorf("preparing remote application offerer life update: %w", err)
 	}
@@ -115,21 +115,21 @@ AND    life_id = 0`, remoteAppOffererUUID)
 	// Preventing any races.
 	selectRelationUUIDsStmt, err := st.Prepare(`
 SELECT r.uuid AS &entityUUID.uuid
-FROM   v_relation_endpoint AS re
-JOIN   relation AS r ON re.relation_uuid = r.uuid
-JOIN   application_remote_offerer AS aro ON re.application_uuid = aro.application_uuid
-WHERE  aro.uuid = $entityUUID.uuid
-AND    r.life_id = 0
-	`, remoteAppOffererUUID)
+FROM v_relation_endpoint AS re
+JOIN relation AS r ON re.relation_uuid = r.uuid
+JOIN application_remote_offerer AS aro ON re.application_uuid = aro.application_uuid
+WHERE aro.uuid = $entityUUID.uuid
+AND r.life_id = 0
+`, remoteAppOffererUUID)
 	if err != nil {
 		return res, errors.Errorf("preparing relation uuids query: %w", err)
 	}
 
 	updateRelationStmt, err := st.Prepare(`
 UPDATE relation
-SET    life_id = 1
-WHERE  uuid IN ($uuids[:])
-AND    life_id = 0`, uuids{})
+SET life_id = 1
+WHERE uuid IN ($uuids[:])
+AND life_id = 0`, uuids{})
 	if err != nil {
 		return res, errors.Errorf("preparing relation life update: %w", err)
 	}
@@ -239,8 +239,8 @@ WHERE aro.uuid = $entityUUID.uuid
 
 	selectSynthAppStmt, err := st.Prepare(`
 SELECT application_uuid AS &entityUUID.uuid
-FROM   application_remote_offerer
-WHERE  uuid = $entityUUID.uuid
+FROM application_remote_offerer
+WHERE uuid = $entityUUID.uuid
 `, remoteAppOffererUUID)
 	if err != nil {
 		return errors.Capture(err)
@@ -248,14 +248,14 @@ WHERE  uuid = $entityUUID.uuid
 
 	deleteRemoteApplicationOffererStatusStmt, err := st.Prepare(`
 DELETE FROM application_remote_offerer_status
-WHERE  application_remote_offerer_uuid = $entityUUID.uuid`, remoteAppOffererUUID)
+WHERE application_remote_offerer_uuid = $entityUUID.uuid`, remoteAppOffererUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
 
 	deleteRemoteApplicationOffererStmt, err := st.Prepare(`
 DELETE FROM application_remote_offerer
-WHERE  uuid = $entityUUID.uuid`, remoteAppOffererUUID)
+WHERE uuid = $entityUUID.uuid`, remoteAppOffererUUID)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -316,7 +316,7 @@ WHERE application_uuid = $entityUUID.uuid
 
 	deleteApplicationStmt, err := st.Prepare(`
 DELETE FROM application
-WHERE  uuid = $entityUUID.uuid`, entityUUID{})
+WHERE uuid = $entityUUID.uuid`, entityUUID{})
 	if err != nil {
 		return errors.Errorf("preparing application delete: %w", err)
 	}
@@ -354,10 +354,10 @@ WHERE  uuid = $entityUUID.uuid`, entityUUID{})
 func (st *State) deleteSynthUnitsForApplication(ctx context.Context, tx *sqlair.TX, synthApp entityUUID) error {
 	selectNetNodesStmt, err := st.Prepare(`
 SELECT DISTINCT nn.uuid AS &entityUUID.uuid
-FROM   net_node AS nn
-JOIN   unit AS u ON nn.uuid = u.net_node_uuid
-JOIN   application AS a ON u.application_uuid = a.uuid
-WHERE  a.uuid = $entityUUID.uuid
+FROM net_node AS nn
+JOIN unit AS u ON nn.uuid = u.net_node_uuid
+JOIN application AS a ON u.application_uuid = a.uuid
+WHERE a.uuid = $entityUUID.uuid
 `, synthApp)
 	if err != nil {
 		return errors.Capture(err)
@@ -419,8 +419,8 @@ WHERE application_uuid = $entityUUID.uuid`, synthApp)
 func (st *State) deleteSynthUnit(ctx context.Context, tx *sqlair.TX, synthUnit entityUUID) error {
 	getNetNodeUUIDStmt, err := st.Prepare(`
 SELECT net_node_uuid AS &entityUUID.uuid
-FROM   unit
-WHERE  uuid = $entityUUID.uuid`, entityUUID{})
+FROM unit
+WHERE uuid = $entityUUID.uuid`, entityUUID{})
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -478,8 +478,8 @@ func (st *State) getRemoteApplicationOffererLife(ctx context.Context, tx *sqlair
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   application_remote_offerer
-WHERE  uuid = $entityUUID.uuid;`, remoteApplicationOffererLife, remoteAppOffererUUID)
+FROM application_remote_offerer
+WHERE uuid = $entityUUID.uuid;`, remoteApplicationOffererLife, remoteAppOffererUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing remote application offerer life query: %w", err)
 	}

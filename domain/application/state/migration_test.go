@@ -204,9 +204,9 @@ func (s *migrationStateSuite) getApplicationStorageDirectives(
 	var rows []storageDirectiveRow
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		queryRows, err := tx.QueryContext(ctx, `
-SELECT   storage_name, storage_pool_uuid, size_mib, count
-FROM     application_storage_directive
-WHERE    application_uuid = ?
+SELECT storage_name, storage_pool_uuid, size_mib, count
+FROM application_storage_directive
+WHERE application_uuid = ?
 ORDER BY storage_name`, appID.String())
 		if err != nil {
 			return err
@@ -237,8 +237,8 @@ func (s *migrationStateSuite) assertDownloadProvenance(c *tc.C, appID coreapplic
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `
 SELECT v.provenance
-FROM   v_application_charm_download_info AS v
-WHERE  v.application_uuid=?
+FROM v_application_charm_download_info AS v
+WHERE v.application_uuid = ?
 `, appID).Scan(&obtainedProvenance)
 		if err != nil {
 			return err
@@ -377,7 +377,7 @@ func (s *unitStateSuite) TestInsertMigratingCAASUnitsWithWorkloadVersion(c *tc.C
 func (s *unitStateSuite) assertInsertMigratingUnits(c *tc.C, appID coreapplication.UUID) {
 	var unitName string
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT name FROM unit WHERE application_uuid=?", appID).Scan(&unitName)
+		err := tx.QueryRowContext(ctx, "SELECT name FROM unit WHERE application_uuid = ?", appID).Scan(&unitName)
 		if err != nil {
 			return err
 		}

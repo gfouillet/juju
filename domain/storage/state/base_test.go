@@ -73,7 +73,7 @@ func (s *baseSuite) newBlockStorageInstanceForCharmWithPool(
 	storageID := fmt.Sprintf("%s/%d", storageName, s.nextStorageSequenceNumber(c))
 
 	_, err = s.DB().Exec(`
-INSERT INTO storage_instance(uuid, charm_name, storage_name, storage_id,
+INSERT INTO storage_instance (uuid, charm_name, storage_name, storage_id,
                              life_id, requested_size_mib, storage_pool_uuid,
                              storage_kind_id)
 VALUES (?, ?, ?, ?, 0, 100, ?, 0)
@@ -160,7 +160,7 @@ func (s *baseSuite) newFilesystemStorageInstanceForCharmWithPool(
 	storageID := fmt.Sprintf("%s/%d", storageName, s.nextStorageSequenceNumber(c))
 
 	_, err = s.DB().Exec(`
-INSERT INTO storage_instance(uuid, charm_name, storage_name, storage_id,
+INSERT INTO storage_instance (uuid, charm_name, storage_name, storage_id,
                              life_id, requested_size_mib, storage_pool_uuid,
                              storage_kind_id)
 VALUES (?, ?, ?, ?, 0, 100, ?, 1)
@@ -289,14 +289,14 @@ func (s *baseSuite) newModelVolume(
 	_, err := s.DB().Exec(`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, ?)
-	`,
+`,
 		volumeUUID.String(), volumeID, domainstorage.ProvisionScopeModel)
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().Exec(`
 INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid)
 VALUES (?, ?)
-	`,
+`,
 		storageInstanceUUID.String(), volumeUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -313,14 +313,14 @@ func (s *baseSuite) newMachineVolume(
 	_, err := s.DB().Exec(`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, ?)
-	`,
+`,
 		volumeUUID.String(), volumeID, domainstorage.ProvisionScopeMachine)
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().Exec(`
 INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid)
 VALUES (?, ?)
-	`,
+`,
 		storageInstanceUUID.String(), volumeUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -372,14 +372,14 @@ func (s *baseSuite) newPersistentModelVolume(
 	_, err := s.DB().Exec(`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, persistent)
 VALUES (?, ?, 0, ?, 1)
-	`,
+`,
 		volumeUUID.String(), volumeID, domainstorage.ProvisionScopeModel)
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().Exec(`
 INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid)
 VALUES (?, ?)
-	`,
+`,
 		storageInstanceUUID.String(), volumeUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 

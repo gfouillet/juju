@@ -84,9 +84,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoWithUnits(c *tc.C) {
 	// Create machine with a net_node we can reuse for units.
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "3", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	// Add an app and unit.
@@ -110,9 +110,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoWithEndpointBindings(c *tc.C) {
 
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "4", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	defaultSpace := s.addSpace(c, "default")
@@ -179,9 +179,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoRootDiskStoragePool(c *tc.C) {
 
 	// Add constraint with root-disk-source.
 	consUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO "constraint" (uuid, root_disk_source) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO "constraint" (uuid, root_disk_source) VALUES (?, ?)`,
 		consUUID, "ebs-fast")
-	s.runQuery(c, `INSERT INTO machine_constraint (machine_uuid, constraint_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO machine_constraint (machine_uuid, constraint_uuid) VALUES (?, ?)`,
 		machineUUID, consUUID)
 
 	// Add storage pool.
@@ -218,9 +218,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoControllerMachine(c *tc.C) {
 
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "0", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	// Create a controller application with a unit on this machine.
@@ -255,9 +255,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoNotControllerModel(c *tc.C) {
 
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "0", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	spaceUUID := s.addSpace(c, "default")
@@ -321,9 +321,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoSubordinateUnit(c *tc.C) {
 
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "10", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	spaceUUID := s.addSpace(c, "default")
@@ -341,7 +341,7 @@ func (s *modelStateSuite) TestGetProvisioningInfoSubordinateUnit(c *tc.C) {
 	subUnitUUID := s.addUnit(c, "nrpe/0", subAppUUID, subCharmUUID, netNodeUUID)
 
 	// Link subordinate to principal.
-	s.runQuery(c, `INSERT INTO unit_principal (unit_uuid, principal_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO unit_principal (unit_uuid, principal_uuid) VALUES (?, ?)`,
 		subUnitUUID, principalUUID)
 
 	info, err := s.state.GetMachineProvisioningInfo(c.Context(), "10", false)
@@ -371,19 +371,19 @@ func (s *modelStateSuite) TestGetProvisioningInfoConstraintsAllFields(c *tc.C) {
 	s.addSpace(c, "myspace")
 
 	consUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO "constraint" (uuid, arch, cpu_cores, cpu_power, mem, root_disk, root_disk_source, instance_role, instance_type, virt_type, allocate_public_ip, image_id, ip_family) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO "constraint" (uuid, arch, cpu_cores, cpu_power, mem, root_disk, root_disk_source, instance_role, instance_type, virt_type, allocate_public_ip, image_id, ip_family) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		consUUID, "arm64", 8, 2000, 16384, 51200, "ebs", "worker", "m5.large", "hvm", 1, "ami-custom", "ipv4")
-	s.runQuery(c, `INSERT INTO machine_constraint (machine_uuid, constraint_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO machine_constraint (machine_uuid, constraint_uuid) VALUES (?, ?)`,
 		machineUUID, consUUID)
-	s.runQuery(c, `INSERT INTO constraint_tag (constraint_uuid, tag) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO constraint_tag (constraint_uuid, tag) VALUES (?, ?)`,
 		consUUID, "department=engineering")
-	s.runQuery(c, `INSERT INTO constraint_tag (constraint_uuid, tag) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO constraint_tag (constraint_uuid, tag) VALUES (?, ?)`,
 		consUUID, "team=platform")
-	s.runQuery(c, `INSERT INTO constraint_space (constraint_uuid, space, "exclude") VALUES (?,?,?)`,
+	s.runQuery(c, `INSERT INTO constraint_space (constraint_uuid, space, "exclude") VALUES (?, ?, ?)`,
 		consUUID, "myspace", false)
-	s.runQuery(c, `INSERT INTO constraint_zone (constraint_uuid, zone) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO constraint_zone (constraint_uuid, zone) VALUES (?, ?)`,
 		consUUID, "us-east-1a")
-	s.runQuery(c, `INSERT INTO constraint_zone (constraint_uuid, zone) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO constraint_zone (constraint_uuid, zone) VALUES (?, ?)`,
 		consUUID, "us-east-1b")
 
 	info, err := s.state.GetMachineProvisioningInfo(c.Context(), "11", false)
@@ -419,9 +419,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoEndpointNullSpace(c *tc.C) {
 
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "12", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	defaultSpace := s.addSpace(c, "default")
@@ -477,16 +477,16 @@ func (s *modelStateSuite) addProvisionedModelScopedVolume(
 	c *tc.C, netNodeUUID, poolUUID string, volumeID, providerID string,
 ) string {
 	volUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, provider_id, size_mib) VALUES (?,?,?,0,?,1024)`,
+	s.runQuery(c, `INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, provider_id, size_mib) VALUES (?, ?, ?, 0, ?, 1024)`,
 		volUUID, volumeID, life.Alive, providerID)
 
 	siUUID := uuid.MustNewUUID().String()
 	s.runQuery(c, `INSERT INTO storage_instance (uuid, storage_id, storage_kind_id, storage_pool_uuid, requested_size_mib, charm_name, storage_name, life_id) VALUES (?, ?, 0, ?, 1024, 'dummy-storage', 'single-blk', ?)`,
 		siUUID, volumeID+"-instance", poolUUID, life.Alive)
-	s.runQuery(c, `INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid) VALUES (?, ?)`,
 		siUUID, volUUID)
 
-	s.runQuery(c, `INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id, read_only) VALUES (?,?,?,?,0,0)`,
+	s.runQuery(c, `INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id, read_only) VALUES (?, ?, ?, ?, 0, 0)`,
 		uuid.MustNewUUID().String(), volUUID, netNodeUUID, life.Alive)
 
 	return volUUID
@@ -500,16 +500,16 @@ func (s *modelStateSuite) addUnprovisionedModelScopedVolumeAttachment(
 	c *tc.C, netNodeUUID, poolUUID string, volumeID string,
 ) string {
 	volUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, size_mib) VALUES (?,?,?,0,1024)`,
+	s.runQuery(c, `INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, size_mib) VALUES (?, ?, ?, 0, 1024)`,
 		volUUID, volumeID, life.Alive)
 
 	siUUID := uuid.MustNewUUID().String()
 	s.runQuery(c, `INSERT INTO storage_instance (uuid, storage_id, storage_kind_id, storage_pool_uuid, requested_size_mib, charm_name, storage_name, life_id) VALUES (?, ?, 0, ?, 1024, 'dummy-storage', 'single-blk', ?)`,
 		siUUID, volumeID+"-instance", poolUUID, life.Alive)
-	s.runQuery(c, `INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid) VALUES (?, ?)`,
 		siUUID, volUUID)
 
-	s.runQuery(c, `INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id, read_only) VALUES (?,?,?,?,0,0)`,
+	s.runQuery(c, `INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id, read_only) VALUES (?, ?, ?, ?, 0, 0)`,
 		uuid.MustNewUUID().String(), volUUID, netNodeUUID, life.Alive)
 
 	return volUUID
@@ -522,16 +522,16 @@ func (s *modelStateSuite) addProvisionedMachineScopedVolume(
 	c *tc.C, netNodeUUID, poolUUID string, volumeID, providerID string,
 ) string {
 	volUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, provider_id, size_mib) VALUES (?,?,?,1,?,1024)`,
+	s.runQuery(c, `INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, provider_id, size_mib) VALUES (?, ?, ?, 1, ?, 1024)`,
 		volUUID, volumeID, life.Alive, providerID)
 
 	siUUID := uuid.MustNewUUID().String()
 	s.runQuery(c, `INSERT INTO storage_instance (uuid, storage_id, storage_kind_id, storage_pool_uuid, requested_size_mib, charm_name, storage_name, life_id) VALUES (?, ?, 0, ?, 1024, 'dummy-storage', 'single-blk', ?)`,
 		siUUID, volumeID+"-instance", poolUUID, life.Alive)
-	s.runQuery(c, `INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid) VALUES (?, ?)`,
 		siUUID, volUUID)
 
-	s.runQuery(c, `INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id, read_only) VALUES (?,?,?,?,1,0)`,
+	s.runQuery(c, `INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id, read_only) VALUES (?, ?, ?, ?, 1, 0)`,
 		uuid.MustNewUUID().String(), volUUID, netNodeUUID, life.Alive)
 
 	return volUUID
@@ -547,19 +547,19 @@ func (s *modelStateSuite) addAttachedProvisionedModelScopedVolume(
 	c *tc.C, netNodeUUID, machineUUID, poolUUID string, volumeID, providerID string,
 ) string {
 	volUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, provider_id, size_mib) VALUES (?,?,?,0,?,1024)`,
+	s.runQuery(c, `INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, provider_id, size_mib) VALUES (?, ?, ?, 0, ?, 1024)`,
 		volUUID, volumeID, life.Alive, providerID)
 
 	siUUID := uuid.MustNewUUID().String()
 	s.runQuery(c, `INSERT INTO storage_instance (uuid, storage_id, storage_kind_id, storage_pool_uuid, requested_size_mib, charm_name, storage_name, life_id) VALUES (?, ?, 0, ?, 1024, 'dummy-storage', 'single-blk', ?)`,
 		siUUID, volumeID+"-instance", poolUUID, life.Alive)
-	s.runQuery(c, `INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid) VALUES (?, ?)`,
 		siUUID, volUUID)
 
 	deviceUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO block_device (uuid, machine_uuid, name) VALUES (?,?,?)`,
+	s.runQuery(c, `INSERT INTO block_device (uuid, machine_uuid, name) VALUES (?, ?, ?)`,
 		deviceUUID, machineUUID, "sda")
-	s.runQuery(c, `INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id, block_device_uuid, read_only) VALUES (?,?,?,?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO storage_volume_attachment (uuid, storage_volume_uuid, net_node_uuid, life_id, provision_scope_id, block_device_uuid, read_only) VALUES (?, ?, ?, ?, 0, ?, 0)`,
 		uuid.MustNewUUID().String(), volUUID, netNodeUUID, life.Alive, deviceUUID)
 
 	return volUUID
@@ -578,9 +578,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoWithProvisionedModelScopedVolum
 	s.addStoragePool(c, "ebs", "ebs", nil)
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "14", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	var poolUUID string
@@ -611,9 +611,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoWithProvisionedMachineScopedVol
 	s.addStoragePool(c, "ebs", "ebs", nil)
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "15", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	var poolUUID string
@@ -643,9 +643,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoExcludesUnprovisionedModelScope
 	s.addStoragePool(c, "ebs", "ebs", nil)
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "16", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	var poolUUID string
@@ -672,9 +672,9 @@ func (s *modelStateSuite) TestGetProvisioningInfoExcludesAttachedVolume(c *tc.C)
 	s.addStoragePool(c, "ebs", "ebs", nil)
 	netNodeUUID := s.addNetNode(c)
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, "17", life.Alive, netNodeUUID)
-	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?,0,?,0)`,
+	s.runQuery(c, `INSERT INTO machine_platform (machine_uuid, os_id, channel, architecture_id) VALUES (?, 0, ?, 0)`,
 		machineUUID, "22.04/stable")
 
 	var poolUUID string

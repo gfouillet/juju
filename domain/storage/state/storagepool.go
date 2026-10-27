@@ -25,8 +25,8 @@ func (st *State) checkStoragePoolExists(
 
 	checkQ := `
 SELECT &entityUUID.*
-FROM   storage_pool
-WHERE  uuid = $entityUUID.uuid
+FROM storage_pool
+WHERE uuid = $entityUUID.uuid
 `
 
 	checkStmt, err := st.Prepare(checkQ, inputUUID)

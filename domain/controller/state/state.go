@@ -41,7 +41,7 @@ func (st *State) GetControllerModelUUID(ctx context.Context) (model.UUID, error)
 	var uuid controllerModelUUID
 	stmt, err := st.Prepare(`
 SELECT &controllerModelUUID.model_uuid
-FROM   controller
+FROM controller
 `, uuid)
 	if err != nil {
 		return "", errors.Errorf("preparing select controller model uuid statement: %w", err)
@@ -190,7 +190,7 @@ func (st *State) GetControllerInfo(ctx context.Context) (domaincontroller.Contro
 func (st *State) getPublicDNSAddress(ctx context.Context, tx *sqlair.TX) (string, error) {
 	stmt, err := st.Prepare(`
 SELECT &configValue.*
-FROM   controller_config
+FROM controller_config
 WHERE  key = $configKey.key
 `, configValue{}, configKey{})
 	if err != nil {

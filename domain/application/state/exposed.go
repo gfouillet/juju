@@ -31,7 +31,7 @@ func (st *State) IsApplicationExposed(ctx context.Context, appID coreapplication
 SELECT COUNT(*) AS &countResult.count
 FROM v_application_exposed_endpoint
 WHERE application_uuid = $entityUUID.uuid;
-	`
+`
 	stmt, err := st.Prepare(query, countResult{}, ident)
 	if err != nil {
 		return false, errors.Errorf("preparing application exposed query: %w", err)
@@ -63,7 +63,7 @@ func (st *State) GetExposedEndpoints(ctx context.Context, appID coreapplication.
 
 	ident := entityUUID{UUID: appID.String()}
 	query := `
-SELECT 
+SELECT
     cr.name AS &endpointExposed.name,
     cidr AS &endpointExposed.cidr,
     e.space_uuid AS &endpointExposed.space_uuid
@@ -71,7 +71,7 @@ FROM v_application_exposed_endpoint e
 LEFT JOIN application_endpoint ae ON e.application_endpoint_uuid = ae.uuid
 LEFT JOIN charm_relation cr ON ae.charm_relation_uuid = cr.uuid
 WHERE e.application_uuid = $entityUUID.uuid;
-	`
+`
 	stmt, err := st.Prepare(query, endpointExposed{}, ident)
 	if err != nil {
 		return nil, errors.Errorf("preparing exposed endpoints query: %w", err)
@@ -110,7 +110,7 @@ FROM v_application_exposed_endpoint e
 JOIN application a ON a.uuid = e.application_uuid
 LEFT JOIN application_endpoint ae ON e.application_endpoint_uuid = ae.uuid
 LEFT JOIN charm_relation cr ON ae.charm_relation_uuid = cr.uuid;
-	`
+`
 	stmt, err := st.Prepare(query, applicationEndpointExposed{})
 	if err != nil {
 		return nil, errors.Errorf("preparing all exposed endpoints query: %w", err)
@@ -299,7 +299,7 @@ func (st *State) unsetExposedEndpointCIDRs(ctx context.Context, tx *sqlair.TX, a
 
 	unsetExposedCIDRQuery := `
 DELETE FROM application_exposed_endpoint_cidr
-WHERE application_uuid = $entityUUID.uuid 
+WHERE application_uuid = $entityUUID.uuid
 AND application_endpoint_uuid IN (
     SELECT uuid
     FROM v_application_endpoint_uuid
@@ -343,7 +343,7 @@ func (st *State) unsetExposedEndpointSpaces(ctx context.Context, tx *sqlair.TX, 
 
 	unsetExposedSpaceQuery := `
 DELETE FROM application_exposed_endpoint_space
-WHERE application_uuid = $entityUUID.uuid 
+WHERE application_uuid = $entityUUID.uuid
 AND application_endpoint_uuid IN (
 	SELECT uuid
 	FROM v_application_endpoint_uuid
@@ -390,12 +390,12 @@ func (st *State) upsertExposedSpaces(ctx context.Context, tx *sqlair.TX, appID c
 
 	if endpoint == network.WildcardEndpoint {
 		upsertExposedSpaceQuery = `
-INSERT INTO application_exposed_endpoint_space(application_uuid, space_uuid)
+INSERT INTO application_exposed_endpoint_space (application_uuid, space_uuid)
 VALUES ($setExposedSpace.application_uuid, $setExposedSpace.space_uuid)
 `
 	} else {
 		upsertExposedSpaceQuery = `
-INSERT INTO application_exposed_endpoint_space(application_uuid, application_endpoint_uuid, space_uuid)
+INSERT INTO application_exposed_endpoint_space (application_uuid, application_endpoint_uuid, space_uuid)
     SELECT $setExposedSpace.application_uuid, uuid, $setExposedSpace.space_uuid
     FROM v_application_endpoint_uuid
     WHERE name = $setExposedSpace.endpoint
@@ -435,12 +435,12 @@ func (st *State) upsertExposedCIDRs(ctx context.Context, tx *sqlair.TX, appID co
 	// endpoint NULL.
 	if endpoint == network.WildcardEndpoint {
 		upsertExposedCIDRQuery = `
-INSERT INTO application_exposed_endpoint_cidr(application_uuid, cidr)
+INSERT INTO application_exposed_endpoint_cidr (application_uuid, cidr)
 VALUES ($setExposedCIDR.application_uuid, $setExposedCIDR.cidr)
 `
 	} else {
 		upsertExposedCIDRQuery = `
-INSERT INTO application_exposed_endpoint_cidr(application_uuid, application_endpoint_uuid, cidr)
+INSERT INTO application_exposed_endpoint_cidr (application_uuid, application_endpoint_uuid, cidr)
     SELECT $setExposedCIDR.application_uuid, uuid, $setExposedCIDR.cidr
     FROM v_application_endpoint_uuid
     WHERE name = $setExposedCIDR.endpoint
@@ -482,9 +482,9 @@ func (st *State) EndpointsExist(ctx context.Context, appID coreapplication.UUID,
 SELECT COUNT(*) AS &countResult.count
 FROM application_endpoint
 LEFT JOIN charm_relation ON application_endpoint.charm_relation_uuid = charm_relation.uuid
-WHERE application_endpoint.application_uuid = $entityUUID.uuid 
+WHERE application_endpoint.application_uuid = $entityUUID.uuid
 AND charm_relation.name IN ($endpointNames[:]);
-	`
+`
 	applicationID := entityUUID{UUID: appID.String()}
 	stmt, err := st.Prepare(query, countResult{}, applicationID, eps)
 	if err != nil {
@@ -523,7 +523,7 @@ func (st *State) SpacesExist(ctx context.Context, spaceUUIDs set.Strings) error 
 SELECT COUNT(*) AS &countResult.count
 FROM space
 WHERE uuid IN ($spaces[:]);
-	`
+`
 	stmt, err := st.Prepare(query, countResult{}, sps)
 	if err != nil {
 		return errors.Errorf("preparing space exists query: %w", err)

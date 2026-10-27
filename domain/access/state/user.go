@@ -216,12 +216,12 @@ func (st *UserState) GetAllUsers(ctx context.Context, includeDisabled bool) ([]u
 	selectGetAllUsersStmt, err := st.Prepare(`
 SELECT (u.uuid, u.name, u.display_name, u.created_by_uuid, u.created_at, u.disabled, ull.last_login) AS (&dbUser.*),
        creator.name AS &dbUser.created_by_name
-FROM   v_user_auth u
+FROM v_user_auth u
        LEFT JOIN user AS creator
-       ON        u.created_by_uuid = creator.uuid
+       ON u.created_by_uuid = creator.uuid
        LEFT JOIN v_user_last_login AS ull
-       ON        u.uuid = ull.user_uuid
-WHERE  u.removed = false
+       ON u.uuid = ull.user_uuid
+WHERE u.removed = false
 `, dbUser{})
 	if err != nil {
 		return nil, errors.Errorf("preparing select getAllUsers query: %w", err)
@@ -273,10 +273,10 @@ SELECT (u.uuid,
        u.disabled,
        ull.last_login) AS (&dbUser.*),
        creator.name AS &dbUser.created_by_name
-FROM   v_user_auth u
+FROM v_user_auth u
        LEFT JOIN v_user_last_login ull ON u.uuid = ull.user_uuid
        LEFT JOIN user AS creator ON u.created_by_uuid = creator.uuid
-WHERE  u.uuid = $userUUID.uuid`
+WHERE u.uuid = $userUUID.uuid`
 
 		selectGetUserStmt, err := st.Prepare(getUserQuery, dbUser{}, userUUID{})
 		if err != nil {
@@ -351,11 +351,11 @@ SELECT (u.uuid,
        u.disabled,
        ull.last_login) AS (&dbUser.*),
        creator.name AS &dbUser.created_by_name
-FROM   v_user_auth u
+FROM v_user_auth u
        LEFT JOIN v_user_last_login ull ON u.uuid = ull.user_uuid
        LEFT JOIN user AS creator ON u.created_by_uuid = creator.uuid
-WHERE  u.name = $userName.name
-AND    u.removed = false`
+WHERE u.name = $userName.name
+AND u.removed = false`
 
 		selectGetUserByNameStmt, err := st.Prepare(getUserByNameQuery, dbUser{}, uName)
 		if err != nil {
@@ -423,12 +423,12 @@ SELECT (
        user_password.password_hash, user_password.password_salt
        ) AS (&dbUser.*),
        creator.name AS &dbUser.created_by_name
-FROM   v_user_auth AS user
+FROM v_user_auth AS user
        LEFT JOIN user AS creator ON user.created_by_uuid = creator.uuid
        LEFT JOIN user_password ON user.uuid = user_password.user_uuid
-WHERE  user.name = $userName.name
-AND    user.removed = false
-	`
+WHERE user.name = $userName.name
+AND user.removed = false
+`
 
 	selectGetUserByAuthStmt, err := st.Prepare(getUserWithAuthQuery, dbUser{}, uName)
 	if err != nil {
@@ -468,14 +468,14 @@ AND    user.removed = false
 func (st *UserState) checkPotentiallyOrhpanedModels(ctx context.Context, tx *sqlair.TX, uuid string) error {
 	checkAdminStmt, err := st.Prepare(`
 SELECT m.uuid AS &dbModelUUID.uuid
-FROM   model m
+FROM model m
 WHERE NOT EXISTS (
     SELECT 1
     FROM v_user_auth AS ua
     JOIN permission AS p ON ua.uuid = p.grant_to
     WHERE p.grant_on = m.uuid
       -- admin permission
-      AND p.access_type_id = 3 
+      AND p.access_type_id = 3
       AND ua.disabled = false
       AND ua.removed = false
       AND ua.uuid <> $userUUID.uuid
@@ -518,7 +518,7 @@ DELETE FROM model_authorized_keys
 WHERE user_public_ssh_key_id IN (SELECT id
 								 FROM user_public_ssh_key as upsk
 								 WHERE upsk.user_uuid = $userUUID.uuid)
-	`, userUUID{})
+`, userUUID{})
 	if err != nil {
 		return errors.Errorf("preparing delete model authorized keys query for user: %w", err)
 	}
@@ -723,7 +723,7 @@ func (st *UserState) EnableUserAuthentication(ctx context.Context, name user.Nam
 	q := `
 INSERT INTO user_authentication (user_uuid, disabled)
 VALUES ($userUUID.uuid, false)
-ON CONFLICT(user_uuid) DO
+ON CONFLICT (user_uuid) DO
 UPDATE SET disabled = false`
 
 	enableUserStmt, err := st.Prepare(q, userUUID{})
@@ -762,7 +762,7 @@ func (st *UserState) DisableUserAuthentication(ctx context.Context, name user.Na
 	q := `
 INSERT INTO user_authentication (user_uuid, disabled)
 VALUES ($userUUID.uuid, true)
-ON CONFLICT(user_uuid) DO
+ON CONFLICT (user_uuid) DO
 UPDATE SET disabled = true`
 
 	disableUserStmt, err := st.Prepare(q, userUUID{})
@@ -841,7 +841,7 @@ func AddUser(
 
 	addUserQuery := `
 INSERT INTO user (uuid, name, display_name, external, created_by_uuid, created_at)
-VALUES           ($dbUser.*)`
+VALUES ($dbUser.*)`
 
 	insertAddUserStmt, err := sqlair.Prepare(addUserQuery, user)
 	if err != nil {
@@ -933,7 +933,7 @@ func (st *UserState) UpdateLastModelLogin(ctx context.Context, name user.Name, m
 	insertModelLoginStmt, err := st.Prepare(`
 INSERT INTO model_last_login (model_uuid, user_uuid, time)
 VALUES ($dbModelLastLogin.*)
-ON CONFLICT(model_uuid, user_uuid) DO UPDATE SET
+ON CONFLICT (model_uuid, user_uuid) DO UPDATE SET
 	time = excluded.time`, dbModelLastLogin{})
 	if err != nil {
 		return errors.Errorf("preparing insert model login query: %w", err)
@@ -991,13 +991,13 @@ func (st *UserState) LastModelLogins(ctx context.Context, name user.Name, modelU
 	type dbModelUUIDs []string
 
 	getLastModelLoginTimes := `
-SELECT   model_uuid AS &dbModelLastLogin.model_uuid,
+SELECT model_uuid AS &dbModelLastLogin.model_uuid,
          time AS &dbModelLastLogin.time
-FROM     model_last_login
-WHERE    model_uuid IN ($dbModelUUIDs[:])
-AND      user_uuid = $dbModelLastLogin.user_uuid
+FROM model_last_login
+WHERE model_uuid IN ($dbModelUUIDs[:])
+AND user_uuid = $dbModelLastLogin.user_uuid
 ORDER BY time DESC;
-	`
+`
 	getLastModelLoginTimesStmt, err := st.Prepare(getLastModelLoginTimes, dbModelLastLogin{}, dbModelUUIDs{})
 	if err != nil {
 		return nil, errors.Errorf("preparing select getLastModelLoginTimes query: %w", err)
@@ -1054,11 +1054,11 @@ func ensureUserAuthentication(
 	defineUserAuthenticationQuery := `
 INSERT INTO user_authentication (user_uuid, disabled)
     SELECT uuid, $userNameAndDisabled.disabled
-    FROM   user
-    WHERE  name = $userNameAndDisabled.name AND removed = false
-ON CONFLICT(user_uuid) DO
+    FROM user
+    WHERE name = $userNameAndDisabled.name AND removed = false
+ON CONFLICT (user_uuid) DO
 UPDATE SET user_uuid = excluded.user_uuid
-WHERE      disabled = false`
+WHERE disabled = false`
 
 	insertDefineUserAuthenticationStmt, err := sqlair.Prepare(defineUserAuthenticationQuery, userNameAndDisabled{})
 	if err != nil {
@@ -1098,10 +1098,10 @@ func setPasswordHash(ctx context.Context, tx *sqlair.TX, name user.Name, passwor
 	setPasswordHashQuery := `
 INSERT INTO user_password (user_uuid, password_hash, password_salt)
     SELECT uuid, $userNameAndPassword.password_hash, $userNameAndPassword.password_salt
-    FROM   user
-    WHERE  name = $userNameAndPassword.name
-    AND    removed = false
-ON CONFLICT(user_uuid) DO UPDATE SET password_hash = excluded.password_hash, password_salt = excluded.password_salt`
+    FROM user
+    WHERE name = $userNameAndPassword.name
+    AND removed = false
+ON CONFLICT (user_uuid) DO UPDATE SET password_hash = excluded.password_hash, password_salt = excluded.password_salt`
 
 	insertSetPasswordHashStmt, err := sqlair.Prepare(setPasswordHashQuery, userNameAndPassword{})
 	if err != nil {
@@ -1133,10 +1133,10 @@ func setActivationKey(ctx context.Context, tx *sqlair.TX, name user.Name, activa
 	setActivationKeyQuery := `
 INSERT INTO user_activation_key (user_uuid, activation_key)
     SELECT uuid, $userNameAndActivationKey.activation_key
-    FROM   user
-    WHERE  name = $userNameAndActivationKey.name
-    AND    removed = false
-ON CONFLICT(user_uuid) DO UPDATE SET activation_key = excluded.activation_key`
+    FROM user
+    WHERE name = $userNameAndActivationKey.name
+    AND removed = false
+ON CONFLICT (user_uuid) DO UPDATE SET activation_key = excluded.activation_key`
 
 	insertSetActivationKeyStmt, err := sqlair.Prepare(setActivationKeyQuery, userNameAndActivationKey{})
 	if err != nil {

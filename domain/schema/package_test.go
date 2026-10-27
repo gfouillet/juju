@@ -127,9 +127,9 @@ func (s *schemaBaseSuite) assertChangeEvent(
 
 	row := s.DB().QueryRow(`
 SELECT COUNT(*)
-FROM   change_log
-WHERE  namespace_id = ?
-AND    changed = ?`, nsID, changed)
+FROM change_log
+WHERE namespace_id = ?
+AND changed = ?`, nsID, changed)
 	var count int
 	err := row.Scan(&count)
 	c.Assert(err, tc.ErrorIsNil)

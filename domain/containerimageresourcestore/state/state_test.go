@@ -162,7 +162,7 @@ func (s *containerImageMetadataSuite) getContainerImageMetadata(c *tc.C, storage
 	var retrievedRegistryPath, retrievedUsername, retrievedPassword string
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
-SELECT registry_path, username, password 
+SELECT registry_path, username, password
 FROM resource_container_image_metadata_store
 WHERE storage_key = ?`, id).Scan(&retrievedRegistryPath, &retrievedUsername, &retrievedPassword)
 	})

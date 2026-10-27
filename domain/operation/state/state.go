@@ -71,9 +71,9 @@ func (st *State) GetLatestTaskLogsByUUID(
 	task := taskLogEntry{TaskUUID: taskUUID}
 	query := `
 SELECT * AS &taskLogEntry.*
-FROM   operation_task_log
-WHERE  task_uuid = $taskLogEntry.task_uuid
-AND    created_at > $pagination.cursor
+FROM operation_task_log
+WHERE task_uuid = $taskLogEntry.task_uuid
+AND created_at > $pagination.cursor
 ORDER BY created_at ASC`
 	stmt, err := st.Prepare(query, paging, task)
 	if err != nil {
@@ -127,8 +127,8 @@ func (st *State) GetTaskUUIDByID(ctx context.Context, taskID string) (string, er
 	task := taskIdent{ID: taskID}
 	query := `
 SELECT uuid AS &uuid.uuid
-FROM   operation_task
-WHERE  task_id = $taskIdent.task_id`
+FROM operation_task
+WHERE task_id = $taskIdent.task_id`
 	stmt, err := st.Prepare(query, uuid{}, task)
 	if err != nil {
 		return "", errors.Errorf("preparing statement: %w", err)
@@ -170,7 +170,7 @@ func (st *State) count(ctx context.Context, tx *sqlair.TX, table string) (int, e
 	}
 	stmt, err := st.Prepare(fmt.Sprintf(`
 SELECT COUNT(*) as &result.count
-FROM   %q`, table),
+FROM %q`, table),
 		result{})
 	if err != nil {
 		return 0, errors.Capture(err)
@@ -270,8 +270,8 @@ func (st *State) getTaskUUIDsByOperationUUIDs(ctx context.Context, tx *sqlair.TX
 
 	stmt, err := st.Prepare(`
 SELECT &task.uuid
-FROM   operation_task
-WHERE  operation_uuid IN ($uuids[:])
+FROM operation_task
+WHERE operation_uuid IN ($uuids[:])
 ORDER BY task_id`, toGet, task{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -291,7 +291,7 @@ func (st *State) removeByUUIDs(ctx context.Context, tx *sqlair.TX, table, field 
 	uuidToDelete := uuids(toDelete)
 	stmt, err := st.Prepare(fmt.Sprintf(`
 DELETE FROM %q
-WHERE  %q IN ($uuids[:])`, table, field), uuidToDelete)
+WHERE %q IN ($uuids[:])`, table, field), uuidToDelete)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -307,9 +307,9 @@ func (st *State) GetUnitUUIDByName(ctx context.Context, unitName coreunit.Name) 
 
 	unitIdent := nameArg{Name: unitName.String()}
 	query := `
-SELECT uuid AS &uuid.uuid 
-FROM   unit 
-WHERE  name = $nameArg.name`
+SELECT uuid AS &uuid.uuid
+FROM unit
+WHERE name = $nameArg.name`
 	stmt, err := st.Prepare(query, uuid{}, unitIdent)
 	if err != nil {
 		return "", errors.Errorf("preparing statement: %w", err)
@@ -341,9 +341,9 @@ func (st *State) GetMachineUUIDByName(ctx context.Context, machineName coremachi
 
 	machineIdent := nameArg{Name: machineName.String()}
 	query := `
-SELECT uuid AS &uuid.uuid 
-FROM   machine 
-WHERE  name = $nameArg.name`
+SELECT uuid AS &uuid.uuid
+FROM machine
+WHERE name = $nameArg.name`
 	stmt, err := st.Prepare(query, uuid{}, machineIdent)
 	if err != nil {
 		return "", errors.Errorf("preparing statement: %w", err)
@@ -372,12 +372,12 @@ WHERE  name = $nameArg.name`
 func (st *State) InitialWatchStatementUnitTask() (string, string) {
 	return "custom_operation_task_status_pending_or_aborting", `
 SELECT t.task_id
-FROM   operation_task AS t
-JOIN   operation_unit_task AS ut ON t.uuid = ut.task_uuid
-JOIN   operation_task_status AS ts ON t.uuid = ts.task_uuid
-JOIN   operation_task_status_value AS sv ON ts.status_id = sv.id
-WHERE  ut.unit_uuid = ?
-AND    (
+FROM operation_task AS t
+JOIN operation_unit_task AS ut ON t.uuid = ut.task_uuid
+JOIN operation_task_status AS ts ON t.uuid = ts.task_uuid
+JOIN operation_task_status_value AS sv ON ts.status_id = sv.id
+WHERE ut.unit_uuid = ?
+AND (
        sv.status = 'pending'
        OR
        sv.status = 'aborting'
@@ -391,12 +391,12 @@ ORDER BY t.task_id`
 func (st *State) InitialWatchStatementMachineTask() (string, string) {
 	return "custom_operation_task_status_pending", `
 SELECT t.task_id
-FROM   operation_task AS t
-JOIN   operation_machine_task AS mt ON t.uuid = mt.task_uuid
-JOIN   operation_task_status AS ts ON t.uuid = ts.task_uuid
-JOIN   operation_task_status_value AS sv ON ts.status_id = sv.id
-WHERE  mt.machine_uuid = ?
-AND    sv.status = 'pending'
+FROM operation_task AS t
+JOIN operation_machine_task AS mt ON t.uuid = mt.task_uuid
+JOIN operation_task_status AS ts ON t.uuid = ts.task_uuid
+JOIN operation_task_status_value AS sv ON ts.status_id = sv.id
+WHERE mt.machine_uuid = ?
+AND sv.status = 'pending'
 ORDER BY t.task_id`
 }
 
@@ -418,10 +418,10 @@ func (st *State) FilterTaskUUIDsForUnit(ctx context.Context, tUUIDs []string, un
 	unitIdent := uuid{UUID: unitUUID}
 	query := `
 SELECT t.task_id AS &taskIdent.task_id
-FROM   operation_task AS t
-JOIN   operation_unit_task AS ut ON t.uuid = ut.task_uuid
-WHERE  t.uuid IN ($taskUUIDs[:])
-AND    ut.unit_uuid = $uuid.uuid`
+FROM operation_task AS t
+JOIN operation_unit_task AS ut ON t.uuid = ut.task_uuid
+WHERE t.uuid IN ($taskUUIDs[:])
+AND ut.unit_uuid = $uuid.uuid`
 	stmt, err := st.Prepare(query, taskIdent{}, taskInputUUIDs, unitIdent)
 	if err != nil {
 		return nil, errors.Errorf("preparing statement: %w", err)
@@ -464,10 +464,10 @@ func (st *State) FilterTaskUUIDsForMachine(ctx context.Context, tUUIDs []string,
 	machineIdent := uuid{UUID: machineUUID}
 	query := `
 SELECT t.task_id AS &taskIdent.task_id
-FROM   operation_task AS t
-JOIN   operation_machine_task AS mt ON t.uuid = mt.task_uuid
-WHERE  t.uuid IN ($taskUUIDs[:])
-AND    mt.machine_uuid = $uuid.uuid`
+FROM operation_task AS t
+JOIN operation_machine_task AS mt ON t.uuid = mt.task_uuid
+WHERE t.uuid IN ($taskUUIDs[:])
+AND mt.machine_uuid = $uuid.uuid`
 	stmt, err := st.Prepare(query, taskIdent{}, taskInputUUIDs, machineIdent)
 	if err != nil {
 		return nil, errors.Errorf("preparing statement: %w", err)
@@ -505,8 +505,8 @@ func (st *State) deleteStoreEntryByUUIDs(ctx context.Context, toDeleteUUIDs []st
 
 	selectPathsStmt, err := st.Prepare(`
 SELECT &path.path
-FROM   object_store_metadata_path
-WHERE  metadata_uuid IN ($uuids[:])`, path{}, toDelete)
+FROM object_store_metadata_path
+WHERE metadata_uuid IN ($uuids[:])`, path{}, toDelete)
 	if err != nil {
 		return nil, errors.Capture(err)
 	}

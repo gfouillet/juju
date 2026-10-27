@@ -40,7 +40,7 @@ func (s *watchDyingModelSuite) SetUpTest(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, "test", "iaas", "prod", "test-model", "ec2")
-		`, modelUUID.String(), internaltesting.ControllerTag.Id())
+`, modelUUID.String(), internaltesting.ControllerTag.Id())
 		if err != nil {
 			return err
 		}
@@ -48,7 +48,7 @@ VALUES (?, ?, "test", "iaas", "prod", "test-model", "ec2")
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO model_life (model_uuid, life_id)
 VALUES (?, 0);
-		`, modelUUID.String())
+`, modelUUID.String())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

@@ -50,7 +50,7 @@ func (st *State) Put(ctx context.Context, name string, data []byte) error {
 	q, err := st.Prepare(`
 INSERT INTO autocert_cache (*)
 VALUES ($dbAutocert.*)
-  ON CONFLICT(name) DO UPDATE SET data=excluded.data`, autocert)
+  ON CONFLICT (name) DO UPDATE SET data = excluded.data`, autocert)
 	if err != nil {
 		return errors.Errorf("preparing insert autocert into cache: %w", err)
 	}
@@ -75,8 +75,8 @@ func (st *State) Get(ctx context.Context, name string) ([]byte, error) {
 
 	q := `
 SELECT (name, data) AS (&dbAutocert.*)
-FROM   autocert_cache 
-WHERE  name = $dbAutocert.name`
+FROM autocert_cache
+WHERE name = $dbAutocert.name`
 	s, err := st.Prepare(q, autocert)
 	if err != nil {
 		return nil, errors.Errorf("preparing autocert select statement: %w", err)
@@ -107,8 +107,8 @@ func (st *State) Delete(ctx context.Context, name string) error {
 
 	q := `
 SELECT (name) AS (&dbAutocert.*)
-FROM   autocert_cache 
-WHERE  name = $dbAutocert.name`
+FROM autocert_cache
+WHERE name = $dbAutocert.name`
 	s, err := st.Prepare(q, autocert)
 	if err != nil {
 		return errors.Errorf("preparing autocert select statement: %w", err)

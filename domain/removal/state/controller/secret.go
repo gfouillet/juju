@@ -110,7 +110,7 @@ func (st *State) removeSecretBackendReferenceForRevisions(ctx context.Context, t
 	input := secretRevisionIDs(revisionIDs)
 	stmt, err := st.Prepare(`
 DELETE FROM secret_backend_reference
-WHERE  secret_revision_uuid IN ($secretRevisionIDs[:])`, input)
+WHERE secret_revision_uuid IN ($secretRevisionIDs[:])`, input)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -132,8 +132,8 @@ func (st *State) getModelSecretBackendDetails(
 
 	stmt, err := st.Prepare(`
 SELECT &modelSecretBackend.*
-FROM   v_model_secret_backend
-WHERE  uuid = $entityUUID.uuid`, input, backend)
+FROM v_model_secret_backend
+WHERE uuid = $entityUUID.uuid`, input, backend)
 	if err != nil {
 		return backend, errors.Capture(err)
 	}
@@ -154,9 +154,9 @@ func (st *State) getK8sSecretBackendForModel(
 
 	q := `
 SELECT
-    vc.uuid       AS &secretBackendForK8sModelRow.cloud_uuid,
-    vcca.uuid     AS &secretBackendForK8sModelRow.cloud_credential_uuid,
-    vm.name       AS &modelDetails.name,
+    vc.uuid AS &secretBackendForK8sModelRow.cloud_uuid,
+    vcca.uuid AS &secretBackendForK8sModelRow.cloud_credential_uuid,
+    vm.name AS &modelDetails.name,
     vm.model_type AS &modelDetails.model_type,
     (vc.uuid,
     vc.name,

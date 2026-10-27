@@ -147,7 +147,7 @@ func (s *watcherSuite) TestWatchDraining(c *tc.C) {
 			}
 
 			_, err := tx.ExecContext(ctx, `
-INSERT INTO object_store_backend (uuid, life_id, type_id, updated_at) 
+INSERT INTO object_store_backend (uuid, life_id, type_id, updated_at)
 VALUES ('foo', 0, 1, CURRENT_TIMESTAMP)
 `)
 			return err

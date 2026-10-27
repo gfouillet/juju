@@ -227,7 +227,7 @@ func (st *State) getUnitUUID(ctx context.Context, tx *sqlair.TX, name string) (c
 	selectUnitUUIDStmt, err := st.Prepare(`
 SELECT &unitName.uuid
 FROM unit
-WHERE name=$unitName.name`, u)
+WHERE name = $unitName.name`, u)
 	if err != nil {
 		return "", errors.Capture(err)
 	}

@@ -58,8 +58,8 @@ func (st *State) AddSpace(
 	sp := space{UUID: uuid, Name: name}
 	selectSpaceByNameStmt, err := st.Prepare(`
 SELECT &space.uuid
-FROM   space
-WHERE  name = $space.name`, sp)
+FROM space
+WHERE name = $space.name`, sp)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -88,15 +88,15 @@ VALUES ($providerSpace.*)`, providerSp)
 		cidrInput = cidrList
 		selectCIDRsStmt, err = st.Prepare(`
 SELECT DISTINCT &subnet.cidr
-FROM   subnet
-WHERE  cidr IN ($cidrs[:])`, subnet{}, cidrInput)
+FROM subnet
+WHERE cidr IN ($cidrs[:])`, subnet{}, cidrInput)
 		if err != nil {
 			return errors.Capture(err)
 		}
 		updateCIDRsStmt, err = st.Prepare(`
 UPDATE subnet
-SET    space_uuid = $space.uuid
-WHERE  cidr IN ($cidrs[:])`, sp, cidrInput)
+SET space_uuid = $space.uuid
+WHERE cidr IN ($cidrs[:])`, sp, cidrInput)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -170,8 +170,8 @@ func (st *State) GetSpace(
 	sp := space{UUID: uuid}
 	spacesStmt, err := st.Prepare(`
 SELECT &spaceSubnetRow.*
-FROM   v_space_subnet
-WHERE  uuid = $space.uuid;`, spaceSubnetRow{}, sp)
+FROM v_space_subnet
+WHERE uuid = $space.uuid;`, spaceSubnetRow{}, sp)
 	if err != nil {
 		return nil, errors.Errorf("preparing select space statement: %w", err)
 	}
@@ -210,8 +210,8 @@ func (st *State) GetSpaceByName(
 	// Append the space.name condition to the query.
 	q := `
 SELECT &spaceSubnetRow.*
-FROM   v_space_subnet
-WHERE  name = $space.name;`
+FROM v_space_subnet
+WHERE name = $space.name;`
 
 	s, err := st.Prepare(q, spaceSubnetRow{}, sp)
 	if err != nil {
@@ -247,7 +247,7 @@ func (st *State) GetAllSpaces(
 
 	s, err := st.Prepare(`
 SELECT &spaceSubnetRow.*
-FROM   v_space_subnet
+FROM v_space_subnet
 `, spaceSubnetRow{})
 	if err != nil {
 		return nil, errors.Errorf("preparing select all spaces statement: %w", err)
@@ -287,8 +287,8 @@ func (st *State) UpdateSpace(
 	}
 	stmt, err := st.Prepare(`
 UPDATE space
-SET    name = $space.name
-WHERE  uuid = $space.uuid;`, sp)
+SET name = $space.name
+WHERE uuid = $space.uuid;`, sp)
 	if err != nil {
 		return errors.Errorf("preparing update space statement: %w", err)
 	}

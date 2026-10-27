@@ -93,7 +93,7 @@ func (st *State) DeleteJob(ctx context.Context, jUUID string) error {
 
 	jobUUID := entityUUID{UUID: jUUID}
 
-	stmt, err := st.Prepare("DELETE FROM removal WHERE uuid=$entityUUID.uuid", jobUUID)
+	stmt, err := st.Prepare("DELETE FROM removal WHERE uuid = $entityUUID.uuid", jobUUID)
 	if err != nil {
 		return errors.Errorf("preparing job deletion: %w", err)
 	}

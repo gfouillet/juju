@@ -181,7 +181,7 @@ FROM cloud_type ct
 INNER JOIN cloud c
 ON c.cloud_type_id = ct.id
 WHERE c.name = $dbName.name
-		`, dbCloudType{}, n)
+`, dbCloudType{}, n)
 		if err != nil {
 			return "", errors.Capture(err)
 		}
@@ -301,7 +301,7 @@ func markModelAsImporting(
 	stmt, err := preparer.Prepare(`
 INSERT INTO model_migration_import (uuid, model_uuid, source_migration_uuid, updated_at)
 VALUES ($dbTargetModelMigration.uuid, $dbTargetModelMigration.model_uuid, $dbTargetModelMigration.source_migration_uuid, $dbTargetModelMigration.updated_at)
-	`, migrationRecord)
+`, migrationRecord)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -407,9 +407,9 @@ func (s *State) GetModelByName(
 	var model dbModel
 	stmt, err := s.Prepare(`
 SELECT &dbModel.*
-FROM   v_model
-WHERE  name = $dbNames.name
-AND    qualifier = $dbNames.qualifier
+FROM v_model
+WHERE name = $dbNames.name
+AND qualifier = $dbNames.qualifier
 `, model, dbNames)
 	if err != nil {
 		return coremodel.Model{}, errors.Capture(err)
@@ -494,7 +494,7 @@ func (s *State) GetControllerModelUUID(ctx context.Context) (coremodel.UUID, err
 	controllerModelUUID := dbModelUUIDRef{}
 	stmt, err := s.Prepare(`
 SELECT &dbModelUUIDRef.model_uuid
-FROM   controller
+FROM controller
 `, controllerModelUUID)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -530,7 +530,7 @@ func (s *State) GetControllerModel(ctx context.Context) (coremodel.Model, error)
 	controllerModelUUID := dbModelUUIDRef{}
 	stmt, err := s.Prepare(`
 SELECT &dbModelUUIDRef.model_uuid
-FROM   controller
+FROM controller
 `, controllerModelUUID)
 	if err != nil {
 		return coremodel.Model{}, errors.Capture(err)
@@ -708,8 +708,8 @@ func getControllerModelLife(
 ) (life.Life, error) {
 	query := `
 SELECT &modelLife.*
-FROM   controller AS c
-JOIN   model AS m ON c.model_uuid = m.uuid`
+FROM controller AS c
+JOIN model AS m ON c.model_uuid = m.uuid`
 	stmt, err := preparer.Prepare(query, modelLife{})
 	if err != nil {
 		return -1, errors.Capture(err)
@@ -844,7 +844,7 @@ SELECT &dbUserUUID.uuid
 FROM user
 WHERE uuid = $dbUserUUID.uuid
 AND removed = false
-	`, creatorUUID)
+`, creatorUUID)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -878,7 +878,7 @@ INSERT INTO model (uuid,
             life_id,
             name,
             qualifier)
-SELECT  $dbInitialModel.uuid,
+SELECT $dbInitialModel.uuid,
         $dbInitialModel.cloud_uuid,
         model_type.id,
         $dbInitialModel.life_id,
@@ -886,7 +886,7 @@ SELECT  $dbInitialModel.uuid,
         $dbInitialModel.qualifier
 FROM model_type
 WHERE model_type.type = $dbInitialModel.model_type
-		`, model)
+`, model)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -1036,7 +1036,7 @@ func GetActivator() ActivatorFunc {
 SELECT &dbModelActivated.*
 FROM model
 WHERE uuid = $dbUUID.uuid
-		`, dbModelActivated{}, mUUID)
+`, dbModelActivated{}, mUUID)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -1045,7 +1045,7 @@ WHERE uuid = $dbUUID.uuid
 UPDATE model
 SET activated = TRUE
 WHERE uuid = $dbUUID.uuid
-		`, mUUID)
+`, mUUID)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -1243,11 +1243,11 @@ func (s *State) ListModelUUIDsForUser(
 	userUUIDVal := dbUUID{UUID: userUUID.String()}
 	stmt, err := s.Prepare(`
 SELECT &dbUUID.*
-FROM   v_model
-WHERE  uuid IN (SELECT grant_on
-                FROM   permission
-                WHERE  grant_to = $dbUUID.uuid
-                AND    access_type_id IN (0, 1, 3))
+FROM v_model
+WHERE uuid IN (SELECT grant_on
+                FROM permission
+                WHERE grant_to = $dbUUID.uuid
+                AND access_type_id IN (0, 1, 3))
 `,
 		userUUIDVal)
 	if err != nil {
@@ -1300,11 +1300,11 @@ func (s *State) ListModelsForUser(
 
 	modelStmt, err := s.Prepare(`
 SELECT &dbModel.*
-FROM   v_model
-WHERE  uuid IN (SELECT grant_on
-                FROM   permission
-                WHERE  grant_to = $dbUUID.uuid
-                AND    access_type_id IN (0, 1, 3))
+FROM v_model
+WHERE uuid IN (SELECT grant_on
+                FROM permission
+                WHERE grant_to = $dbUUID.uuid
+                AND access_type_id IN (0, 1, 3))
 `, dbModel{}, uUUID)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1350,12 +1350,12 @@ func (st *State) GetModelUsers(ctx context.Context, modelUUID coremodel.UUID) ([
 		return nil, errors.Capture(err)
 	}
 	q := `
-SELECT    (u.name, u.display_name, mll.time, p.access_type) AS (&dbModelUserInfo.*)
-FROM      v_user_auth u
-JOIN      v_permission p ON u.uuid = p.grant_to AND p.grant_on = $dbModelUUIDRef.model_uuid
+SELECT (u.name, u.display_name, mll.time, p.access_type) AS (&dbModelUserInfo.*)
+FROM v_user_auth u
+JOIN v_permission p ON u.uuid = p.grant_to AND p.grant_on = $dbModelUUIDRef.model_uuid
 LEFT JOIN model_last_login mll ON mll.user_uuid = u.uuid AND mll.model_uuid = p.grant_on
-WHERE     u.disabled = false
-AND       u.removed = false
+WHERE u.disabled = false
+AND u.removed = false
 `
 
 	uuid := dbModelUUIDRef{ModelUUID: modelUUID.String()}
@@ -1412,9 +1412,9 @@ func (s *State) GetModelSummary(
 SELECT (ms.cloud_credential_invalid,
         ms.cloud_credential_invalid_reason, ms.migrating,
         m.life) AS (&dbModelSummary.*)
-FROM   v_model_state ms
-JOIN   v_model m ON m.uuid = ms.uuid
-WHERE  ms.uuid = $dbModelUUID.uuid
+FROM v_model_state ms
+JOIN v_model m ON m.uuid = ms.uuid
+WHERE ms.uuid = $dbModelUUID.uuid
 `
 	modelUUIDVal := dbModelUUID{UUID: modelUUID.String()}
 	stmt, err := s.Prepare(q, dbModelSummary{}, modelUUIDVal)
@@ -1469,9 +1469,9 @@ func (s *State) checkUserExists(
 ) (bool, error) {
 	userExistsQ := `
 SELECT &dbUserUUID.*
-FROM   v_user_auth
-WHERE  uuid = $dbUserUUID.uuid
-AND    removed = false
+FROM v_user_auth
+WHERE uuid = $dbUserUUID.uuid
+AND removed = false
 `
 	userUUIDVal := dbUserUUID{UUID: userUUID.String()}
 	userExistsStmt, err := s.Prepare(userExistsQ, userUUIDVal)
@@ -1510,17 +1510,17 @@ func (s *State) GetUserModelSummary(
 	}
 
 	q := `
-SELECT    (p.access_type, mll.time, ms.cloud_credential_invalid,
+SELECT (p.access_type, mll.time, ms.cloud_credential_invalid,
            ms.cloud_credential_invalid_reason, ms.migrating,
            m.life) AS (&dbUserModelSummary.*)
-FROM      v_user_auth u
-JOIN      v_permission p ON p.grant_to = u.uuid
-JOIN      v_model_state ms ON ms.uuid = p.grant_on
-JOIN      v_model m ON m.uuid = ms.uuid
+FROM v_user_auth u
+JOIN v_permission p ON p.grant_to = u.uuid
+JOIN v_model_state ms ON ms.uuid = p.grant_on
+JOIN v_model m ON m.uuid = ms.uuid
 LEFT JOIN model_last_login mll ON ms.uuid = mll.model_uuid AND mll.user_uuid = u.uuid
-WHERE     u.removed = false
-AND       u.uuid = $dbUserUUID.uuid
-AND       ms.uuid = $dbModelUUID.uuid
+WHERE u.removed = false
+AND u.uuid = $dbUserUUID.uuid
+AND ms.uuid = $dbModelUUID.uuid
 `
 
 	userUUIDVal := dbUserUUID{UUID: userUUID.String()}
@@ -1602,8 +1602,8 @@ func (s *State) GetModelCloudInfo(
 
 	stmt, err := s.Prepare(`
 SELECT &dbCloudCredential.*
-FROM   v_model
-WHERE  uuid = $dbModelUUID.uuid
+FROM v_model
+WHERE uuid = $dbModelUUID.uuid
 `, dbCloudCredential{}, args)
 	if err != nil {
 		return "", "", errors.Capture(err)
@@ -1651,8 +1651,8 @@ func (st *State) GetModelCloudAndCredential(
 	}
 	query := `
 SELECT m.* AS &dbModelCloudCredentialUUID.*
-FROM   v_model m
-WHERE  m.uuid = $dbModelCloudCredentialUUID.uuid
+FROM v_model m
+WHERE m.uuid = $dbModelCloudCredentialUUID.uuid
 `
 	stmt, err := st.Prepare(query, cloudCred)
 	if err != nil {
@@ -1739,7 +1739,7 @@ func registerModelNamespace(
 	}
 	insertNamespaceStmt, err := preparer.Prepare(`
 INSERT INTO namespace_list (namespace) VALUES ($dbModelNamespace.namespace)
-	`, modelNamespace)
+`, modelNamespace)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -1753,7 +1753,7 @@ INSERT INTO namespace_list (namespace) VALUES ($dbModelNamespace.namespace)
 
 	insertModelNamespaceStmt, err := preparer.Prepare(`
 INSERT INTO model_namespace (*) VALUES ($dbModelNamespace.*)
-	`, modelNamespace)
+`, modelNamespace)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -1789,9 +1789,9 @@ func cleanupBrokenModel(
 	// Find the UUID for the broken model
 	findBrokenModelStmt, err := preparer.Prepare(`
 SELECT &dbUUID.uuid FROM model
-WHERE  name = $dbModelNameAndQualifier.name
-AND    qualifier = $dbModelNameAndQualifier.qualifier
-AND    activated = false
+WHERE name = $dbModelNameAndQualifier.name
+AND qualifier = $dbModelNameAndQualifier.qualifier
+AND activated = false
 `, uuid, nameAndQualifier)
 	if err != nil {
 		return errors.Capture(err)
@@ -1896,10 +1896,10 @@ func setCloudRegion(
 
 		stmt, err := preparer.Prepare(`
 SELECT m.cloud_region_uuid AS &dbCloudRegionUUID.uuid
-FROM   model m
-JOIN   cloud c ON m.cloud_uuid = c.uuid
-JOIN   controller AS cc ON cc.model_uuid = m.uuid
-WHERE  c.name = $dbName.name
+FROM model m
+JOIN cloud c ON m.cloud_uuid = c.uuid
+JOIN controller AS cc ON cc.model_uuid = m.uuid
+WHERE c.name = $dbName.name
 `, cloudName, cloudRegionUUID)
 		if err != nil {
 			return errors.Capture(err)
@@ -2160,7 +2160,7 @@ AND cc.name = $dbCredKey.cloud_credential_name
 	updateCloudCredStmt, err := preparer.Prepare(`
 UPDATE model
 SET cloud_credential_uuid = $dbUpdateCredential.cloud_credential_uuid
-WHERE uuid= $dbUpdateCredential.uuid
+WHERE uuid = $dbUpdateCredential.uuid
 AND cloud_uuid = $dbUpdateCredential.cloud_uuid
 `, updateArgs)
 	if err != nil {
@@ -2209,10 +2209,10 @@ func addAdminPermissions(
 	permStmt, err := preparer.Prepare(`
 INSERT INTO permission (uuid, access_type_id, object_type_id, grant_to, grant_on)
 SELECT $dbPermission.uuid, at.id, ot.id, $dbPermission.grant_to, $dbPermission.grant_on
-FROM   permission_access_type at,
+FROM permission_access_type at,
        permission_object_type ot
-WHERE  at.type = $dbPermission.access_type
-AND    ot.type = $dbPermission.object_type
+WHERE at.type = $dbPermission.access_type
+AND ot.type = $dbPermission.object_type
 `, adminPermission)
 	if err != nil {
 		return errors.Capture(err)
@@ -2260,8 +2260,8 @@ func (st *State) GetActivatedModelUUIDs(ctx context.Context, uuids []coremodel.U
 
 	stmt, err := st.Prepare(`
 SELECT &modelUUID.*
-FROM   v_model
-WHERE  uuid IN ($S[:])
+FROM v_model
+WHERE uuid IN ($S[:])
 `, sqlair.S{}, modelUUID{})
 
 	if err != nil {
@@ -2294,8 +2294,8 @@ func (st *State) GetDeadModels(ctx context.Context) ([]coremodel.UUID, error) {
 
 	stmt, err := st.Prepare(`
 SELECT &modelUUID.*
-FROM   model
-WHERE  life_id = 2
+FROM model
+WHERE life_id = 2
 `, modelUUID{})
 
 	if err != nil {
@@ -2334,9 +2334,9 @@ func (st *State) GetModelLife(ctx context.Context, uuid coremodel.UUID) (life.Li
 
 	stmt, err := st.Prepare(`
 SELECT &dbModelLife.*
-FROM   model
+FROM model
 WHERE uuid = $dbModelLife.uuid;
-	`, dbModelLife{})
+`, dbModelLife{})
 	if err != nil {
 		return -1, errors.Capture(err)
 	}
@@ -2373,7 +2373,7 @@ func (st *State) HasValidCredential(ctx context.Context, modelUUID coremodel.UUI
 	uuid := dbModelUUID{UUID: modelUUID.String()}
 	stmt, err := st.Prepare(`
 SELECT &dbModelCredentialInvalidStatus.*
-FROM v_model_state 
+FROM v_model_state
 WHERE uuid = $dbModelUUID.uuid;`,
 		invalidCredentialStatus, uuid)
 	if err != nil {
@@ -2407,11 +2407,11 @@ func (st *State) DefaultCloudCredentialNameForOwner(ctx context.Context, owner u
 	var credNames []dbCredKey
 	credQuery := `
 SELECT DISTINCT (cc.name) AS (&dbCredKey.cloud_credential_name)
-FROM   v_cloud_credential cc
-WHERE  cc.owner_name = $ownerAndCloudName.owner_name
-AND    cc.cloud_name = $ownerAndCloudName.cloud_name
-AND    cc.revoked = false
-AND    cc.invalid = false
+FROM v_cloud_credential cc
+WHERE cc.owner_name = $ownerAndCloudName.owner_name
+AND cc.cloud_name = $ownerAndCloudName.cloud_name
+AND cc.revoked = false
+AND cc.invalid = false
 `
 	names := ownerAndCloudName{
 		OwnerName: owner.Name(),

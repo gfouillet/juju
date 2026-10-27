@@ -220,16 +220,16 @@ func (st *State) GetRemoteApplicationOfferers(ctx context.Context) ([]crossmodel
 	}
 
 	query := `
-SELECT  a.name AS &remoteApplicationOffererInfo.application_name,
+SELECT a.name AS &remoteApplicationOffererInfo.application_name,
         aro.life_id AS &remoteApplicationOffererInfo.life_id,
         aro.application_uuid AS &remoteApplicationOffererInfo.application_uuid,
         aro.offer_uuid AS &remoteApplicationOffererInfo.offer_uuid,
         aro.offerer_model_uuid AS &remoteApplicationOffererInfo.offerer_model_uuid,
         aro.offer_url AS &remoteApplicationOffererInfo.offer_url,
         aro.macaroon AS &remoteApplicationOffererInfo.macaroon
-FROM    application_remote_offerer AS aro
-JOIN    application AS a ON a.uuid = aro.application_uuid
-WHERE   aro.life_id < 2
+FROM application_remote_offerer AS aro
+JOIN application AS a ON a.uuid = aro.application_uuid
+WHERE aro.life_id < 2
 ORDER BY a.name;`
 	queryStmt, err := st.Prepare(query, remoteApplicationOffererInfo{})
 	if err != nil {
@@ -309,13 +309,13 @@ func (st *State) GetRemoteApplicationConsumers(ctx context.Context) ([]crossmode
 	}
 
 	query := `
-SELECT  a.name AS &remoteApplicationConsumerInfo.application_name,
+SELECT a.name AS &remoteApplicationConsumerInfo.application_name,
         arc.life_id AS &remoteApplicationConsumerInfo.life_id,
         oc.offer_uuid AS &remoteApplicationConsumerInfo.offer_uuid
-FROM    application_remote_consumer AS arc
-JOIN    application AS a ON a.uuid = arc.offer_connection_uuid
-JOIN    offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
-WHERE   arc.life_id < 2
+FROM application_remote_consumer AS arc
+JOIN application AS a ON a.uuid = arc.offer_connection_uuid
+JOIN offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
+WHERE arc.life_id < 2
 ORDER BY a.name;`
 	queryStmt, err := st.Prepare(query, remoteApplicationConsumerInfo{})
 	if err != nil {
@@ -544,8 +544,8 @@ func (st *State) insertSyntheticRelation(
 	insertRelation := `
 INSERT INTO relation (uuid, life_id, relation_id, scope_id)
 SELECT $relation.uuid, $relation.life_id, $relation.relation_id, id
-FROM   charm_relation_scope 
-WHERE  name = $charmScope.name;`
+FROM charm_relation_scope
+WHERE name = $charmScope.name;`
 	insertRelationStmt, err := st.Prepare(insertRelation, relation{}, charmScope)
 	if err != nil {
 		return errors.Capture(err)
@@ -589,8 +589,8 @@ func (st *State) importSyntheticRelation(
 	insertRelation := `
 INSERT INTO relation (uuid, life_id, relation_id, suspended, suspended_reason, scope_id)
 SELECT $relation.uuid, $relation.life_id, $relation.relation_id, $relation.suspended, $relation.suspended_reason, id
-FROM   charm_relation_scope
-WHERE  name = $charmScope.name;`
+FROM charm_relation_scope
+WHERE name = $charmScope.name;`
 	insertRelationStmt, err := st.Prepare(insertRelation, relation{}, charmScope)
 	if err != nil {
 		return errors.Capture(err)
@@ -612,8 +612,8 @@ func (st *State) insertNewRelationStatus(ctx context.Context, tx *sqlair.TX, uui
 	stmt, err := st.Prepare(`
 INSERT INTO relation_status (relation_uuid, relation_status_type_id, updated_at)
 SELECT $setRelationStatus.relation_uuid, rst.id, $setRelationStatus.updated_at
-FROM   relation_status_type AS rst
-WHERE  rst.name = $setRelationStatus.status`, status)
+FROM relation_status_type AS rst
+WHERE rst.name = $setRelationStatus.status`, status)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -633,11 +633,11 @@ func (st *State) insertRelationEndpoints(
 	insertRelationEndpointStmt, err := st.Prepare(`
 INSERT INTO relation_endpoint (uuid, relation_uuid, endpoint_uuid)
 SELECT $relationEndpoint.uuid, $relationEndpoint.relation_uuid, ae.uuid
-FROM   application_endpoint AS ae
-JOIN   application AS a ON ae.application_uuid = a.uuid
-JOIN   charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
-WHERE  a.uuid = $relationEndpoint.application_uuid
-AND    cr.name = $relationEndpoint.endpoint_name
+FROM application_endpoint AS ae
+JOIN application AS a ON ae.application_uuid = a.uuid
+JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
+WHERE a.uuid = $relationEndpoint.application_uuid
+AND cr.name = $relationEndpoint.endpoint_name
 `, relationEndpoint{})
 	if err != nil {
 		return errors.Capture(err)
@@ -794,7 +794,7 @@ func (st *State) insertApplicationRelationEndpointBindings(
 func (st *State) getCharmRelationNames(ctx context.Context, tx *sqlair.TX, charmUUID string) ([]charmRelationName, error) {
 	uuid := uuid{UUID: charmUUID}
 	stmt, err := st.Prepare(`
-SELECT &charmRelationName.* 
+SELECT &charmRelationName.*
 FROM charm_relation
 WHERE charm_relation.charm_uuid = $uuid.uuid
 `, uuid, charmRelationName{})
@@ -823,10 +823,10 @@ func (st *State) getApplicationNameAndUUIDByOfferUUID(
 	existsQueryStmt, err := st.Prepare(`
 SELECT a.uuid AS &nameAndUUID.uuid,
        a.name AS &nameAndUUID.name
-FROM   application AS a
-JOIN   application_endpoint AS ae ON ae.application_uuid = a.uuid
-JOIN   offer_endpoint AS oe ON oe.endpoint_uuid = ae.uuid
-WHERE  oe.offer_uuid = $offerConnectionQuery.offer_uuid
+FROM application AS a
+JOIN application_endpoint AS ae ON ae.application_uuid = a.uuid
+JOIN offer_endpoint AS oe ON oe.endpoint_uuid = ae.uuid
+WHERE oe.offer_uuid = $offerConnectionQuery.offer_uuid
 `, nameAndUUID{}, ident)
 	if err != nil {
 		return "", "", errors.Capture(err)
@@ -851,8 +851,8 @@ func (st *State) checkConsumerRelationExists(
 	synthRelationIdent := uuid{UUID: consumingRelationUUID}
 	syntheticRelationExistsStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   relation
-WHERE  uuid = $uuid.uuid
+FROM relation
+WHERE uuid = $uuid.uuid
 `, countResult{}, synthRelationIdent)
 	if err != nil {
 		return errors.Capture(err)
@@ -975,9 +975,9 @@ func (st *State) GetSyntheticApplicationUUIDByRemoteToken(ctx context.Context, o
 	// application UUID.
 	offerStmt, err := st.Prepare(`
 SELECT oc.uuid AS &uuid.uuid
-FROM   offer_connection AS oc
-WHERE  oc.offer_uuid = $uuid.uuid
-AND    oc.remote_relation_uuid = $remoteRelationUUID.uuid
+FROM offer_connection AS oc
+WHERE oc.offer_uuid = $uuid.uuid
+AND oc.remote_relation_uuid = $remoteRelationUUID.uuid
 `, uuid{}, remoteRelationUUID{})
 	if err != nil {
 		return "", errors.Capture(err)
@@ -989,8 +989,8 @@ AND    oc.remote_relation_uuid = $remoteRelationUUID.uuid
 	// representing the consuming application for that connection.
 	relationStmt, err := st.Prepare(`
 SELECT oc.uuid AS &uuid.uuid
-FROM   offer_connection AS oc
-WHERE  oc.remote_relation_uuid = $remoteRelationUUID.uuid
+FROM offer_connection AS oc
+WHERE oc.remote_relation_uuid = $remoteRelationUUID.uuid
 `, uuid{}, remoteRelationUUID{})
 	if err != nil {
 		return "", errors.Capture(err)
@@ -1031,8 +1031,8 @@ func (st *State) InitialWatchStatementForConsumerRelations() (string, eventsourc
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		stmt, err := st.Prepare(`
 SELECT DISTINCT re.relation_uuid AS &uuid.uuid
-FROM   v_relation_endpoint AS re
-JOIN   application_remote_offerer AS aro ON aro.application_uuid = re.application_uuid
+FROM v_relation_endpoint AS re
+JOIN application_remote_offerer AS aro ON aro.application_uuid = re.application_uuid
 `, uuid{})
 		if err != nil {
 			return nil, errors.Capture(err)
@@ -1076,8 +1076,8 @@ func (st *State) GetConsumerRelationUUIDs(ctx context.Context, relationUUIDs ...
 	if len(relationUUIDs) == 0 {
 		stmt, err := st.Prepare(`
 SELECT DISTINCT re.relation_uuid AS &uuid.uuid
-FROM   v_relation_endpoint AS re
-JOIN   application_remote_offerer AS aro ON aro.application_uuid = re.application_uuid
+FROM v_relation_endpoint AS re
+JOIN application_remote_offerer AS aro ON aro.application_uuid = re.application_uuid
 `, uuid{})
 		if err != nil {
 			return nil, errors.Capture(err)
@@ -1099,9 +1099,9 @@ JOIN   application_remote_offerer AS aro ON aro.application_uuid = re.applicatio
 
 		stmt, err := st.Prepare(`
 SELECT DISTINCT re.relation_uuid AS &uuid.uuid
-FROM   v_relation_endpoint AS re
-JOIN   application_remote_offerer AS aro ON aro.application_uuid = re.application_uuid
-WHERE  re.relation_uuid IN ($ids[:])`, uuid{}, ident)
+FROM v_relation_endpoint AS re
+JOIN application_remote_offerer AS aro ON aro.application_uuid = re.application_uuid
+WHERE re.relation_uuid IN ($ids[:])`, uuid{}, ident)
 		if err != nil {
 			return nil, errors.Capture(err)
 		}
@@ -1132,9 +1132,9 @@ func (st *State) InitialWatchStatementForOffererRelations() (string, eventsource
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		stmt, err := st.Prepare(`
 SELECT r.uuid AS &uuid.uuid
-FROM   application_remote_consumer AS arc
-JOIN   offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
-JOIN   relation AS r ON r.uuid = oc.remote_relation_uuid
+FROM application_remote_consumer AS arc
+JOIN offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
+JOIN relation AS r ON r.uuid = oc.remote_relation_uuid
 `, uuid{})
 		if err != nil {
 			return nil, errors.Capture(err)
@@ -1176,10 +1176,10 @@ func (st *State) GetOffererRelationUUIDsForConsumers(ctx context.Context, applic
 
 	stmt, err := st.Prepare(`
 SELECT r.uuid AS &uuid.uuid
-FROM   application_remote_consumer AS arc
-JOIN   offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
-JOIN   relation AS r ON r.uuid = oc.remote_relation_uuid
-WHERE  arc.offer_connection_uuid IN ($ids[:])`, uuid{}, ident)
+FROM application_remote_consumer AS arc
+JOIN offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
+JOIN relation AS r ON r.uuid = oc.remote_relation_uuid
+WHERE arc.offer_connection_uuid IN ($ids[:])`, uuid{}, ident)
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -1216,9 +1216,9 @@ func (st *State) GetAllOffererRelationUUIDs(ctx context.Context) ([]string, erro
 
 	stmt, err := st.Prepare(`
 SELECT r.uuid AS &uuid.uuid
-FROM   application_remote_consumer AS arc
-JOIN   offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
-JOIN   relation AS r ON r.uuid = oc.remote_relation_uuid
+FROM application_remote_consumer AS arc
+JOIN offer_connection AS oc ON oc.uuid = arc.offer_connection_uuid
+JOIN relation AS r ON r.uuid = oc.remote_relation_uuid
 `, uuid{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1260,13 +1260,13 @@ func (st *State) GetOfferingApplicationToken(ctx context.Context, relUUID string
 
 	stmt, err := st.Prepare(`
 SELECT (a.uuid, cs.name) AS (&applicationUUIDAndCharmSource.*)
-FROM   application AS a
-JOIN   application_endpoint AS ae ON a.uuid = ae.application_uuid
-JOIN   relation_endpoint AS re ON ae.uuid = re.endpoint_uuid
-JOIN   relation AS r ON re.relation_uuid = r.uuid
-JOIN   charm AS c ON a.charm_uuid = c.uuid
-JOIN   charm_source AS cs ON c.source_id = cs.id
-WHERE  r.uuid = $uuid.uuid
+FROM application AS a
+JOIN application_endpoint AS ae ON a.uuid = ae.application_uuid
+JOIN relation_endpoint AS re ON ae.uuid = re.endpoint_uuid
+JOIN relation AS r ON re.relation_uuid = r.uuid
+JOIN charm AS c ON a.charm_uuid = c.uuid
+JOIN charm_source AS cs ON c.source_id = cs.id
+WHERE r.uuid = $uuid.uuid
 `, uuid{}, applicationUUIDAndCharmSource{})
 	if err != nil {
 		return "", errors.Capture(err)
@@ -1413,10 +1413,10 @@ func (st *State) getCharmUUIDByApplicationUUID(ctx context.Context, tx *sqlair.T
 	input := uuid{UUID: appUUID}
 
 	query := `
-SELECT  a.charm_uuid AS &uuid.uuid
-FROM    application AS a
-JOIN    life AS l ON l.id = a.life_id AND l.value != 'dead'
-WHERE   a.uuid = $uuid.uuid;
+SELECT a.charm_uuid AS &uuid.uuid
+FROM application AS a
+JOIN life AS l ON l.id = a.life_id AND l.value != 'dead'
+WHERE a.uuid = $uuid.uuid;
 `
 	queryStmt, err := st.Prepare(query, input)
 	if err != nil {
@@ -1468,9 +1468,9 @@ func (st *State) getMissingApplicationUnits(
 
 	query := `
 SELECT name AS &unitName.name
-FROM   unit
-WHERE  application_uuid = $uuid.uuid
-AND    name IN ($unitNames[:]);
+FROM unit
+WHERE application_uuid = $uuid.uuid
+AND name IN ($unitNames[:]);
 `
 
 	queryStmt, err := st.Prepare(query, names, unitName{}, appUUIDRec)
@@ -1687,13 +1687,13 @@ func (st *State) IsRelationWithEndpointIdentifiersSuspended(
 
 	stmt, err := st.Prepare(`
 SELECT r.suspended AS &relationSuspended.suspended
-FROM   relation r
-JOIN   v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
-JOIN   v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
-WHERE  e1.application_name = $endpointIdentifier1.application_name 
-AND    e1.endpoint_name    = $endpointIdentifier1.endpoint_name
-AND    e2.application_name = $endpointIdentifier2.application_name 
-AND    e2.endpoint_name    = $endpointIdentifier2.endpoint_name
+FROM relation r
+JOIN v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
+JOIN v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
+WHERE e1.application_name = $endpointIdentifier1.application_name
+AND e1.endpoint_name = $endpointIdentifier1.endpoint_name
+AND e2.application_name = $endpointIdentifier2.application_name
+AND e2.endpoint_name = $endpointIdentifier2.endpoint_name
 `, relationSuspended{}, e1, e2)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -1780,8 +1780,8 @@ func (st *State) SetOffererControllerForOffererModel(
 
 	stmt, err := st.Prepare(`
 UPDATE application_remote_offerer
-SET    offerer_controller_uuid = $offererControllerArg.offerer_controller_uuid
-WHERE  offerer_model_uuid = $offererControllerArg.offerer_model_uuid`,
+SET offerer_controller_uuid = $offererControllerArg.offerer_controller_uuid
+WHERE offerer_model_uuid = $offererControllerArg.offerer_model_uuid`,
 		offererControllerArg{})
 	if err != nil {
 		return errors.Capture(err)
@@ -1823,8 +1823,8 @@ func (st *State) SetOffererControllerForOffererModels(
 
 	stmt, err := st.Prepare(`
 UPDATE application_remote_offerer
-SET    offerer_controller_uuid = $controllerArg.offerer_controller_uuid
-WHERE  offerer_model_uuid IN ($modelUUIDs[:])`,
+SET offerer_controller_uuid = $controllerArg.offerer_controller_uuid
+WHERE offerer_model_uuid IN ($modelUUIDs[:])`,
 		controllerArg{}, modelUUIDs{})
 	if err != nil {
 		return errors.Capture(err)
@@ -1848,11 +1848,11 @@ func (st *State) IsApplicationSynthetic(ctx context.Context, appName string) (bo
 
 	stmt, err := st.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   application AS a
-JOIN   charm AS c ON c.uuid = a.charm_uuid
-JOIN   charm_source AS cs ON cs.id = c.source_id
-WHERE  a.name = $name.name 
-AND    cs.name = 'cmr'`, countResult{}, name{})
+FROM application AS a
+JOIN charm AS c ON c.uuid = a.charm_uuid
+JOIN charm_source AS cs ON cs.id = c.source_id
+WHERE a.name = $name.name
+AND cs.name = 'cmr'`, countResult{}, name{})
 	if err != nil {
 		return false, errors.Capture(err)
 	}
@@ -1881,8 +1881,8 @@ func (st *State) IsRemoteApplicationConsumer(ctx context.Context, appUUID string
 
 	stmt, err := st.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   application_remote_consumer AS a
-WHERE  a.offer_connection_uuid = $uuid.uuid
+FROM application_remote_consumer AS a
+WHERE a.offer_connection_uuid = $uuid.uuid
 `, countResult{}, uuid{})
 	if err != nil {
 		return false, errors.Capture(err)
@@ -1925,13 +1925,13 @@ func (st *State) GetRelationRemoteModelUUID(ctx context.Context, relationUUID co
 
 	stmt, err := st.Prepare(`
 SELECT COALESCE(aro.offerer_model_uuid, arc.consumer_model_uuid) AS &remoteModelUUID.uuid
-FROM   relation AS r
-JOIN   relation_endpoint AS re ON r.uuid = re.relation_uuid
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-JOIN   application AS a ON ae.application_uuid = a.uuid
+FROM relation AS r
+JOIN relation_endpoint AS re ON r.uuid = re.relation_uuid
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+JOIN application AS a ON ae.application_uuid = a.uuid
 LEFT JOIN application_remote_offerer AS aro ON a.uuid = aro.application_uuid
 LEFT JOIN application_remote_consumer AS arc ON a.uuid = arc.offer_connection_uuid
-WHERE  r.uuid = $remoteRelationUUID.uuid
+WHERE r.uuid = $remoteRelationUUID.uuid
 `, remoteModelUUID{}, remoteRelationUUID{})
 	if err != nil {
 		return "", errors.Capture(err)

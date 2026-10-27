@@ -28,8 +28,8 @@ func (st *State) MachineExists(ctx context.Context, mUUID string) (bool, error) 
 	machineUUID := entityUUID{UUID: mUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   machine
-WHERE  uuid = $entityUUID.uuid`, machineUUID)
+FROM machine
+WHERE uuid = $entityUUID.uuid`, machineUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing machine exists query: %w", err)
 	}
@@ -69,18 +69,18 @@ func (st *State) EnsureMachineNotAliveCascade(
 	machineUUID := entityUUID{UUID: mUUID}
 	updateMachineStmt, err := st.Prepare(`
 UPDATE machine
-SET    life_id = 1
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 0`, machineUUID)
+SET life_id = 1
+WHERE uuid = $entityUUID.uuid
+AND life_id = 0`, machineUUID)
 	if err != nil {
 		return cascaded, errors.Errorf("preparing machine life update: %w", err)
 	}
 
 	updateInstanceStmt, err := st.Prepare(`
 UPDATE machine_cloud_instance
-SET    life_id = 1
-WHERE  machine_uuid = $entityUUID.uuid
-AND    life_id = 0;`, machineUUID)
+SET life_id = 1
+WHERE machine_uuid = $entityUUID.uuid
+AND life_id = 0;`, machineUUID)
 	if err != nil {
 		return cascaded, errors.Errorf("preparing machine cloud instance life update: %w", err)
 	}
@@ -90,29 +90,29 @@ AND    life_id = 0;`, machineUUID)
 	// is the inverse of the marking the last unit on the machine as dying.
 
 	selectContainerMachines, err := st.Prepare(`
-SELECT    mp.machine_uuid AS &entityUUID.uuid
-FROM      machine_parent AS mp
-JOIN      machine AS m ON mp.machine_uuid = m.uuid
-WHERE     mp.parent_uuid = $entityUUID.uuid
-AND       m.life_id < 2;`, machineUUID)
+SELECT mp.machine_uuid AS &entityUUID.uuid
+FROM machine_parent AS mp
+JOIN machine AS m ON mp.machine_uuid = m.uuid
+WHERE mp.parent_uuid = $entityUUID.uuid
+AND m.life_id < 2;`, machineUUID)
 	if err != nil {
 		return cascaded, errors.Errorf("preparing container machine selection query: %w", err)
 	}
 
 	updateContainerStmt, err := st.Prepare(`
 UPDATE machine
-SET    life_id = 1
-WHERE  uuid IN ($uuids[:])
-AND    life_id = 0;`, uuids{})
+SET life_id = 1
+WHERE uuid IN ($uuids[:])
+AND life_id = 0;`, uuids{})
 	if err != nil {
 		return cascaded, errors.Errorf("preparing container machine life update: %w", err)
 	}
 
 	updateContainerInstanceStmt, err := st.Prepare(`
 UPDATE machine_cloud_instance
-SET    life_id = 1
-WHERE  machine_uuid IN ($uuids[:])
-AND    life_id = 0;`, uuids{})
+SET life_id = 1
+WHERE machine_uuid IN ($uuids[:])
+AND life_id = 0;`, uuids{})
 	if err != nil {
 		return cascaded, errors.Errorf("preparing container machine instance life update: %w", err)
 	}
@@ -120,10 +120,10 @@ AND    life_id = 0;`, uuids{})
 	// Select any units that are directly on the parent machine.
 	selectUnitStmt, err := st.Prepare(`
 SELECT u.uuid AS &entityUUID.uuid
-FROM   unit AS u
-JOIN   machine  AS m ON m.net_node_uuid = u.net_node_uuid
-WHERE  m.uuid IN ($uuids[:])
-AND    u.life_id < 2;`, machineUUID, uuids{})
+FROM unit AS u
+JOIN machine AS m ON m.net_node_uuid = u.net_node_uuid
+WHERE m.uuid IN ($uuids[:])
+AND u.life_id < 2;`, machineUUID, uuids{})
 	if err != nil {
 		return cascaded, errors.Errorf("preparing unit selection query: %w", err)
 	}
@@ -252,15 +252,15 @@ func (st *State) ensureMachineStorageInstancesNotAliveCascade(
 	q := `
 WITH all_instances AS (
     SELECT iv.storage_instance_uuid AS uuid
-    FROM   storage_instance i
-    JOIN   storage_instance_volume iv ON i.uuid = iv.storage_instance_uuid
-    JOIN   machine_volume mv ON iv.storage_volume_uuid = mv.volume_uuid
-    WHERE  mv.machine_uuid = $entityUUID.uuid AND
+    FROM storage_instance i
+    JOIN storage_instance_volume iv ON i.uuid = iv.storage_instance_uuid
+    JOIN machine_volume mv ON iv.storage_volume_uuid = mv.volume_uuid
+    WHERE mv.machine_uuid = $entityUUID.uuid AND
            i.life_id < 2
     UNION
     SELECT if.storage_instance_uuid AS uuid
-    FROM   storage_instance i
-    JOIN   storage_instance_filesystem if ON i.uuid = if.storage_instance_uuid
+    FROM storage_instance i
+    JOIN storage_instance_filesystem if ON i.uuid = if.storage_instance_uuid
     JOIN   machine_filesystem mf ON if.storage_filesystem_uuid = mf.filesystem_uuid
     LEFT JOIN storage_instance_volume iv ON i.uuid = iv.storage_instance_uuid
     WHERE  mf.machine_uuid = $entityUUID.uuid AND
@@ -383,14 +383,14 @@ func (st *State) GetMachineNetworkInterfaces(ctx context.Context, machineUUID st
 	}
 
 	selectStmt, err := st.Prepare(`
-SELECT  lld.mac_address AS &linkLayerDevice.hardware_address
-FROM    machine AS m
-JOIN    net_node AS n ON n.uuid = m.net_node_uuid
-JOIN    machine_parent AS mp ON mp.machine_uuid = m.uuid
-JOIN    link_layer_device AS lld ON lld.net_node_uuid = n.uuid
-WHERE   m.uuid = $entityUUID.uuid
-AND     m.life_id = 1
-AND     lld.mac_address IS NOT NULL;`, entityUUID{UUID: machineUUID}, linkLayerDevice{})
+SELECT lld.mac_address AS &linkLayerDevice.hardware_address
+FROM machine AS m
+JOIN net_node AS n ON n.uuid = m.net_node_uuid
+JOIN machine_parent AS mp ON mp.machine_uuid = m.uuid
+JOIN link_layer_device AS lld ON lld.net_node_uuid = n.uuid
+WHERE m.uuid = $entityUUID.uuid
+AND m.life_id = 1
+AND lld.mac_address IS NOT NULL;`, entityUUID{UUID: machineUUID}, linkLayerDevice{})
 	if err != nil {
 		return nil, errors.Errorf("preparing machine network interfaces selection: %w", err)
 	}
@@ -427,9 +427,9 @@ func (st *State) MarkMachineAsDead(ctx context.Context, mUUID string) error {
 	machineUUID := entityUUID{UUID: mUUID}
 	updateStmt, err := st.Prepare(`
 UPDATE machine
-SET    life_id = 2
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 1`, machineUUID)
+SET life_id = 2
+WHERE uuid = $entityUUID.uuid
+AND life_id = 1`, machineUUID)
 	if err != nil {
 		return errors.Errorf("preparing machine life update: %w", err)
 	}
@@ -471,9 +471,9 @@ func (st *State) MarkInstanceAsDead(ctx context.Context, mUUID string) error {
 	machineUUID := entityUUID{UUID: mUUID}
 	updateStmt, err := st.Prepare(`
 UPDATE machine_cloud_instance
-SET    life_id = 2
-WHERE  machine_uuid = $entityUUID.uuid
-AND    life_id = 1`, machineUUID)
+SET life_id = 2
+WHERE machine_uuid = $entityUUID.uuid
+AND life_id = 1`, machineUUID)
 	if err != nil {
 		return errors.Errorf("preparing instance life update: %w", err)
 	}
@@ -512,9 +512,9 @@ func (st *State) DeleteMachine(ctx context.Context, mUUID string, force bool) er
 
 	// Prepare query to fetch net node for machine
 	getNode := `
-SELECT net_node_uuid AS &node.uuid 
-FROM   machine 
-WHERE  uuid = $machine.uuid
+SELECT net_node_uuid AS &node.uuid
+FROM machine
+WHERE uuid = $machine.uuid
 `
 	getNodeStmt, err := st.Prepare(getNode, machine{}, node{})
 	if err != nil {
@@ -523,7 +523,7 @@ WHERE  uuid = $machine.uuid
 
 	// Prepare query for deleting machine row.
 	deleteMachine := `
-DELETE FROM machine 
+DELETE FROM machine
 WHERE uuid = $machine.uuid;
 `
 	deleteMachineStmt, err := st.Prepare(deleteMachine, machine{})
@@ -638,15 +638,15 @@ AND unit.life_id != 2
 
 	countFilesystemsOnMachine, err := st.Prepare(`
 SELECT SUM(count) AS &count.count FROM (
-	SELECT    COUNT(*) AS count
-	FROM      machine_filesystem mf
-	WHERE     mf.machine_uuid = $entityUUID.uuid
+	SELECT COUNT(*) AS count
+	FROM machine_filesystem mf
+	WHERE mf.machine_uuid = $entityUUID.uuid
 	UNION
-	SELECT    COUNT(*) AS count
-	FROM      storage_filesystem_attachment sfa
-	JOIN      machine m ON m.net_node_uuid = sfa.net_node_uuid
+	SELECT COUNT(*) AS count
+	FROM storage_filesystem_attachment sfa
+	JOIN machine m ON m.net_node_uuid = sfa.net_node_uuid
 	LEFT JOIN machine_filesystem mf ON mf.machine_uuid = m.uuid
-	WHERE     m.uuid = $entityUUID.uuid AND
+	WHERE m.uuid = $entityUUID.uuid AND
 	          mf.filesystem_uuid IS NULL
 )
 `, count{}, machineUUIDParam)
@@ -656,15 +656,15 @@ SELECT SUM(count) AS &count.count FROM (
 
 	countVolumesOnMachine, err := st.Prepare(`
 SELECT SUM(count) AS &count.count FROM (
-	SELECT    COUNT(*) AS count
-	FROM      machine_volume mv
-	WHERE     mv.machine_uuid = $entityUUID.uuid
+	SELECT COUNT(*) AS count
+	FROM machine_volume mv
+	WHERE mv.machine_uuid = $entityUUID.uuid
 	UNION
-	SELECT    COUNT(*) AS count
-	FROM      storage_volume_attachment sva
-	JOIN      machine m ON m.net_node_uuid = sva.net_node_uuid
+	SELECT COUNT(*) AS count
+	FROM storage_volume_attachment sva
+	JOIN machine m ON m.net_node_uuid = sva.net_node_uuid
 	LEFT JOIN machine_volume mv ON mv.machine_uuid = m.uuid
-	WHERE     m.uuid = $entityUUID.uuid AND
+	WHERE m.uuid = $entityUUID.uuid AND
 	          mv.volume_uuid IS NULL
 )
 `, count{}, machineUUIDParam)
@@ -713,8 +713,8 @@ SELECT SUM(count) AS &count.count FROM (
 func (st *State) checkNoMachineChildren(ctx context.Context, tx *sqlair.TX, machineUUIDParam entityUUID) error {
 	countChildren, err := st.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM   machine_parent
-WHERE  parent_uuid = $entityUUID.uuid
+FROM machine_parent
+WHERE parent_uuid = $entityUUID.uuid
 `, count{}, machineUUIDParam)
 	if err != nil {
 		return errors.Capture(err)
@@ -790,8 +790,8 @@ func (st *State) removeNetNode(ctx context.Context, tx *sqlair.TX, netNodeUUID s
 	// machine removal job has finished.
 	countNodeMachinesQuery := `
 SELECT COUNT(*) AS &count.count
-FROM   machine
-WHERE  net_node_uuid = $node.uuid`
+FROM machine
+WHERE net_node_uuid = $node.uuid`
 	countNodeMachinesStmt, err := st.Prepare(countNodeMachinesQuery, node{}, count{})
 	if err != nil {
 		return errors.Capture(err)
@@ -811,8 +811,8 @@ WHERE  net_node_uuid = $node.uuid`
 	// once the k8s service removal job has finished.
 	countK8sServicesQuery := `
 SELECT COUNT(*) AS &count.count
-FROM   k8s_service
-WHERE  net_node_uuid = $node.uuid`
+FROM k8s_service
+WHERE net_node_uuid = $node.uuid`
 	countK8sServicesStmt, err := st.Prepare(countK8sServicesQuery, node{}, count{})
 	if err != nil {
 		return errors.Capture(err)
@@ -831,8 +831,8 @@ WHERE  net_node_uuid = $node.uuid`
 	// once the unit removal job has finished.
 	countNodeUnitsQuery := `
 SELECT COUNT(*) AS &count.count
-FROM   unit
-WHERE  net_node_uuid = $node.uuid`
+FROM unit
+WHERE net_node_uuid = $node.uuid`
 	countNodeUnitsStmt, err := st.Prepare(countNodeUnitsQuery, node{}, count{})
 	if err != nil {
 		return errors.Capture(err)
@@ -853,8 +853,8 @@ WHERE  net_node_uuid = $node.uuid`
 	// job retries once the unit removal job has finished.
 	countStorageFilesystemAttachmentsQuery := `
 SELECT COUNT(*) AS &count.count
-FROM   storage_filesystem_attachment
-WHERE  net_node_uuid = $node.uuid`
+FROM storage_filesystem_attachment
+WHERE net_node_uuid = $node.uuid`
 	countStorageFilesystemAttachmentsStmt, err := st.Prepare(countStorageFilesystemAttachmentsQuery, node{}, count{})
 	if err != nil {
 		return errors.Capture(err)
@@ -873,8 +873,8 @@ WHERE  net_node_uuid = $node.uuid`
 	// removal job retries once the unit removal job has finished.
 	countStorageVolumeAttachmentsQuery := `
 SELECT COUNT(*) AS &count.count
-FROM   storage_volume_attachment
-WHERE  net_node_uuid = $node.uuid`
+FROM storage_volume_attachment
+WHERE net_node_uuid = $node.uuid`
 	countStorageVolumeAttachmentsStmt, err := st.Prepare(countStorageVolumeAttachmentsQuery, node{}, count{})
 	if err != nil {
 		return errors.Capture(err)
@@ -893,8 +893,8 @@ WHERE  net_node_uuid = $node.uuid`
 	// job retries once the unit removal job has finished.
 	countStorageVolumeAttachmentPlansQuery := `
 SELECT COUNT(*) AS &count.count
-FROM   storage_volume_attachment_plan
-WHERE  net_node_uuid = $node.uuid`
+FROM storage_volume_attachment_plan
+WHERE net_node_uuid = $node.uuid`
 	countStorageVolumeAttachmentPlansStmt, err := st.Prepare(countStorageVolumeAttachmentPlansQuery, node{}, count{})
 	if err != nil {
 		return errors.Capture(err)
@@ -971,8 +971,8 @@ WHERE address_uuid IN (
 	// Get all link-layer devices associated with the net node.
 	selectDevices := `
 SELECT uuid AS &entityUUID.uuid
-FROM   link_layer_device
-WHERE  net_node_uuid = $node.uuid`
+FROM link_layer_device
+WHERE net_node_uuid = $node.uuid`
 	devStmt, err := st.Prepare(selectDevices, entityUUID{}, netNodeUUIDRec)
 	if err != nil {
 		return errors.Errorf("preparing devices for deletion statement: %w", err)
@@ -1027,8 +1027,8 @@ func (st *State) getMachineLife(ctx context.Context, tx *sqlair.TX, mUUID string
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   machine
-WHERE  uuid = $entityUUID.uuid;`, machineLife, machineUUID)
+FROM machine
+WHERE uuid = $entityUUID.uuid;`, machineLife, machineUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing machine life query: %w", err)
 	}
@@ -1049,8 +1049,8 @@ func (st *State) getInstanceLife(ctx context.Context, tx *sqlair.TX, mUUID strin
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   machine_cloud_instance
-WHERE  machine_uuid = $entityUUID.uuid;`, instance, machineUUID)
+FROM machine_cloud_instance
+WHERE machine_uuid = $entityUUID.uuid;`, instance, machineUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing machine instance life query: %w", err)
 	}

@@ -63,7 +63,7 @@ func (s *userStateSuite) TestSingletonActiveUser(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, "123", "bob", "Bob", false, true, "123", time.Now())
+`, "123", "bob", "Bob", false, true, "123", time.Now())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -72,7 +72,7 @@ func (s *userStateSuite) TestSingletonActiveUser(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, "124", "bob", "Bob", false, true, "123", time.Now())
+`, "124", "bob", "Bob", false, true, "123", time.Now())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -81,7 +81,7 @@ func (s *userStateSuite) TestSingletonActiveUser(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, "125", "bob", "Bob", false, true, "123", time.Now())
+`, "125", "bob", "Bob", false, true, "123", time.Now())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -91,7 +91,7 @@ func (s *userStateSuite) TestSingletonActiveUser(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, "126", "bob", "Bob", false, false, "123", time.Now())
+`, "126", "bob", "Bob", false, false, "123", time.Now())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -102,7 +102,7 @@ func (s *userStateSuite) TestSingletonActiveUser(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, "127", "bob", "Bob", false, false, "123", time.Now())
+`, "127", "bob", "Bob", false, false, "123", time.Now())
 		return err
 	})
 	c.Assert(database.IsErrConstraintUnique(err), tc.IsTrue)
@@ -144,7 +144,7 @@ func (s *userStateSuite) TestBootstrapAddUserWithPassword(c *tc.C) {
 SELECT uuid, name, display_name, removed, created_by_uuid, created_at
 FROM user
 WHERE uuid = ?
-	`, adminUUID)
+`, adminUUID)
 
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
@@ -847,7 +847,7 @@ func (s *userStateSuite) TestRemoveUser(c *tc.C) {
 SELECT user_uuid
 FROM user_password
 WHERE user_uuid = ?
-	`, userToRemoveUUID)
+`, userToRemoveUUID)
 	// ErrNoRows is not returned by row.Err, it is deferred until row.Scan
 	// is called.
 	c.Assert(row.Scan(nil), tc.ErrorIs, sql.ErrNoRows)
@@ -857,7 +857,7 @@ WHERE user_uuid = ?
 SELECT user_uuid
 FROM user_activation_key
 WHERE user_uuid = ?
-	`, userToRemoveUUID)
+`, userToRemoveUUID)
 	// ErrNoRows is not returned by row.Err, it is deferred until row.Scan
 	// is called.
 	c.Assert(row.Scan(nil), tc.ErrorIs, sql.ErrNoRows)
@@ -867,7 +867,7 @@ WHERE user_uuid = ?
 SELECT removed
 FROM user
 WHERE uuid = ?
-	`, userToRemoveUUID)
+`, userToRemoveUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 	var removed bool
 	err = row.Scan(&removed)
@@ -888,14 +888,14 @@ func (s *userStateSuite) TestRemoveUserLastAdmin(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify)
 			VALUES (?, "fluffy", 7, "test-endpoint", true)
-		`, cloudUUID)
+`, cloudUUID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, name, qualifier, model_type_id, life_id, cloud_uuid)
 			VALUES (?, "test", "prod", 0, 0, ?)
-		`, modelUUID, cloudUUID)
+`, modelUUID, cloudUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1001,7 +1001,7 @@ WHERE user_uuid = ?
 SELECT user_uuid
 FROM user_password
 WHERE user_uuid = ?
-	`, userToRemoveUUID)
+`, userToRemoveUUID)
 	// ErrNoRows is not returned by row.Err, it is deferred until row.Scan
 	// is called.
 	c.Assert(row.Scan(nil), tc.ErrorIs, sql.ErrNoRows)
@@ -1011,7 +1011,7 @@ WHERE user_uuid = ?
 SELECT user_uuid
 FROM user_activation_key
 WHERE user_uuid = ?
-	`, userToRemoveUUID)
+`, userToRemoveUUID)
 	// ErrNoRows is not returned by row.Err, it is deferred until row.Scan
 	// is called.
 	c.Assert(row.Scan(nil), tc.ErrorIs, sql.ErrNoRows)
@@ -1021,7 +1021,7 @@ WHERE user_uuid = ?
 SELECT removed
 FROM user
 WHERE uuid = ?
-	`, userToRemoveUUID)
+`, userToRemoveUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 	var removed bool
 	err = row.Scan(&removed)
@@ -1180,7 +1180,7 @@ func (s *userStateSuite) TestSetPasswordHash(c *tc.C) {
 SELECT disabled
 FROM user_authentication
 WHERE user_uuid = ?
-	`, adminUUID)
+`, adminUUID)
 	c.Assert(rowAuth.Err(), tc.ErrorIsNil)
 
 	var disabled bool
@@ -1193,7 +1193,7 @@ WHERE user_uuid = ?
 SELECT password_hash
 FROM user_password
 WHERE user_uuid = ?
-	`, adminUUID)
+`, adminUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
 	var passwordHash string
@@ -1206,7 +1206,7 @@ WHERE user_uuid = ?
 SELECT activation_key
 FROM user_activation_key
 WHERE user_uuid = ?
-	`, adminUUID)
+`, adminUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
 	var activationKey string
@@ -1252,7 +1252,7 @@ func (s *userStateSuite) TestSetPasswordHashTwice(c *tc.C) {
 SELECT password_hash
 FROM user_password
 WHERE user_uuid = ?
-	`, adminUUID)
+`, adminUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
 	var passwordHash string
@@ -1438,7 +1438,7 @@ func (s *userStateSuite) TestSetActivationKey(c *tc.C) {
 SELECT activation_key
 FROM user_activation_key
 WHERE user_uuid = ?
-	`, adminUUID)
+`, adminUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
 	var activationKey string
@@ -1451,7 +1451,7 @@ WHERE user_uuid = ?
 SELECT password_hash, password_salt
 FROM user_password
 WHERE user_uuid = ?
-	`, adminUUID)
+`, adminUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
 	var passwordHash, passwordSalt string
@@ -1492,7 +1492,7 @@ func (s *userStateSuite) TestDisableUserAuthentication(c *tc.C) {
 SELECT disabled
 FROM user_authentication
 WHERE user_uuid = ?
-	`, adminUUID)
+`, adminUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
 	var disabled bool
@@ -1511,14 +1511,14 @@ func (s *userStateSuite) TestDisableUserAuthenticationLastAdmin(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify)
 			VALUES (?, "fluffy", 7, "test-endpoint", true)
-		`, cloudUUID)
+`, cloudUUID)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, name, qualifier, model_type_id, life_id, cloud_uuid)
 			VALUES (?, "test", "prod", 0, 0, ?)
-		`, modelUUID, cloudUUID)
+`, modelUUID, cloudUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1591,7 +1591,7 @@ func (s *userStateSuite) TestEnableUserAuthentication(c *tc.C) {
 SELECT disabled
 FROM user_authentication
 WHERE user_uuid = ?
-	`, adminUUID)
+`, adminUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
 	var disabled bool
@@ -1649,7 +1649,7 @@ func (s *userStateSuite) TestUpdateLastModelLogin(c *tc.C) {
 SELECT user_uuid, model_uuid, time
 FROM model_last_login
 WHERE user_uuid = ?
-	`, adminUUID)
+`, adminUUID)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
 	var lastLogin time.Time

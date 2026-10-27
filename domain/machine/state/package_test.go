@@ -58,7 +58,7 @@ func (s *baseSuite) addNetNode(c *tc.C) string {
 // It returns the machine UUID.
 func (s *baseSuite) addMachine(c *tc.C, machineName, netNodeUUID string) string {
 	machineUUID := uuid.MustNewUUID().String()
-	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO machine (uuid, name, life_id, net_node_uuid) VALUES (?, ?, ?, ?)`,
 		machineUUID, machineName, life.Alive, netNodeUUID)
 	return machineUUID
 }

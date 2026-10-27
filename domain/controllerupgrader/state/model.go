@@ -135,7 +135,7 @@ func (s *ControllerModelState) SetModelTargetAgentVersion(
 	toVersionInput := setAgentVersionTarget{TargetVersion: toVersion.String()}
 	setAgentVersionStmt, err := s.Prepare(`
 UPDATE agent_version
-SET    target_version = $setAgentVersionTarget.target_version
+SET target_version = $setAgentVersionTarget.target_version
 `,
 		toVersionInput,
 	)
@@ -216,7 +216,7 @@ func (s *ControllerModelState) SetModelTargetAgentVersionAndStream(
 	}
 	setAgentVersionStreamStmt, err := s.Prepare(`
 UPDATE agent_version
-SET    target_version = $setAgentVersionTargetStream.target_version,
+SET target_version = $setAgentVersionTargetStream.target_version,
        stream_id = $setAgentVersionTargetStream.stream_id
 `,
 		toVersionStreamInput,
@@ -300,7 +300,7 @@ FROM (
     SELECT abs.version,
            abs.architecture_id,
            $agentStream.stream_id AS stream_id
-    FROM   agent_binary_store abs
+    FROM agent_binary_store abs
 )
 `
 	agentBinariesStmt, err := s.Prepare(agentBinariesQ, streamInput, agentStoreBinary{})
@@ -382,9 +382,9 @@ func (s *ControllerModelState) GetAgentBinariesForVersionAndStream(
 
 	stmt, err := s.Prepare(`
 SELECT &binaryForVersionAndArchitectures.*
-FROM   agent_binary_store
-WHERE  version = $binaryVersion.version
-AND    architecture_id IN ($ids[:])
+FROM agent_binary_store
+WHERE version = $binaryVersion.version
+AND architecture_id IN ($ids[:])
 `, binaryForVersionAndArchitectures{}, binaryVersion{}, ids{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -425,7 +425,7 @@ func (s *ControllerModelState) GetModelAgentStream(ctx context.Context) (agentbi
 	stream := agentStream{}
 	stmt, err := s.Prepare(`
 SELECT &agentStream.*
-FROM   agent_version
+FROM agent_version
 `, stream)
 	if err != nil {
 		return -1, errors.Capture(err)

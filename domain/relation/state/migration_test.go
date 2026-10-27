@@ -594,7 +594,7 @@ func (s *migrationSuite) addApplicationEndpointFromRelation(c *tc.C,
 
 	// Add relation to charm
 	s.query(c, `
-INSERT INTO charm_relation (uuid, charm_uuid, name, interface, capacity, role_id,  scope_id)
+INSERT INTO charm_relation (uuid, charm_uuid, name, interface, capacity, role_id, scope_id)
 SELECT ?, ?, ?, ?, ?, crr.id, crs.id
 FROM charm_relation_scope crs
 JOIN charm_relation_role crr ON crr.name = ?
@@ -604,8 +604,8 @@ WHERE crs.name = ?
 
 	// application endpoint
 	s.query(c, `
-INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid,space_uuid)
-VALUES (?,?,?,?)
+INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid, space_uuid)
+VALUES (?, ?, ?, ?)
 `, relationEndpointUUID.String(), appUUID.String(), charmRelationUUID.String(), network.AlphaSpaceId)
 
 	return relationEndpointUUID

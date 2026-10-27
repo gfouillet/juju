@@ -195,7 +195,7 @@ func (s *stateSuite) TestReapFullPath(c *tc.C) {
 	c.Assert(db.QueryRowContext(ctx, `
 SELECT target_controller_uuid, IFNULL(target_controller_alias, ''),
        target_addresses, target_ca_cert, completed_at
-FROM   model_migration_redirect WHERE model_uuid = ?`, s.modelUUID).
+FROM model_migration_redirect WHERE model_uuid = ?`, s.modelUUID).
 		Scan(&gotTargetUUID, &gotAlias, &gotAddresses, &gotCACert, &completedAt), tc.ErrorIsNil)
 	c.Check(gotTargetUUID, tc.Equals, spec.TargetControllerUUID)
 	c.Check(gotAlias, tc.Equals, "target-controller")

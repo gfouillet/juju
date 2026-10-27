@@ -96,7 +96,7 @@ func (s *ModelState) CreateImportingModel(ctx context.Context, args model.ModelD
 		stmt, err := s.Prepare(`
 INSERT INTO model_migrating (uuid, model_uuid)
 VALUES ($dbModelMigrating.uuid, $dbModelMigrating.model_uuid)
-		`, migrationRecord)
+`, migrationRecord)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -498,7 +498,7 @@ WHERE value = $dbContainerTypeValue.value
 	}
 
 	insertConstraintStmt, err := preparer.Prepare(
-		`INSERT INTO "constraint" (*) VALUES($dbConstraintInsert.*)`,
+		`INSERT INTO "constraint" (*) VALUES ($dbConstraintInsert.*)`,
 		constraintInsertValues,
 	)
 	if err != nil {
@@ -620,8 +620,8 @@ func (s *ModelState) checkStoragePoolsExist(
 
 	query := `
 SELECT COUNT(*) AS &dbAggregateCount.count
-FROM   storage_pool
-WHERE  uuid IN ($poolUUIDs[:])
+FROM storage_pool
+WHERE uuid IN ($poolUUIDs[:])
 `
 	stmt, err := s.Prepare(query, dbVal, input)
 	if err != nil {
@@ -1208,7 +1208,7 @@ core_count AS (
 	SELECT 0 AS core_count
 )
 SELECT &dbModelInfoSummary.*, &dbModelCountSummary.*
-FROM   model, agent_version, machine_count, unit_count, core_count
+FROM model, agent_version, machine_count, unit_count, core_count
 `,
 		dbModelInfoSummary{}, dbModelCountSummary{},
 	)

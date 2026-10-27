@@ -88,10 +88,10 @@ func (st *State) getCompletedOperationUUIDsOlderThan(ctx context.Context, tx *sq
 	expiresAt := expires{At: st.clock.Now().UTC().Add(-age)}
 
 	stmt, err := st.Prepare(`
-	SELECT &operation.uuid 
-	FROM   operation
-	WHERE  completed_at IS NOT NULL
-	AND    completed_at < $expires.at`,
+	SELECT &operation.uuid
+	FROM operation
+	WHERE completed_at IS NOT NULL
+	AND completed_at < $expires.at`,
 		operation{}, expiresAt)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -252,8 +252,8 @@ SELECT COALESCE(SUM(
     octet_length(oto.task_uuid) +
     octet_length(oto.store_path) +
     octet_length(osm.path) +
-    octet_length(osm.metadata_uuid)              
-),0) AS &result.size
+    octet_length(osm.metadata_uuid)
+), 0) AS &result.size
 FROM operation_task_output as oto
 JOIN object_store_metadata_path AS osm ON oto.store_path = osm.path
 `, result{})
@@ -279,8 +279,8 @@ SELECT COALESCE(SUM(
     octet_length(osm.sha_256) +
     octet_length(osm.sha_384) +
     octet_length(osm.size)), 0) AS &result.size
-FROM   object_store_metadata AS osm 
-WHERE  uuid IN uuids`, result{})
+FROM object_store_metadata AS osm
+WHERE uuid IN uuids`, result{})
 	if err != nil {
 		return 0, errors.Capture(err)
 	}

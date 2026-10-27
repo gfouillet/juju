@@ -360,8 +360,8 @@ func (s *exportWatcherSuite) setImportClaimPhase(c *tc.C, modelUUID string, phas
 	err := s.ControllerTxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 UPDATE model_migration_import
-SET    phase_type_id = ?, updated_at = DATETIME('now', 'utc')
-WHERE  model_uuid = ?`, phaseID, modelUUID)
+SET phase_type_id = ?, updated_at = DATETIME('now', 'utc')
+WHERE model_uuid = ?`, phaseID, modelUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

@@ -177,7 +177,7 @@ func (s *baseSuite) SetUpTest(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, "test", "iaas", "prod", "test-model", "ec2")
-		`, modelUUID.String(), internaltesting.ControllerTag.Id())
+`, modelUUID.String(), internaltesting.ControllerTag.Id())
 		if err != nil {
 			return errors.Errorf("creating model: %w", err)
 		}
@@ -185,7 +185,7 @@ VALUES (?, ?, "test", "iaas", "prod", "test-model", "ec2")
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO model_life (model_uuid, life_id)
 VALUES (?, 0);
-		`, modelUUID.String())
+`, modelUUID.String())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -773,9 +773,9 @@ func (s *baseSuite) getUnitMachineUUID(c *tc.C, unitUUID unit.UUID) machine.UUID
 
 		rows, err := tx.QueryContext(ctx, `
 SELECT m.uuid
-FROM   machine AS m
-JOIN   net_node AS nn ON nn.uuid = m.net_node_uuid
-JOIN   unit AS u ON u.net_node_uuid = nn.uuid
+FROM machine AS m
+JOIN net_node AS nn ON nn.uuid = m.net_node_uuid
+JOIN unit AS u ON u.net_node_uuid = nn.uuid
 WHERE u.uuid = ?
 `, unitUUID)
 		if err != nil {
@@ -946,7 +946,7 @@ func (s *baseSuite) addMachine(c *tc.C, name string) string {
 	machineUUID := uuid.MustNewUUID().String()
 	_, err := s.DB().Exec(`INSERT INTO net_node (uuid) VALUES (?)`, netNodeUUID)
 	c.Assert(err, tc.ErrorIsNil)
-	_, err = s.DB().Exec("INSERT INTO machine (uuid, net_node_uuid, name, life_id) VALUES (?, ?, ? ,?)",
+	_, err = s.DB().Exec("INSERT INTO machine (uuid, net_node_uuid, name, life_id) VALUES (?, ?, ?, ?)",
 		machineUUID, netNodeUUID, name, 0)
 	c.Assert(err, tc.ErrorIsNil)
 	return machineUUID

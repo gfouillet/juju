@@ -56,9 +56,9 @@ func (s *controllerStateSuite) TestGetControllerConfigEmpty(c *tc.C) {
 // controller-uuid, ca-cert, and api-port from the controller table
 // as well as entries from controller_config.
 func (s *controllerStateSuite) TestGetControllerConfigFromView(c *tc.C) {
-	s.runQuery(c, `INSERT INTO controller (uuid, model_uuid, target_version, api_port, ca_cert) VALUES (?,?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO controller (uuid, model_uuid, target_version, api_port, ca_cert) VALUES (?, ?, ?, ?, ?)`,
 		"ctrl-uuid-abc", "model-uuid-123", "4.0.0", "17070", "test-ca-cert")
-	s.runQuery(c, `INSERT INTO controller_config ("key", value) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO controller_config ("key", value) VALUES (?, ?)`,
 		"model-logfile-max-size", "10M")
 
 	result, err := s.state.GetControllerConfig(c.Context())
@@ -72,7 +72,7 @@ func (s *controllerStateSuite) TestGetControllerConfigFromView(c *tc.C) {
 // TestGetControllerConfigNoAPIPort verifies that when api_port is NULL
 // in the controller table, the view omits the api-port key.
 func (s *controllerStateSuite) TestGetControllerConfigNoAPIPort(c *tc.C) {
-	s.runQuery(c, `INSERT INTO controller (uuid, model_uuid, target_version, ca_cert) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO controller (uuid, model_uuid, target_version, ca_cert) VALUES (?, ?, ?, ?)`,
 		"ctrl-uuid-abc", "model-uuid-123", "4.0.0", "test-ca-cert")
 
 	result, err := s.state.GetControllerConfig(c.Context())
@@ -85,7 +85,7 @@ func (s *controllerStateSuite) TestGetControllerConfigNoAPIPort(c *tc.C) {
 
 // TestGetControllerConfigSingleEntry verifies a single config entry.
 func (s *controllerStateSuite) TestGetControllerConfigSingleEntry(c *tc.C) {
-	s.runQuery(c, `INSERT INTO controller_config ("key", value) VALUES (?,?)`,
+	s.runQuery(c, `INSERT INTO controller_config ("key", value) VALUES (?, ?)`,
 		"model-logfile-max-size", "10M")
 
 	result, err := s.state.GetControllerConfig(c.Context())
@@ -113,7 +113,7 @@ func (s *controllerStateSuite) TestGetCloudEndpointCloudLevel(c *tc.C) {
 // takes precedence over the cloud endpoint.
 func (s *controllerStateSuite) TestGetCloudEndpointRegionOverride(c *tc.C) {
 	cloudUUID := s.setupCloud(c, "mycloud", "https://cloud.example.com:5000/v3")
-	s.runQuery(c, `INSERT INTO cloud_region (uuid, cloud_uuid, name, endpoint) VALUES (?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO cloud_region (uuid, cloud_uuid, name, endpoint) VALUES (?, ?, ?, ?)`,
 		"region-uuid-1", cloudUUID, "us-east-1", "https://us-east-1.example.com:5000/v3")
 
 	endpoint, err := s.state.GetCloudEndpoint(c.Context(), "mycloud", "us-east-1")
@@ -125,7 +125,7 @@ func (s *controllerStateSuite) TestGetCloudEndpointRegionOverride(c *tc.C) {
 // endpoint, the cloud-level endpoint is returned.
 func (s *controllerStateSuite) TestGetCloudEndpointRegionNoEndpoint(c *tc.C) {
 	cloudUUID := s.setupCloud(c, "mycloud", "https://cloud.example.com:5000/v3")
-	s.runQuery(c, `INSERT INTO cloud_region (uuid, cloud_uuid, name) VALUES (?,?,?)`,
+	s.runQuery(c, `INSERT INTO cloud_region (uuid, cloud_uuid, name) VALUES (?, ?, ?)`,
 		"region-uuid-1", cloudUUID, "us-east-1")
 
 	endpoint, err := s.state.GetCloudEndpoint(c.Context(), "mycloud", "us-east-1")
@@ -174,7 +174,7 @@ func (s *controllerStateSuite) TestGetCachedImageMetadataRootStorageSize(c *tc.C
 	s.runQuery(c, `INSERT INTO cloud_image_metadata
 		(uuid, created_at, source, stream, region, version, architecture_id,
 		 virt_type, root_storage_type, root_storage_size, priority, image_id)
-		VALUES (?,datetime('now'),?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		"meta-uuid-1", "custom", "released", "us-east-1", "22.04", 0,
 		"hvm", "ebs", 8192, 10, "img-with-size")
 
@@ -252,7 +252,7 @@ func (s *controllerStateSuite) TestGetLokiConfig(c *tc.C) {
 // setupCloud inserts a cloud and returns its UUID.
 func (s *controllerStateSuite) setupCloud(c *tc.C, name, endpoint string) string {
 	uuid := "cloud-uuid-" + name
-	s.runQuery(c, `INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify) VALUES (?,?,?,?,?)`,
+	s.runQuery(c, `INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify) VALUES (?, ?, ?, ?, ?)`,
 		uuid, name, 5, endpoint, false)
 	return uuid
 }
@@ -263,7 +263,7 @@ func (s *controllerStateSuite) insertImageMetadata(c *tc.C, imageID, stream, reg
 	s.runQuery(c, `INSERT INTO cloud_image_metadata
 		(uuid, created_at, source, stream, region, version, architecture_id,
 		 virt_type, root_storage_type, priority, image_id)
-		VALUES (?,datetime('now'),?,?,?,?,?,?,?,?,?)`,
+		VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		uuid, source, stream, region, version, archID,
 		virtType, rootStorageType, priority, imageID)
 }

@@ -46,7 +46,7 @@ func (st *State) GetApplicationStorageDirectivesInfo(
 
 	query, err := st.Prepare(`
 SELECT &applicationStorageInfo.* FROM (
-	SELECT  asd.count,
+	SELECT asd.count,
 			asd.size_mib,
 			asd.storage_name,
 			sp.name as storage_pool_name
@@ -54,7 +54,7 @@ SELECT &applicationStorageInfo.* FROM (
 	JOIN storage_pool sp ON sp.uuid = asd.storage_pool_uuid
 	WHERE asd.application_uuid = $entityUUID.uuid
 )
-		`,
+`,
 		appUUIDInput, applicationStorageInfo{},
 	)
 	if err != nil {
@@ -125,13 +125,13 @@ SELECT &storageDirective.* FROM (
            cm.name AS charm_metadata_name,
            csk.kind AS charm_storage_kind,
            cs.count_max AS count_max
-    FROM   application_storage_directive asd
-    JOIN   charm_storage cs ON cs.charm_uuid = asd.charm_uuid AND cs.name = asd.storage_name
-    JOIN   charm_metadata cm ON cm.charm_uuid = asd.charm_uuid
-    JOIN   charm_storage_kind csk ON csk.id = cs.storage_kind_id
-    WHERE  application_uuid = $entityUUID.uuid
+    FROM application_storage_directive asd
+    JOIN charm_storage cs ON cs.charm_uuid = asd.charm_uuid AND cs.name = asd.storage_name
+    JOIN charm_metadata cm ON cm.charm_uuid = asd.charm_uuid
+    JOIN charm_storage_kind csk ON csk.id = cs.storage_kind_id
+    WHERE application_uuid = $entityUUID.uuid
 )
-		`,
+`,
 		appUUIDInput, storageDirective{},
 	)
 	if err != nil {
@@ -195,18 +195,18 @@ func (st *State) GetStorageInstanceCompositionByUUID(
 	compositionQ := `
 SELECT &storageInstanceComposition.*
 FROM (
-    SELECT    sf.uuid AS filesystem_uuid,
+    SELECT sf.uuid AS filesystem_uuid,
               sf.provision_scope_id AS filesystem_provision_scope,
               si.storage_name AS storage_name,
               si.uuid AS uuid,
               sv.uuid AS volume_uuid,
               sv.provision_scope_id AS volume_provision_scope
-    FROM      storage_instance si
+    FROM storage_instance si
     LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
     LEFT JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
     LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
     LEFT JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
-    WHERE     si.uuid = $entityUUID.uuid
+    WHERE si.uuid = $entityUUID.uuid
 )
 `
 
@@ -309,18 +309,18 @@ func (st *State) getStorageInstancesInfoForAttachByProviderIDs(
 	q := `
 WITH matched_storage_instances AS (
     SELECT DISTINCT si.uuid
-    FROM      storage_instance si
+    FROM storage_instance si
     LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
     LEFT JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
     LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
     LEFT JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
     LEFT JOIN storage_unit_owner suo ON si.uuid = suo.storage_instance_uuid
-    WHERE     suo.storage_instance_uuid IS NULL
-    AND       (sf.provider_id IN ($storageProviderIDs[:])
-           OR  sv.provider_id IN ($storageProviderIDs[:]))
+    WHERE suo.storage_instance_uuid IS NULL
+    AND (sf.provider_id IN ($storageProviderIDs[:])
+           OR sv.provider_id IN ($storageProviderIDs[:]))
 )
 SELECT * AS &storageInstanceInfoForAttach.* FROM (
-    SELECT    si.uuid,
+    SELECT si.uuid,
               si.charm_name,
               si.storage_name,
               si.life_id,
@@ -334,15 +334,15 @@ SELECT * AS &storageInstanceInfoForAttach.* FROM (
               sv.size_mib AS volume_size_mib,
               sv.provision_scope_id AS volume_provision_scope_id,
               mv.machine_uuid AS volume_owned_machine_uuid
-    FROM      matched_storage_instances msi
-    JOIN      storage_instance si ON si.uuid = msi.uuid
+    FROM matched_storage_instances msi
+    JOIN storage_instance si ON si.uuid = msi.uuid
     LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
     LEFT JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
     LEFT JOIN machine_filesystem mf ON sif.storage_filesystem_uuid = mf.filesystem_uuid
     LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
     LEFT JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
     LEFT JOIN machine_volume mv ON siv.storage_volume_uuid = mv.volume_uuid
-    ORDER BY  si.uuid
+    ORDER BY si.uuid
 )
 `
 	queryStmt, err := st.Prepare(
@@ -383,24 +383,24 @@ func (st *State) getStorageInstanceUnitAttachmentsForProviderIDs(
 	q := `
 WITH matched_storage_instances AS (
     SELECT DISTINCT si.uuid
-    FROM      storage_instance si
+    FROM storage_instance si
     LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
     LEFT JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
     LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
     LEFT JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
     LEFT JOIN storage_unit_owner suo ON si.uuid = suo.storage_instance_uuid
-    WHERE     suo.storage_instance_uuid IS NULL
-    AND       (sf.provider_id IN ($storageProviderIDs[:])
-           OR  sv.provider_id IN ($storageProviderIDs[:]))
+    WHERE suo.storage_instance_uuid IS NULL
+    AND (sf.provider_id IN ($storageProviderIDs[:])
+           OR sv.provider_id IN ($storageProviderIDs[:]))
 )
 SELECT &storageInstanceUnitAttachmentByStorageUUID.*
 FROM (
-    SELECT    sa.storage_instance_uuid,
+    SELECT sa.storage_instance_uuid,
               sa.unit_uuid,
               sa.uuid
-    FROM      storage_attachment sa
-    JOIN      matched_storage_instances msi ON sa.storage_instance_uuid = msi.uuid
-    ORDER BY  sa.storage_instance_uuid, sa.unit_uuid, sa.uuid
+    FROM storage_attachment sa
+    JOIN matched_storage_instances msi ON sa.storage_instance_uuid = msi.uuid
+    ORDER BY sa.storage_instance_uuid, sa.unit_uuid, sa.uuid
 )
 `
 	queryStmt, err := st.Prepare(
@@ -476,7 +476,7 @@ func (st *State) GetUnitOwnedStorageInstances(
 	attachmentCompositionQ := `
 SELECT &storageAttachmentComposition.*
 FROM (
-    SELECT    sia.storage_instance_uuid AS storage_instance_uuid,
+    SELECT sia.storage_instance_uuid AS storage_instance_uuid,
               sia.uuid AS uuid,
               sfa.uuid AS filesystem_attachment_uuid,
               sfa.storage_filesystem_uuid AS filesystem_uuid,
@@ -484,13 +484,13 @@ FROM (
               sva.uuid AS volume_attachment_uuid,
               sva.storage_volume_uuid AS volume_uuid,
               sva.provision_scope_id AS volume_attachment_provision_scope
-    FROM      storage_attachment sia
-    JOIN      unit u ON sia.unit_uuid = u.uuid
+    FROM storage_attachment sia
+    JOIN unit u ON sia.unit_uuid = u.uuid
     LEFT JOIN storage_instance_filesystem sif ON sia.storage_instance_uuid = sif.storage_instance_uuid
     LEFT JOIN storage_filesystem_attachment sfa ON sif.storage_filesystem_uuid = sfa.storage_filesystem_uuid AND u.net_node_uuid = sfa.net_node_uuid
     LEFT JOIN storage_instance_volume siv ON sia.storage_instance_uuid = siv.storage_instance_uuid
     LEFT JOIN storage_volume_attachment sva ON siv.storage_volume_uuid = sva.storage_volume_uuid AND u.net_node_uuid = sva.net_node_uuid
-    WHERE     sia.unit_uuid = $entityUUID.uuid
+    WHERE sia.unit_uuid = $entityUUID.uuid
 )
 `
 	attachmentStmt, err := st.Prepare(
@@ -609,7 +609,7 @@ func (st *State) getStorageInstancesInfoForUnitOwnedStorage(
 
 	q := `
 SELECT * AS &storageInstanceInfoForAttach.* FROM (
-    SELECT    si.uuid,
+    SELECT si.uuid,
               si.charm_name,
               si.storage_name,
               si.life_id,
@@ -623,16 +623,16 @@ SELECT * AS &storageInstanceInfoForAttach.* FROM (
               sv.size_mib AS volume_size_mib,
               sv.provision_scope_id AS volume_provision_scope_id,
               mv.machine_uuid AS volume_owned_machine_uuid
-    FROM      storage_unit_owner suo
-    JOIN      storage_instance si ON suo.storage_instance_uuid = si.uuid
+    FROM storage_unit_owner suo
+    JOIN storage_instance si ON suo.storage_instance_uuid = si.uuid
     LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
     LEFT JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
     LEFT JOIN machine_filesystem mf ON sif.storage_filesystem_uuid = mf.filesystem_uuid
     LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
     LEFT JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
     LEFT JOIN machine_volume mv ON siv.storage_volume_uuid = mv.volume_uuid
-    WHERE     suo.unit_uuid = $entityUUID.uuid
-    ORDER BY  si.uuid
+    WHERE suo.unit_uuid = $entityUUID.uuid
+    ORDER BY si.uuid
 )
 `
 	queryStmt, err := st.Prepare(q, inUUID, storageInstanceInfoForAttach{})
@@ -678,9 +678,9 @@ FROM (
 	SELECT sa.storage_instance_uuid,
 	       sa.unit_uuid,
 	       sa.uuid
-	FROM   storage_attachment sa
-	JOIN   storage_unit_owner suo ON sa.storage_instance_uuid = suo.storage_instance_uuid
-	WHERE  suo.unit_uuid = $entityUUID.uuid
+	FROM storage_attachment sa
+	JOIN storage_unit_owner suo ON sa.storage_instance_uuid = suo.storage_instance_uuid
+	WHERE suo.unit_uuid = $entityUUID.uuid
 	ORDER BY sa.storage_instance_uuid
 )
 `
@@ -721,9 +721,9 @@ FROM (
 	SELECT u.uuid AS unit_uuid,
 		   u.name AS unit_name,
 		   sia.uuid AS uuid
-	FROM   storage_attachment sia
-	JOIN   unit u ON sia.unit_uuid = u.uuid
-	WHERE  sia.storage_instance_uuid = $entityUUID.uuid
+	FROM storage_attachment sia
+	JOIN unit u ON sia.unit_uuid = u.uuid
+	WHERE sia.storage_instance_uuid = $entityUUID.uuid
 )
 `,
 		inUUID, storageInstanceUnitAttachment{})
@@ -916,8 +916,8 @@ FROM (
 	SELECT sa.storage_instance_uuid,
 	       sa.unit_uuid,
 	       sa.uuid
-	FROM   storage_attachment sa
-	WHERE  sa.storage_instance_uuid IN ($storageInstanceUUIDs[:])
+	FROM storage_attachment sa
+	WHERE sa.storage_instance_uuid IN ($storageInstanceUUIDs[:])
 	ORDER BY sa.storage_instance_uuid, sa.unit_uuid, sa.uuid
 )
 `
@@ -965,14 +965,14 @@ SELECT &storageDirective.* FROM (
            cm.name AS charm_metadata_name,
            csk.kind AS charm_storage_kind,
            cs.count_max AS count_max
-    FROM   unit u
-    JOIN   unit_storage_directive usd ON usd.unit_uuid = u.uuid AND usd.charm_uuid = u.charm_uuid
-    JOIN   charm_storage cs ON cs.charm_uuid = u.charm_uuid AND cs.name = usd.storage_name
-    JOIN   charm_metadata cm ON cm.charm_uuid = u.charm_uuid
-    JOIN   charm_storage_kind csk ON csk.id = cs.storage_kind_id
-    WHERE  u.uuid = $entityUUID.uuid
+    FROM unit u
+    JOIN unit_storage_directive usd ON usd.unit_uuid = u.uuid AND usd.charm_uuid = u.charm_uuid
+    JOIN charm_storage cs ON cs.charm_uuid = u.charm_uuid AND cs.name = usd.storage_name
+    JOIN charm_metadata cm ON cm.charm_uuid = u.charm_uuid
+    JOIN charm_storage_kind csk ON csk.id = cs.storage_kind_id
+    WHERE u.uuid = $entityUUID.uuid
 )
-		`,
+`,
 		unitUUIDInput, storageDirective{},
 	)
 	if err != nil {
@@ -1044,15 +1044,15 @@ SELECT &storageDirective.* FROM (
            cm.name AS charm_metadata_name,
            csk.kind AS charm_storage_kind,
            cs.count_max AS count_max
-    FROM   unit u
-    JOIN   unit_storage_directive usd ON usd.unit_uuid = u.uuid AND usd.charm_uuid = u.charm_uuid
-    JOIN   charm_storage cs ON cs.charm_uuid = u.charm_uuid AND cs.name = usd.storage_name
-    JOIN   charm_metadata cm ON cm.charm_uuid = u.charm_uuid
-    JOIN   charm_storage_kind csk ON csk.id = cs.storage_kind_id
-    WHERE  u.uuid = $entityUUID.uuid
-    AND    usd.storage_name = $storageDirective.storage_name
+    FROM unit u
+    JOIN unit_storage_directive usd ON usd.unit_uuid = u.uuid AND usd.charm_uuid = u.charm_uuid
+    JOIN charm_storage cs ON cs.charm_uuid = u.charm_uuid AND cs.name = usd.storage_name
+    JOIN charm_metadata cm ON cm.charm_uuid = u.charm_uuid
+    JOIN charm_storage_kind csk ON csk.id = cs.storage_kind_id
+    WHERE u.uuid = $entityUUID.uuid
+    AND usd.storage_name = $storageDirective.storage_name
 )
-		`,
+`,
 		unitUUIDInput, storageDirectiveInput,
 	)
 	if err != nil {
@@ -1157,8 +1157,8 @@ func (st *State) insertUnitStorageDirectivesForAllUnits(
 	}
 	selectUnitUUIDsStmt, err := st.Prepare(`
 SELECT &unitUUID.uuid
-FROM   unit u
-WHERE  u.application_uuid = $applicationUUID.application_uuid
+FROM unit u
+WHERE u.application_uuid = $applicationUUID.application_uuid
 `, applicationUUID, unitUUID{})
 	if err != nil {
 		return errors.Errorf("preparing all unit uuids for app query").Add(err)
@@ -1229,12 +1229,12 @@ func (st *State) updateApplicationStorageDirectives(
 
 	updateStmt, err := st.Prepare(`
 UPDATE application_storage_directive
-SET    count = $updateApplicationStorageDirective.count,
+SET count = $updateApplicationStorageDirective.count,
        size_mib = $updateApplicationStorageDirective.size_mib,
 	   storage_pool_uuid = $updateApplicationStorageDirective.storage_pool_uuid,
 	   charm_uuid = $updateApplicationStorageDirective.charm_uuid
-WHERE  application_uuid = $updateApplicationStorageDirective.application_uuid
-AND    storage_name = $updateApplicationStorageDirective.storage_name
+WHERE application_uuid = $updateApplicationStorageDirective.application_uuid
+AND storage_name = $updateApplicationStorageDirective.storage_name
 `, updateApplicationStorageDirective{})
 	if err != nil {
 		return errors.Capture(err)
@@ -1277,8 +1277,8 @@ func (st *State) setFilesystemProviderIDs(
 ) error {
 	stmt, err := st.Prepare(`
 UPDATE storage_filesystem
-SET    provider_id = $setStorageFilesystemProviderID.provider_id
-WHERE  uuid = $setStorageFilesystemProviderID.uuid
+SET provider_id = $setStorageFilesystemProviderID.provider_id
+WHERE uuid = $setStorageFilesystemProviderID.uuid
 `, setStorageFilesystemProviderID{})
 	if err != nil {
 		return errors.Capture(err)
@@ -1306,8 +1306,8 @@ func (st *State) setFilesystemAttachmentProviderIDs(
 ) error {
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_filesystem_attachment
-WHERE  uuid = $entityUUID.uuid
+FROM storage_filesystem_attachment
+WHERE uuid = $entityUUID.uuid
 `, entityUUID{})
 	if err != nil {
 		return errors.Capture(err)
@@ -1315,8 +1315,8 @@ WHERE  uuid = $entityUUID.uuid
 
 	stmt, err := st.Prepare(`
 UPDATE storage_filesystem_attachment
-SET    provider_id = $setStorageFilesystemAttachmentProviderID.provider_id
-WHERE  uuid = $setStorageFilesystemAttachmentProviderID.uuid
+SET provider_id = $setStorageFilesystemAttachmentProviderID.provider_id
+WHERE uuid = $setStorageFilesystemAttachmentProviderID.uuid
 `, setStorageFilesystemAttachmentProviderID{})
 	if err != nil {
 		return errors.Capture(err)
@@ -1373,8 +1373,8 @@ func (st *State) GetProviderTypeForPool(
 
 	providerTypeStmt, err := st.Prepare(`
 SELECT &storagePoolType.*
-FROM   storage_pool
-WHERE  uuid = $storagePoolUUID.uuid
+FROM storage_pool
+WHERE uuid = $storagePoolUUID.uuid
 `,
 		poolUUIDInput, typeVal,
 	)
@@ -1483,8 +1483,8 @@ func (st *State) GetStorageUUIDByID(ctx context.Context, storageID corestorage.I
 
 	query, err := st.Prepare(`
 SELECT &storageInstance.*
-FROM   storage_instance
-WHERE  storage_id = $storageInstance.storage_id
+FROM storage_instance
+WHERE storage_id = $storageInstance.storage_id
 `, inst)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -1519,8 +1519,8 @@ func (st *State) setStorageInstancesCharmName(
 
 	stmt, err := st.Prepare(`
 UPDATE storage_instance
-SET    charm_name = $setStorageInstanceCharmName.charm_name
-WHERE  uuid = $setStorageInstanceCharmName.uuid
+SET charm_name = $setStorageInstanceCharmName.charm_name
+WHERE uuid = $setStorageInstanceCharmName.uuid
 `, setStorageInstanceCharmName{})
 	if err != nil {
 		return errors.Errorf(
@@ -1827,30 +1827,30 @@ func (st *State) checkStorageInstancesAttachmentExpectations(
 	queryStorageInstanceAttachmentUnexpectedCount := `
 SELECT &storageInstanceAttachmentCheckCount.*
 FROM (
-    SELECT    si.uuid AS storage_instance_uuid,
+    SELECT si.uuid AS storage_instance_uuid,
               0 as expected_count,
               COUNT(sa.uuid) AS unexpected_count
-    FROM      storage_instance si
+    FROM storage_instance si
     LEFT JOIN storage_attachment sa ON sa.storage_instance_uuid = si.uuid
-    WHERE     si.uuid IN ($storageInstanceUUIDs[:])
-    GROUP BY  si.uuid
+    WHERE si.uuid IN ($storageInstanceUUIDs[:])
+    GROUP BY si.uuid
 )
 `
 
 	queryStorageInstanceAttachmentExpectedCount := `
 SELECT &storageInstanceAttachmentCheckCount.*
 FROM (
-    SELECT    si.uuid AS storage_instance_uuid,
+    SELECT si.uuid AS storage_instance_uuid,
               COUNT(sae.uuid) AS expected_count,
               COUNT(sau.uuid) AS unexpected_count
-    FROM      storage_instance si
-    LEFT JOIN storage_attachment sa  ON sa.storage_instance_uuid = si.uuid
+    FROM storage_instance si
+    LEFT JOIN storage_attachment sa ON sa.storage_instance_uuid = si.uuid
     LEFT JOIN storage_attachment sae ON sae.uuid = sa.uuid
                                     AND sae.uuid IN ($storageAttachmentUUIDs[:])
     LEFT JOIN storage_attachment sau ON sau.uuid = sa.uuid
                                     AND sau.uuid NOT IN ($storageAttachmentUUIDs[:])
-    WHERE     si.uuid IN ($storageInstanceUUIDs[:])
-    GROUP BY  si.uuid
+    WHERE si.uuid IN ($storageInstanceUUIDs[:])
+    GROUP BY si.uuid
 )
 `
 
@@ -1982,10 +1982,10 @@ func (st *State) checkUnitForStorageInstanceAttach(
 	q := `
 SELECT &unitAttachStorageInstanceCheckInfo.*
 FROM (
-    SELECT    u.charm_uuid AS unit_charm_uuid,
+    SELECT u.charm_uuid AS unit_charm_uuid,
               u.life_id AS unit_life_id,
               m.uuid AS unit_machine_uuid,
-              
+
               -- Calculate how many Storage Instance attachments the unit has
               -- for the same storage name of the Storage Instance being
               -- attached.
@@ -1993,21 +1993,21 @@ FROM (
                FROM storage_attachment sa
                JOIN storage_instance si ON sa.storage_instance_uuid = si.uuid
                WHERE sa.unit_uuid = $entityUUID.uuid
-               AND   si.storage_name = (SELECT storage_name
+               AND si.storage_name = (SELECT storage_name
                  				         FROM storage_instance
                                         WHERE uuid = $storageInstanceUUID.uuid)
               ) AS unit_attachment_count,
-              
+
               -- Calculate if the Storage Instance is already attached to the
               -- unit.
               (SELECT 1
                FROM storage_attachment sa
                WHERE sa.unit_uuid = $entityUUID.uuid
-               AND   sa.storage_instance_uuid = $storageInstanceUUID.uuid
+               AND sa.storage_instance_uuid = $storageInstanceUUID.uuid
               ) AS already_attached
-    FROM      unit u
+    FROM unit u
     LEFT JOIN machine m ON u.net_node_uuid = m.net_node_uuid
-    WHERE     u.uuid = $entityUUID.uuid
+    WHERE u.uuid = $entityUUID.uuid
 )
 `
 	stmt, err := st.Prepare(
@@ -2236,22 +2236,22 @@ func (st *State) getUnitStorageNameInfo(
 	*/
 	q := `
 SELECT * AS &unitStorageNameInfo.* FROM (
-    SELECT    m.uuid AS machine_uuid,
+    SELECT m.uuid AS machine_uuid,
               u.life_id as unit_life_id,
               u.name AS unit_name,
               u.uuid AS unit_uuid,
               u.net_node_uuid AS unit_net_node_uuid,
               cm.name AS charm_metadata_name,
               u.charm_uuid AS unit_charm_uuid,
-              
+
               -- Count how many attachments this unit already has for storage
               -- definition.
               (SELECT count(*)
                FROM storage_attachment sa
                JOIN storage_instance si ON sa.storage_instance_uuid = si.uuid
                WHERE si.storage_name = $charmStorageName.name
-               AND   sa.unit_uuid = $entityUUID.uuid) AS already_attached_count,
-               
+               AND sa.unit_uuid = $entityUUID.uuid) AS already_attached_count,
+
               cs.count_max AS storage_definition_count_max,
               cs.count_min AS storage_definition_count_min,
               csk.kind AS storage_definition_kind,
@@ -2259,13 +2259,13 @@ SELECT * AS &unitStorageNameInfo.* FROM (
               cs.minimum_size_mib AS storage_definition_minimum_size_mib,
               cs.read_only AS storage_definition_read_only,
               cs.shared AS storage_definition_shared
-    FROM      unit u
-    JOIN      charm_metadata cm ON u.charm_uuid = cm.charm_uuid
-    JOIN      charm_storage cs ON u.charm_uuid = cs.charm_uuid
-    JOIN      charm_storage_kind csk ON cs.storage_kind_id = csk.id
+    FROM unit u
+    JOIN charm_metadata cm ON u.charm_uuid = cm.charm_uuid
+    JOIN charm_storage cs ON u.charm_uuid = cs.charm_uuid
+    JOIN charm_storage_kind csk ON cs.storage_kind_id = csk.id
     LEFT JOIN machine m ON u.net_node_uuid = m.net_node_uuid
-    WHERE     u.uuid = $entityUUID.uuid
-    AND       cs.name = $charmStorageName.name
+    WHERE u.uuid = $entityUUID.uuid
+    AND cs.name = $charmStorageName.name
 )
 `
 
@@ -2292,10 +2292,10 @@ func (st *State) getUnitStorageCount(
 ) (uint32, error) {
 	countQuery, err := st.Prepare(`
 SELECT count(*) AS &storageCount.count
-FROM   storage_instance si
-JOIN   storage_unit_owner suo ON si.uuid = suo.storage_instance_uuid
-WHERE  suo.unit_uuid = $storageCount.unit_uuid
-AND    si.storage_name = $storageCount.storage_name
+FROM storage_instance si
+JOIN storage_unit_owner suo ON si.uuid = suo.storage_instance_uuid
+WHERE suo.unit_uuid = $storageCount.unit_uuid
+AND si.storage_name = $storageCount.storage_name
 `, storageCount{})
 	if err != nil {
 		return 0, errors.Capture(err)
@@ -2330,9 +2330,9 @@ func (st *State) checkStorageInstanceExists(
 
 	checkStmt, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_instance
-WHERE  uuid = $entityUUID.uuid
-	`,
+FROM storage_instance
+WHERE uuid = $entityUUID.uuid
+`,
 		uuidInput,
 	)
 	if err != nil {
@@ -2377,7 +2377,7 @@ func (st *State) getStorageInstanceInfoForAttach(
 
 	query := `
 SELECT * AS &storageInstanceInfoForAttach.* FROM (
-    SELECT    si.uuid,
+    SELECT si.uuid,
               si.charm_name,
               si.storage_name,
               si.life_id,
@@ -2391,14 +2391,14 @@ SELECT * AS &storageInstanceInfoForAttach.* FROM (
               sv.size_mib AS volume_size_mib,
               sv.provision_scope_id AS volume_provision_scope_id,
               mv.machine_uuid AS volume_owned_machine_uuid
-    FROM      storage_instance si
+    FROM storage_instance si
     LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
     LEFT JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
     LEFT JOIN machine_filesystem mf ON sif.storage_filesystem_uuid = mf.filesystem_uuid
     LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
     LEFT JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
     LEFT JOIN machine_volume mv ON siv.storage_volume_uuid = mv.volume_uuid
-    WHERE     si.uuid = $entityUUID.uuid
+    WHERE si.uuid = $entityUUID.uuid
 )
 `
 	queryStmt, err := st.Prepare(query, inUUID, siInfo)
@@ -2436,7 +2436,7 @@ func (st *State) getStorageInstancesInfoForAttach(
 
 	query := `
 SELECT * AS &storageInstanceInfoForAttach.* FROM (
-    SELECT    si.uuid,
+    SELECT si.uuid,
               si.charm_name,
               si.storage_name,
               si.life_id,
@@ -2450,15 +2450,15 @@ SELECT * AS &storageInstanceInfoForAttach.* FROM (
               sv.size_mib AS volume_size_mib,
               sv.provision_scope_id AS volume_provision_scope_id,
               mv.machine_uuid AS volume_owned_machine_uuid
-    FROM      storage_instance si
+    FROM storage_instance si
     LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
     LEFT JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
     LEFT JOIN machine_filesystem mf ON sif.storage_filesystem_uuid = mf.filesystem_uuid
     LEFT JOIN storage_instance_volume siv ON si.uuid = siv.storage_instance_uuid
     LEFT JOIN storage_volume sv ON siv.storage_volume_uuid = sv.uuid
     LEFT JOIN machine_volume mv ON siv.storage_volume_uuid = mv.volume_uuid
-    WHERE     si.uuid IN ($storageInstanceUUIDs[:])
-    ORDER BY  si.uuid
+    WHERE si.uuid IN ($storageInstanceUUIDs[:])
+    ORDER BY si.uuid
 )
 `
 	queryStmt, err := st.Prepare(query, storageUUIDs, storageInstanceInfoForAttach{})
@@ -2492,10 +2492,10 @@ func (st *State) getStorageInstanceInfoForAdd(
 	var result storageInfoForAdd
 	stmt, err := st.Prepare(`
 SELECT cs.* AS &storageInfoForAdd.*
-FROM   v_charm_storage cs
-JOIN   unit ON unit.charm_uuid = cs.charm_uuid
-WHERE  unit.uuid = $unitCharmStorage.uuid
-AND    cs.name = $unitCharmStorage.name
+FROM v_charm_storage cs
+JOIN unit ON unit.charm_uuid = cs.charm_uuid
+WHERE unit.uuid = $unitCharmStorage.uuid
+AND cs.name = $unitCharmStorage.name
 `, storageSpec, result)
 	if err != nil {
 		return result, errors.Capture(err)
@@ -2524,10 +2524,10 @@ func (st *State) GetModelStoragePools(
 	}
 
 	modelConfigPools, err := st.Prepare(`
-WITH 	blockdevice_pool_name AS (
+WITH blockdevice_pool_name AS (
             SELECT sk.id AS storage_kind_id,
                    value AS name
-            FROM   model_config mc,
+            FROM model_config mc,
                    storage_kind sk
             WHERE  key=$storageModelConfigKeys.blockdevice_key
             AND    sk.kind = 'block'
@@ -2535,7 +2535,7 @@ WITH 	blockdevice_pool_name AS (
 		filesystem_pool_name AS (
             SELECT sk.id AS storage_kind_id,
                    value AS name
-            FROM   model_config mc,
+            FROM model_config mc,
                    storage_kind sk
             WHERE  key=$storageModelConfigKeys.filesystem_key
             AND    sk.kind = 'filesystem'
@@ -2543,24 +2543,24 @@ WITH 	blockdevice_pool_name AS (
 		mc_pools AS (
             SELECT bpn.storage_kind_id,
                    sp.uuid AS storage_pool_uuid
-            FROM   blockdevice_pool_name bpn
-            JOIN   storage_pool sp ON bpn.name=sp.name
+            FROM blockdevice_pool_name bpn
+            JOIN storage_pool sp ON bpn.name = sp.name
             UNION
             SELECT fpn.storage_kind_id,
                    sp.uuid AS storage_pool_uuid
-            FROM   filesystem_pool_name fpn
-            JOIN   storage_pool sp ON fpn.name=sp.name
+            FROM filesystem_pool_name fpn
+            JOIN storage_pool sp ON fpn.name = sp.name
 		)
 SELECT &modelStoragePools.* FROM (
     SELECT storage_kind_id,
            storage_pool_uuid
-    FROM   mc_pools
+    FROM mc_pools
     UNION
     SELECT storage_kind_id,
            storage_pool_uuid
-    FROM   model_storage_pool
-    WHERE  storage_kind_id NOT IN (SELECT storage_kind_id
-                                   FROM   mc_pools)
+    FROM model_storage_pool
+    WHERE storage_kind_id NOT IN (SELECT storage_kind_id
+                                   FROM mc_pools)
 )
 `, storageModelConfigKeys, modelStoragePools{})
 	if err != nil {

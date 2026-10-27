@@ -185,9 +185,9 @@ func (s *relationSuite) TestRelationRemovalNotExistsSuccess(c *tc.C) {
 	// It doesn't matter that the relation does not exist.
 	// We rely on the worker to handle that fact.
 	row := s.DB().QueryRow(`
-SELECT t.name, r.entity_uuid, r.force, r.scheduled_for 
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, "removal-uuid",
+SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, "removal-uuid",
 	)
 
 	var (
@@ -315,8 +315,8 @@ func (s *relationSuite) TestDeleteRelationRemovesUnitDeparture(c *tc.C) {
 	var departureCount int
 	err = s.DB().QueryRow(`
 SELECT COUNT(*)
-FROM   relation_unit_departure
-WHERE  relation_uuid = ?`, rel).Scan(&departureCount)
+FROM relation_unit_departure
+WHERE relation_uuid = ?`, rel).Scan(&departureCount)
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(departureCount, tc.Equals, 1)
 
@@ -324,8 +324,8 @@ WHERE  relation_uuid = ?`, rel).Scan(&departureCount)
 	c.Assert(err, tc.ErrorIsNil)
 	err = s.DB().QueryRow(`
 SELECT COUNT(*)
-FROM   relation_unit_departure
-WHERE  relation_uuid = ?`, rel).Scan(&departureCount)
+FROM relation_unit_departure
+WHERE relation_uuid = ?`, rel).Scan(&departureCount)
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(departureCount, tc.Equals, 0)
 }

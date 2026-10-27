@@ -24,7 +24,7 @@ func (st *State) AllSubnetsQuery(ctx context.Context, db database.TxnRunner) ([]
 	var subnets []subnet
 	stmt, err := st.Prepare(`
 SELECT &subnet.uuid
-FROM   subnet`, subnet{})
+FROM subnet`, subnet{})
 	if err != nil {
 		return nil, errors.Errorf("preparing select subnet statement: %w", err)
 	}
@@ -162,8 +162,8 @@ func (st *State) addProviderNetworkIDForSubnet(ctx context.Context, tx *sqlair.T
 
 	selectProviderNetworkUUIDStmt, err := st.Prepare(`
 SELECT uuid AS &providerNetworkSubnet.provider_network_uuid
-FROM   provider_network
-WHERE  provider_network_id = $providerNetwork.provider_network_id`, providerNet, providerNetSub)
+FROM provider_network
+WHERE provider_network_id = $providerNetwork.provider_network_id`, providerNet, providerNetSub)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -233,8 +233,8 @@ func (st *State) addAvailabilityZones(ctx context.Context, tx *sqlair.TX, subnet
 	}
 	retrieveAvailabilityZoneStmt, err := st.Prepare(`
 SELECT &availabilityZone.uuid
-FROM   availability_zone
-WHERE  name = $availabilityZone.name`, az)
+FROM availability_zone
+WHERE name = $availabilityZone.name`, az)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -313,7 +313,7 @@ func (st *State) GetAllSubnets(
 	// Append the space uuid condition to the query only if it's passed to the function.
 	q := `
 SELECT &SubnetRow.*
-FROM   v_space_subnet`
+FROM v_space_subnet`
 
 	s, err := st.Prepare(q, SubnetRow{})
 	if err != nil {
@@ -346,8 +346,8 @@ func (st *State) GetSubnet(
 	// Append the space uuid condition to the query only if it's passed to the function.
 	q := `
 SELECT &SubnetRow.*
-FROM   v_space_subnet
-WHERE  subnet_uuid = $M.id;`
+FROM v_space_subnet
+WHERE subnet_uuid = $M.id;`
 
 	stmt, err := st.Prepare(q, SubnetRow{}, sqlair.M{})
 	if err != nil {
@@ -387,8 +387,8 @@ func (st *State) GetSubnetsByCIDR(
 	// Append the where clause to the query.
 	q := `
 SELECT &SubnetRow.*
-FROM   v_space_subnet
-WHERE  subnet_cidr = $M.cidr`
+FROM v_space_subnet
+WHERE subnet_cidr = $M.cidr`
 
 	s, err := st.Prepare(q, SubnetRow{}, sqlair.M{})
 	if err != nil {
@@ -426,8 +426,8 @@ func (st *State) getSubnetByProviderID(ctx context.Context, tx *sqlair.TX, id st
 	row := SubnetRow{ProviderID: id}
 	stmt, err := st.Prepare(`
 SELECT &SubnetRow.*
-FROM   v_space_subnet
-WHERE  subnet_provider_id = $SubnetRow.subnet_provider_id`, row)
+FROM v_space_subnet
+WHERE subnet_provider_id = $SubnetRow.subnet_provider_id`, row)
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -452,8 +452,8 @@ func (st *State) updateSubnetSpaceID(
 ) error {
 	updateSubnetSpaceIDStmt, err := st.Prepare(`
 UPDATE subnet
-SET    space_uuid = $subnet.space_uuid
-WHERE  uuid = $subnet.uuid;`, subnet)
+SET space_uuid = $subnet.space_uuid
+WHERE uuid = $subnet.uuid;`, subnet)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -512,8 +512,8 @@ DELETE FROM subnet WHERE uuid = $subnet.uuid;`, sub)
 	}
 	selectProviderNetworkStmt, err := st.Prepare(`
 SELECT &providerNetworkSubnet.provider_network_uuid
-FROM   provider_network_subnet
-WHERE  subnet_uuid = $subnet.uuid;`, sub, providerNetSub)
+FROM provider_network_subnet
+WHERE subnet_uuid = $subnet.uuid;`, sub, providerNetSub)
 	if err != nil {
 		return errors.Errorf("preparing select provider network statement: %w", err)
 	}

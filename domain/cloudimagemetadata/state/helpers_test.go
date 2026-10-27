@@ -24,7 +24,7 @@ func (s *stateSuite) retrieveMetadataFromDB(c *tc.C) ([]cloudimagemetadata.Metad
 		metadata = nil
 
 		rows, err := tx.Query(`
-SELECT 
+SELECT
     created_at,
     source,
     stream,

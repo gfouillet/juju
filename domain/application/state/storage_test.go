@@ -49,7 +49,7 @@ INSERT INTO storage_pool (uuid, name, type) VALUES (?, ?, ?)`,
 		poolUUID, "rootfs", "rootfs")
 	c.Assert(err, tc.ErrorIsNil)
 	_, err = s.ModelSuite.DB().Exec(`
-INSERT INTO storage_instance(uuid, charm_name, storage_name, storage_id,
+INSERT INTO storage_instance (uuid, charm_name, storage_name, storage_id,
                              storage_kind_id, life_id, storage_pool_uuid,
                              requested_size_mib)
 VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
@@ -231,7 +231,7 @@ func (s *applicationStateSuite) TestCreateApplicationWithStorage(c *tc.C) {
 		return tx.QueryRowContext(ctx, `
 SELECT charm_uuid
 FROM application
-WHERE name=?`, "666").Scan(&charmUUID)
+WHERE name = ?`, "666").Scan(&charmUUID)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	var (
@@ -245,8 +245,8 @@ WHERE name=?`, "666").Scan(&charmUUID)
 		rows, err := tx.QueryContext(ctx, `
 SELECT cs.name, csk.kind
 FROM charm_storage cs
-JOIN charm_storage_kind csk ON csk.id=cs.storage_kind_id
-WHERE charm_uuid=?`, charmUUID)
+JOIN charm_storage_kind csk ON csk.id = cs.storage_kind_id
+WHERE charm_uuid = ?`, charmUUID)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -267,7 +267,7 @@ WHERE charm_uuid=?`, charmUUID)
 
 		rows, err := tx.QueryContext(ctx, `
 SELECT storage_name, storage_pool_uuid, size_mib, count
-FROM   application_storage_directive
+FROM application_storage_directive
 WHERE application_uuid = ? AND charm_uuid = ?`, appUUID, charmUUID)
 		if err != nil {
 			return errors.Capture(err)

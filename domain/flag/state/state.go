@@ -40,8 +40,8 @@ func (s *State) SetFlag(ctx context.Context, flagName string, value bool, descri
 	flag := dbFlag{Name: flagName, Value: value, Description: description}
 
 	stmt, err := s.Prepare(`
-INSERT INTO   flag (name, value, description)
-VALUES        ($dbFlag.*)
+INSERT INTO flag (name, value, description)
+VALUES ($dbFlag.*)
 ON CONFLICT (name) DO UPDATE SET value = excluded.value,
                                  description = excluded.description;
 `, flag)
@@ -82,9 +82,9 @@ func (s *State) GetFlag(ctx context.Context, flagName string) (bool, error) {
 
 	stmt, err := s.Prepare(`
 SELECT &dbFlag.value
-FROM   flag
-WHERE  name = $dbFlag.name;
-	`, flag)
+FROM flag
+WHERE name = $dbFlag.name;
+`, flag)
 	if err != nil {
 		return false, errors.Errorf("preparing select flag stmt: %w", err)
 	}

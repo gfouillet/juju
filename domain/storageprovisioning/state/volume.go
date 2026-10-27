@@ -41,8 +41,8 @@ func (st *State) CheckVolumeForIDExists(
 	io := volumeID{ID: volID}
 	checkQuery, err := st.Prepare(`
 SELECT &volumeID.*
-FROM   storage_volume
-WHERE  volume_id=$volumeID.volume_id
+FROM storage_volume
+WHERE volume_id = $volumeID.volume_id
 `, io)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -78,8 +78,8 @@ func (st *State) checkVolumeAttachmentExists(
 
 	checkQuery, err := st.Prepare(`
 SELECT &volumeAttachmentUUID.*
-FROM   storage_volume_attachment
-WHERE  uuid = $volumeAttachmentUUID.uuid
+FROM storage_volume_attachment
+WHERE uuid = $volumeAttachmentUUID.uuid
 `, vaUUIDInput)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -107,8 +107,8 @@ func (st *State) checkVolumeAttachmentPlanExists(
 
 	checkQuery, err := st.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_volume_attachment_plan
-WHERE  uuid = $entityUUID.uuid
+FROM storage_volume_attachment_plan
+WHERE uuid = $entityUUID.uuid
 `, io)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -135,8 +135,8 @@ func (st *State) checkVolumeExists(
 
 	checkQuery, err := st.Prepare(`
 SELECT &volumeUUID.*
-FROM   storage_volume
-WHERE  uuid = $volumeUUID.uuid
+FROM storage_volume
+WHERE uuid = $volumeUUID.uuid
 `,
 		io,
 	)
@@ -2032,7 +2032,7 @@ func (st *State) InitialWatchStatementModelProvisionedVolumeAttachments() (
 SELECT &entityUUID.*
 FROM   storage_volume_attachment
 WHERE  provision_scope_id=0
-		`, entityUUID{})
+`, entityUUID{})
 		if err != nil {
 			return nil, errors.Capture(err)
 		}

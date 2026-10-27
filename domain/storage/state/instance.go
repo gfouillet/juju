@@ -55,7 +55,7 @@ func (s *State) GetStorageInstanceInfo(
 	const storageInstQ = `
 SELECT &storageInstanceInfo.*
 FROM (
-    SELECT    si.uuid,
+    SELECT si.uuid,
               si.life_id,
               si.storage_id,
               si.storage_kind_id,
@@ -70,7 +70,7 @@ FROM (
               svs.status_id AS storage_volume_status_id,
               svs.message AS storage_volume_status_message,
               svs.updated_at AS storage_volume_status_updated_at
-    FROM      storage_instance si
+    FROM storage_instance si
     LEFT JOIN storage_instance_filesystem sif ON si.uuid = sif.storage_instance_uuid
     LEFT JOIN storage_filesystem sf ON sif.storage_filesystem_uuid = sf.uuid
     LEFT JOIN storage_filesystem_status sfs ON sf.uuid = sfs.filesystem_uuid
@@ -79,7 +79,7 @@ FROM (
     LEFT JOIN storage_volume_status svs ON sv.uuid = svs.volume_uuid
     LEFT JOIN storage_unit_owner suo ON si.uuid = suo.storage_instance_uuid
     LEFT JOIN unit u ON suo.unit_uuid = u.uuid
-    WHERE     si.uuid = $entityUUID.uuid
+    WHERE si.uuid = $entityUUID.uuid
 )
 `
 
@@ -101,7 +101,7 @@ FROM (
 	const storageInstAttachmentsQ = `
 SELECT &storageInstanceInfoAttachment.*
 FROM (
-    SELECT    sa.uuid,
+    SELECT sa.uuid,
               sa.life_id,
               sa.unit_uuid,
               sfa.mount_point AS storage_filesystem_attachment_mount_point,
@@ -111,8 +111,8 @@ FROM (
               u.name AS unit_name,
               m.name AS machine_name,
               m.uuid AS machine_uuid
-    FROM      storage_attachment sa
-    JOIN      unit u ON sa.unit_uuid = u.uuid
+    FROM storage_attachment sa
+    JOIN unit u ON sa.unit_uuid = u.uuid
     LEFT JOIN machine m ON u.net_node_uuid = m.net_node_uuid
     LEFT JOIN storage_instance_filesystem sif ON sif.storage_instance_uuid = sa.storage_instance_uuid
     LEFT JOIN storage_filesystem_attachment sfa ON u.net_node_uuid = sfa.net_node_uuid
@@ -121,9 +121,9 @@ FROM (
     LEFT JOIN storage_volume_attachment sva ON m.net_node_uuid = sva.net_node_uuid
           AND sva.storage_volume_uuid = siv.storage_volume_uuid
     LEFT JOIN block_device bd ON sva.block_device_uuid = bd.uuid
-    WHERE     sa.storage_instance_uuid = $entityUUID.uuid
-    GROUP BY  sa.uuid
-    ORDER BY  sa.uuid
+    WHERE sa.storage_instance_uuid = $entityUUID.uuid
+    GROUP BY sa.uuid
+    ORDER BY sa.uuid
 )
 `
 
@@ -145,18 +145,18 @@ FROM (
 	const storageInstAttachmentBlockDeviceLinkQ = `
 SELECT &storageInstanceInfoAttachmentBlockDeviceLink.*
 FROM (
-    SELECT    sa.uuid AS storage_attachment_uuid,
+    SELECT sa.uuid AS storage_attachment_uuid,
               bdld.name AS block_device_link_device_name
-    FROM      storage_attachment sa
-    JOIN      unit u ON sa.unit_uuid = u.uuid
-    JOIN      machine m ON u.net_node_uuid = m.net_node_uuid
-    JOIN      storage_instance_volume siv ON siv.storage_instance_uuid = sa.storage_instance_uuid
-    JOIN      storage_volume_attachment sva ON m.net_node_uuid = sva.net_node_uuid
+    FROM storage_attachment sa
+    JOIN unit u ON sa.unit_uuid = u.uuid
+    JOIN machine m ON u.net_node_uuid = m.net_node_uuid
+    JOIN storage_instance_volume siv ON siv.storage_instance_uuid = sa.storage_instance_uuid
+    JOIN storage_volume_attachment sva ON m.net_node_uuid = sva.net_node_uuid
           AND sva.storage_volume_uuid = siv.storage_volume_uuid
-    JOIN      block_device bd ON sva.block_device_uuid = bd.uuid
-    JOIN      block_device_link_device bdld ON bd.uuid = bdld.block_device_uuid
-    WHERE     sa.storage_instance_uuid = $entityUUID.uuid
-    ORDER BY  sa.uuid
+    JOIN block_device bd ON sva.block_device_uuid = bd.uuid
+    JOIN block_device_link_device bdld ON bd.uuid = bdld.block_device_uuid
+    WHERE sa.storage_instance_uuid = $entityUUID.uuid
+    ORDER BY sa.uuid
 )
 `
 
@@ -266,8 +266,8 @@ func (s *State) GetStorageInstanceUUIDByID(
 
 	stmt, err := s.Prepare(`
 SELECT &entityUUID.*
-FROM   storage_instance
-WHERE  storage_id = $storageInstanceID.storage_id`,
+FROM storage_instance
+WHERE storage_id = $storageInstanceID.storage_id`,
 		input, dbVal,
 	)
 	if err != nil {
@@ -312,8 +312,8 @@ func (s *State) GetStorageInstanceUUIDsByIDs(
 
 	stmt, err := s.Prepare(`
 SELECT &storageInstanceUUIDAndID.*
-FROM   storage_instance
-WHERE  storage_id IN ($storageInstanceIDs[:])`,
+FROM storage_instance
+WHERE storage_id IN ($storageInstanceIDs[:])`,
 		storageInstanceUUIDAndID{}, storageInstanceIDs,
 	)
 	if err != nil {

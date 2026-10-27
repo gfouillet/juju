@@ -176,9 +176,9 @@ func (s *ControllerState) MatchesControllerNodePasswordHash(ctx context.Context,
 
 	query := `
 SELECT COUNT(*) AS &validatePasswordHash.count
-FROM   controller_node_password
-WHERE  controller_id = $validatePasswordHash.uuid
-AND    password_hash = $validatePasswordHash.password_hash;
+FROM controller_node_password
+WHERE controller_id = $validatePasswordHash.uuid
+AND password_hash = $validatePasswordHash.password_hash;
 `
 	stmt, err := s.Prepare(query, args)
 	if err != nil {

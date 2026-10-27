@@ -33,22 +33,22 @@ func (st *State) RelationExists(ctx context.Context, rUUID string) (bool, error)
 	relationUUID := entityUUID{UUID: rUUID}
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   relation
-WHERE  uuid = $entityUUID.uuid`, relationUUID)
+FROM relation
+WHERE uuid = $entityUUID.uuid`, relationUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing relation exists query: %w", err)
 	}
 
 	checkCharmSourcesStmt, err := st.Prepare(`
 SELECT COUNT(cs.name) AS &count.count
-FROM   charm_source AS cs
-JOIN   charm AS c ON cs.id = c.source_id
-JOIN   application AS a ON c.uuid = a.charm_uuid
-JOIN   application_endpoint AS ae ON a.uuid = ae.application_uuid
-JOIN   relation_endpoint AS re ON ae.uuid = re.endpoint_uuid
-WHERE  re.relation_uuid = $entityUUID.uuid
-AND    cs.name = 'cmr'
-	`, count{}, relationUUID)
+FROM charm_source AS cs
+JOIN charm AS c ON cs.id = c.source_id
+JOIN application AS a ON c.uuid = a.charm_uuid
+JOIN application_endpoint AS ae ON a.uuid = ae.application_uuid
+JOIN relation_endpoint AS re ON ae.uuid = re.endpoint_uuid
+WHERE re.relation_uuid = $entityUUID.uuid
+AND cs.name = 'cmr'
+`, count{}, relationUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing relation exists query: %w", err)
 	}
@@ -102,32 +102,32 @@ func (st *State) GetRelationKind(ctx context.Context, rUUID string) (internal.Re
 
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   relation
-WHERE  uuid = $entityUUID.uuid`, relationUUID)
+FROM relation
+WHERE uuid = $entityUUID.uuid`, relationUUID)
 	if err != nil {
 		return internal.RelationKindOrdinary, errors.Errorf("preparing relation exists query: %w", err)
 	}
 
 	countRemoteOffererStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM   relation AS r
-JOIN   relation_endpoint AS re ON r.uuid = re.relation_uuid
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-JOIN   application AS a ON ae.application_uuid = a.uuid
-JOIN   application_remote_offerer AS aro ON aro.application_uuid = a.uuid
-WHERE  r.uuid = $entityUUID.uuid`, count{}, relationUUID)
+FROM relation AS r
+JOIN relation_endpoint AS re ON r.uuid = re.relation_uuid
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+JOIN application AS a ON ae.application_uuid = a.uuid
+JOIN application_remote_offerer AS aro ON aro.application_uuid = a.uuid
+WHERE r.uuid = $entityUUID.uuid`, count{}, relationUUID)
 	if err != nil {
 		return internal.RelationKindOrdinary, errors.Errorf("preparing remote offerer count query: %w", err)
 	}
 
 	countRemoteConsumerStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM   relation AS r
-JOIN   relation_endpoint AS re ON r.uuid = re.relation_uuid
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-JOIN   application AS a ON ae.application_uuid = a.uuid
-JOIN   application_remote_consumer AS arc ON arc.offer_connection_uuid = a.uuid
-WHERE  r.uuid = $entityUUID.uuid`, count{}, relationUUID)
+FROM relation AS r
+JOIN relation_endpoint AS re ON r.uuid = re.relation_uuid
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+JOIN application AS a ON ae.application_uuid = a.uuid
+JOIN application_remote_consumer AS arc ON arc.offer_connection_uuid = a.uuid
+WHERE r.uuid = $entityUUID.uuid`, count{}, relationUUID)
 	if err != nil {
 		return internal.RelationKindOrdinary, errors.Errorf("preparing remote consumer count query: %w", err)
 	}
@@ -180,9 +180,9 @@ func (st *State) EnsureRelationNotAlive(ctx context.Context, rUUID string) error
 	relationUUID := entityUUID{UUID: rUUID}
 	stmt, err := st.Prepare(`
 UPDATE relation
-SET    life_id = 1
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 0`, relationUUID)
+SET life_id = 1
+WHERE uuid = $entityUUID.uuid
+AND life_id = 0`, relationUUID)
 	if err != nil {
 		return errors.Errorf("preparing relation life update: %w", err)
 	}
@@ -243,8 +243,8 @@ func (st *State) GetRelationLife(ctx context.Context, rUUID string) (life.Life, 
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.life_id
-FROM   relation
-WHERE  uuid = $entityUUID.uuid`, relationLife, relationUUID)
+FROM relation
+WHERE uuid = $entityUUID.uuid`, relationLife, relationUUID)
 	if err != nil {
 		return -1, errors.Errorf("preparing relation life query: %w", err)
 	}
@@ -284,14 +284,14 @@ func (st *State) UnitNamesInScope(ctx context.Context, rUUID string) ([]string, 
 	relationUUID := entityUUID{UUID: rUUID}
 
 	stmt, err := st.Prepare(`
-SELECT u.name AS &uName.name 
-FROM   relation_endpoint re 
-JOIN   relation_unit ru ON re.uuid = ru.relation_endpoint_uuid
-JOIN   unit u on ru.unit_uuid = u.uuid 
-JOIN   charm c ON u.charm_uuid = c.uuid
-JOIN   charm_source cs ON c.source_id = cs.id
-WHERE  re.relation_uuid = $entityUUID.uuid
-AND    cs.name != 'cmr'`, uName{}, relationUUID)
+SELECT u.name AS &uName.name
+FROM relation_endpoint re
+JOIN relation_unit ru ON re.uuid = ru.relation_endpoint_uuid
+JOIN unit u on ru.unit_uuid = u.uuid
+JOIN charm c ON u.charm_uuid = c.uuid
+JOIN charm_source cs ON c.source_id = cs.id
+WHERE re.relation_uuid = $entityUUID.uuid
+AND cs.name != 'cmr'`, uName{}, relationUUID)
 	if err != nil {
 		return nil, errors.Errorf("preparing relation scopes query: %w", err)
 	}
@@ -348,16 +348,16 @@ func (st *State) deleteRelation(ctx context.Context, tx *sqlair.TX, relationUUID
 	// Include both regular units and synthetic units in scope
 	countUnitsInScopeStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM   relation_unit ru
-JOIN   relation_endpoint re ON ru.relation_endpoint_uuid = re.uuid
-WHERE  re.relation_uuid = $entityUUID.uuid`, count{}, relationUUID)
+FROM relation_unit ru
+JOIN relation_endpoint re ON ru.relation_endpoint_uuid = re.uuid
+WHERE re.relation_uuid = $entityUUID.uuid`, count{}, relationUUID)
 	if err != nil {
 		return errors.Errorf("preparing relation units in scope count query: %w", err)
 	}
 
 	settingsStmt, err := st.Prepare(`
 DELETE FROM relation_application_setting
-WHERE  relation_endpoint_uuid IN (
+WHERE relation_endpoint_uuid IN (
     SELECT uuid FROM relation_endpoint WHERE relation_uuid = $entityUUID.uuid
 )`, relationUUID)
 	if err != nil {
@@ -366,7 +366,7 @@ WHERE  relation_endpoint_uuid IN (
 
 	settingsHashStmt, err := st.Prepare(`
 DELETE FROM relation_application_settings_hash
-WHERE  relation_endpoint_uuid IN (
+WHERE relation_endpoint_uuid IN (
     SELECT uuid FROM relation_endpoint WHERE relation_uuid = $entityUUID.uuid
 )`, relationUUID)
 	if err != nil {
@@ -379,25 +379,25 @@ WHERE  relation_endpoint_uuid IN (
 	}
 
 	archiveStmt, err := st.Prepare(
-		"DELETE FROM relation_unit_setting_archive WHERE relation_uuid = $entityUUID.uuid ", relationUUID)
+		"DELETE FROM relation_unit_setting_archive WHERE relation_uuid = $entityUUID.uuid", relationUUID)
 	if err != nil {
 		return errors.Errorf("preparing relation unit settings archive deletion: %w", err)
 	}
 	departureStmt, err := st.Prepare(
-		"DELETE FROM relation_unit_departure WHERE relation_uuid = $entityUUID.uuid ", relationUUID)
+		"DELETE FROM relation_unit_departure WHERE relation_uuid = $entityUUID.uuid", relationUUID)
 	if err != nil {
 		return errors.Errorf("preparing relation unit departure deletion: %w", err)
 	}
 
-	statusStmt, err := st.Prepare("DELETE FROM relation_status WHERE relation_uuid = $entityUUID.uuid ", relationUUID)
+	statusStmt, err := st.Prepare("DELETE FROM relation_status WHERE relation_uuid = $entityUUID.uuid", relationUUID)
 	if err != nil {
 		return errors.Errorf("preparing relation status deletion: %w", err)
 	}
 
 	secretPermissionStmt, err := st.Prepare(`
 DELETE FROM secret_permission
-WHERE  scope_type_id = 3
-AND    scope_uuid = $entityUUID.uuid`, relationUUID)
+WHERE scope_type_id = 3
+AND scope_uuid = $entityUUID.uuid`, relationUUID)
 	if err != nil {
 		return errors.Errorf("preparing relation secret permission deletion: %w", err)
 	}
@@ -415,7 +415,7 @@ WHERE "key" IN (
 		return errors.Errorf("preparing unit relation state deletion: %w", err)
 	}
 
-	relStmt, err := st.Prepare("DELETE FROM relation WHERE uuid = $entityUUID.uuid ", relationUUID)
+	relStmt, err := st.Prepare("DELETE FROM relation WHERE uuid = $entityUUID.uuid", relationUUID)
 	if err != nil {
 		return errors.Errorf("preparing relation deletion: %w", err)
 	}
@@ -501,30 +501,30 @@ func (st *State) LeaveScope(ctx context.Context, relUnitUUID string) error {
 func (st *State) leaveScope(ctx context.Context, tx *sqlair.TX, id entityUUID) error {
 	existsStmt, err := st.Prepare(`
 SELECT &entityUUID.uuid
-FROM   relation_unit
-WHERE  uuid = $entityUUID.uuid`, id)
+FROM relation_unit
+WHERE uuid = $entityUUID.uuid`, id)
 	if err != nil {
 		return errors.Errorf("preparing relation unit exists query: %w", err)
 	}
 
 	isSyntheticStmt, err := st.Prepare(`
 SELECT u.uuid AS &entityUUID.uuid
-FROM   relation_unit AS re
-JOIN   unit AS u ON re.unit_uuid = u.uuid
-JOIN   charm AS c ON u.charm_uuid = c.uuid
-JOIN   charm_source AS cs ON c.source_id = cs.id
-WHERE  re.uuid = $entityUUID.uuid
-AND    cs.name = 'cmr'
-	`, entityUUID{})
+FROM relation_unit AS re
+JOIN unit AS u ON re.unit_uuid = u.uuid
+JOIN charm AS c ON u.charm_uuid = c.uuid
+JOIN charm_source AS cs ON c.source_id = cs.id
+WHERE re.uuid = $entityUUID.uuid
+AND cs.name = 'cmr'
+`, entityUUID{})
 	if err != nil {
 		return errors.Errorf("preparing relation unit is synthetic query: %w", err)
 	}
 
 	isUnitStillInScopeStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &count.count
-FROM   relation_unit
-WHERE  unit_uuid = $entityUUID.uuid
-	`, count{}, entityUUID{})
+FROM relation_unit
+WHERE unit_uuid = $entityUUID.uuid
+`, count{}, entityUUID{})
 	if err != nil {
 		return errors.Errorf("preparing synthetic unit still in scope query: %w", err)
 	}
@@ -587,10 +587,10 @@ func (st *State) IsUnitDyingAndBlocked(ctx context.Context, name string) (bool, 
 	unitName := entityName{Name: name}
 	getUnitStatusStmt, err := st.Prepare(`
 SELECT 1 AS &result.result
-FROM   v_unit_workload_status
-JOIN   unit AS u ON v_unit_workload_status.unit_uuid = u.uuid
-JOIN   workload_status_value AS wsv ON v_unit_workload_status.status_id = wsv.id
-WHERE  unit_name = $entityName.name AND
+FROM v_unit_workload_status
+JOIN unit AS u ON v_unit_workload_status.unit_uuid = u.uuid
+JOIN workload_status_value AS wsv ON v_unit_workload_status.status_id = wsv.id
+WHERE unit_name = $entityName.name AND
        u.life_id > 0 AND
        (wsv.status = 'error' OR wsv.status = 'blocked');
 `, result{}, unitName)
@@ -617,10 +617,10 @@ func (st *State) archiveRelationUnitSettings(ctx context.Context, tx *sqlair.TX,
 DELETE FROM relation_unit_setting_archive
 WHERE (relation_uuid, unit_name) IN (
     SELECT re.relation_uuid, u.name
-    FROM   relation_unit ru
-    JOIN   relation_endpoint re ON ru.relation_endpoint_uuid = re.uuid
-    JOIN   unit u ON ru.unit_uuid = u.uuid
-    WHERE  ru.uuid = $entityUUID.uuid
+    FROM relation_unit ru
+    JOIN relation_endpoint re ON ru.relation_endpoint_uuid = re.uuid
+    JOIN unit u ON ru.unit_uuid = u.uuid
+    WHERE ru.uuid = $entityUUID.uuid
 )`, id)
 	if err != nil {
 		return errors.Capture(err)
@@ -633,11 +633,11 @@ WHERE (relation_uuid, unit_name) IN (
 	copyStmt, err := st.Prepare(`
 INSERT INTO relation_unit_setting_archive (relation_uuid, unit_name, "key", value)
 SELECT re.relation_uuid, u.name, rus."key", rus.value
-FROM   relation_unit ru
-JOIN   relation_endpoint re ON ru.relation_endpoint_uuid = re.uuid
-JOIN   unit u ON ru.unit_uuid = u.uuid
-JOIN   relation_unit_setting rus ON ru.uuid = rus.relation_unit_uuid
-WHERE  ru.uuid = $entityUUID.uuid`, id)
+FROM relation_unit ru
+JOIN relation_endpoint re ON ru.relation_endpoint_uuid = re.uuid
+JOIN unit u ON ru.unit_uuid = u.uuid
+JOIN relation_unit_setting rus ON ru.uuid = rus.relation_unit_uuid
+WHERE ru.uuid = $entityUUID.uuid`, id)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -673,7 +673,7 @@ WHERE relation_unit_uuid = $entityUUID.uuid`, id)
 	}
 
 	deleteRelationUnitStmt, err := st.Prepare(`
-DELETE FROM relation_unit 
+DELETE FROM relation_unit
 WHERE uuid = $entityUUID.uuid`, id)
 	if err != nil {
 		return errors.Capture(err)
@@ -699,11 +699,11 @@ func (st *State) deleteRelationUnitsForRelation(ctx context.Context, tx *sqlair.
 	settingsStmt, err := st.Prepare(`
 WITH rru AS (
     SELECT ru.uuid, re.relation_uuid
-    FROM   relation_unit ru 
+    FROM relation_unit ru
     JOIN relation_endpoint re ON ru.relation_endpoint_uuid = re.uuid
 )
 DELETE FROM relation_unit_setting
-WHERE  relation_unit_uuid IN (
+WHERE relation_unit_uuid IN (
     SELECT uuid FROM rru WHERE relation_uuid = $entityUUID.uuid
 )`, relationUUID)
 	if err != nil {
@@ -713,11 +713,11 @@ WHERE  relation_unit_uuid IN (
 	settingsHashStmt, err := st.Prepare(`
 WITH rru AS (
     SELECT ru.uuid, re.relation_uuid
-    FROM   relation_unit ru 
+    FROM relation_unit ru
     JOIN relation_endpoint re ON ru.relation_endpoint_uuid = re.uuid
 )
 DELETE FROM relation_unit_settings_hash
-WHERE  relation_unit_uuid IN (
+WHERE relation_unit_uuid IN (
     SELECT uuid FROM rru WHERE relation_uuid = $entityUUID.uuid
 )`, relationUUID)
 	if err != nil {
@@ -725,8 +725,8 @@ WHERE  relation_unit_uuid IN (
 	}
 
 	ruStmt, err := st.Prepare(`
-DELETE FROM relation_unit 
-WHERE  relation_endpoint_uuid IN (
+DELETE FROM relation_unit
+WHERE relation_endpoint_uuid IN (
     SELECT uuid FROM relation_endpoint WHERE relation_uuid = $entityUUID.uuid
 )`, relationUUID)
 	if err != nil {

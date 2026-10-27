@@ -191,7 +191,7 @@ VALUES ($insert.provider_id, $insert.address_uuid)
 	// Update ip_address origin
 	type uuids []string
 	updateOriginStmt, err := st.Prepare(`
-UPDATE ip_address 
+UPDATE ip_address
 SET origin_id = 1 -- set origin to provider
 WHERE uuid IN ($uuids[:])`, uuids{})
 	if err != nil {
@@ -282,7 +282,7 @@ WHERE a.uuid IS NULL -- orphan subnet, linked to no addresses
 AND ps.provider_id IS NULL -- subnet without any provider id
 AND (
     s.cidr LIKE '%.%/32' -- single address ipv4 subnet 
-    OR  
+    OR
     s.cidr LIKE '%:%/128' -- single address ipv6 subnet 
     )`, orphan{})
 	if err != nil {
@@ -555,7 +555,7 @@ func (st *State) getExistingLinkLayerDevicesWithAddresses(
 		UUID string `db:"uuid"`
 	}
 	getDevicesStmt, err := st.Prepare(`
-SELECT 
+SELECT
 	lld.uuid AS &device.uuid,
 	lld.name AS &device.name,
 	lld.mac_address AS &device.mac_address,
@@ -578,11 +578,11 @@ SELECT
     ps.provider_id AS &address.provider_subnet_id,
     s.cidr AS &address.subnet_cidr,
     iao.name AS &address.origin
-FROM  ip_address AS ip
+FROM ip_address AS ip
 LEFT JOIN provider_ip_address AS pip ON ip.uuid = pip.address_uuid
 LEFT JOIN provider_subnet AS ps ON ip.subnet_uuid = ps.subnet_uuid
 LEFT JOIN subnet AS s ON ip.subnet_uuid = s.uuid
-JOIN  ip_address_origin AS iao ON ip.origin_id = iao.id
+JOIN ip_address_origin AS iao ON ip.origin_id = iao.id
 WHERE ip.net_node_uuid = $netNode.uuid`, address{}, netNode{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -767,7 +767,7 @@ func (st *State) relinquishAddresses(
 ) error {
 	type uuids []string
 	stmt, err := st.Prepare(`
-UPDATE ip_address 
+UPDATE ip_address
 SET origin_id = 0 -- relinquished to machine
 WHERE uuid IN ($uuids[:])`, uuids{})
 	if err != nil {
@@ -817,7 +817,7 @@ func (st *State) updateSubnetFromProviderID(ctx context.Context, tx *sqlair.TX, 
 	}
 
 	stmt, err := st.Prepare(`
-UPDATE ip_address 
+UPDATE ip_address
 SET subnet_uuid = $updateAddress.subnet_uuid
 WHERE uuid = $updateAddress.uuid`, updateAddress{})
 	if err != nil {

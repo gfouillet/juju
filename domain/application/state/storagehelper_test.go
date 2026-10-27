@@ -256,7 +256,7 @@ VALUES (?, ?, 1, ?, ?, ?, ?, 1024)
 		`
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id, size_mib)
 VALUES (?, ?, ?, 0, 1024)
-	`,
+`,
 		filesystemUUID.String(),
 		filesystemUUID.String(),
 		domainlife.Alive,
@@ -269,7 +269,7 @@ VALUES (?, ?, ?, 0, 1024)
 INSERT INTO storage_instance_filesystem (storage_instance_uuid,
                                          storage_filesystem_uuid)
 VALUES (?, ?)
-	`,
+`,
 		storageInstanceUUID.String(),
 		filesystemUUID.String(),
 	)
@@ -316,7 +316,7 @@ VALUES (?, ?, 0, ?, ?, ?, ?, 2048)
 		`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, size_mib)
 VALUES (?, ?, ?, 0, 2048)
-	`,
+`,
 		volumeUUID.String(),
 		volumeUUID.String(),
 		domainlife.Alive,
@@ -328,7 +328,7 @@ VALUES (?, ?, ?, 0, 2048)
 		`
 INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid)
 VALUES (?, ?)
-	`,
+`,
 		storageInstanceUUID.String(),
 		volumeUUID.String(),
 	)
@@ -368,7 +368,7 @@ VALUES (?, ?, ?, 1, ?, 0, ?, 1024)
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provider_id,
                                 provision_scope_id)
 VALUES (?, ?, 0, ?, 0)
-		`,
+`,
 		storageFilesystemUUID.String(),
 		storageFilesystemUUID.String(),
 		providerID,
@@ -424,7 +424,7 @@ VALUES (?, ?, ?, 1, ?, 0, ?, 1024)
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provider_id,
                                 provision_scope_id)
 VALUES (?, ?, 0, ?, 0)
-		`,
+`,
 		storageFilesystemUUID.String(),
 		storageFilesystemUUID.String(),
 		fsProviderID,
@@ -444,7 +444,7 @@ VALUES (?, ?, 0, ?, 0)
 INSERT INTO storage_volume (uuid, volume_id, life_id, provider_id,
                             provision_scope_id)
 VALUES (?, ?, 0, ?, 0)
-		`,
+`,
 		storageVolumeUUID.String(),
 		storageVolumeUUID.String(),
 		vProviderID,
@@ -492,7 +492,7 @@ VALUES (?, ?, ?, 1, ?, 0, ?, 1024)
 INSERT INTO storage_volume (uuid, volume_id, life_id, provider_id,
                             provision_scope_id)
 VALUES (?, ?, 0, ?, 0)
-		`,
+`,
 		storageVolumeUUID.String(),
 		storageVolumeUUID.String(),
 		providerID,

@@ -341,7 +341,7 @@ SELECT machine_uuid,
 FROM machine_agent_version
 INNER JOIN architecture ON machine_agent_version.architecture_id = architecture.id
 WHERE machine_uuid = ?
-	`
+`
 
 		return tx.QueryRowContext(ctx, stmt, machineUUID).Scan(
 			&obtainedMachineUUID,
@@ -384,7 +384,7 @@ SELECT machine_uuid,
 FROM machine_agent_version
 INNER JOIN architecture ON machine_agent_version.architecture_id = architecture.id
 WHERE machine_uuid = ?
-	`
+`
 
 		return tx.QueryRowContext(ctx, stmt, machineUUID).Scan(
 			&obtainedMachineUUID,
@@ -1600,7 +1600,7 @@ func (s *modelStateSuite) addMachineWithBaseAndArch(
 	machineUUID := tc.Must(c, machine.NewUUID)
 
 	netNodeInsert := `
-INSERT INTO net_node(uuid) VALUES (?)
+INSERT INTO net_node (uuid) VALUES (?)
 `
 	machineInsert := `
 INSERT INTO machine (uuid, name, net_node_uuid, life_id)
@@ -1654,7 +1654,7 @@ func (s *modelStateSuite) addMachineWithNullChannelBase(c *tc.C) machine.UUID {
 	machineUUID := tc.Must(c, machine.NewUUID)
 
 	netNodeInsert := `
-INSERT INTO net_node(uuid) VALUES (?)
+INSERT INTO net_node (uuid) VALUES (?)
 `
 	machineInsert := `
 INSERT INTO machine (uuid, name, net_node_uuid, life_id)

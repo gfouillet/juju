@@ -148,8 +148,8 @@ WHERE ms.machine_uuid = ?`, machineUUID.String()).Scan(
 	var removalScheduledFor time.Time
 	err = db.QueryRowContext(c.Context(), `
 SELECT removal_type_id, entity_uuid, force, scheduled_for
-FROM   removal
-WHERE  entity_uuid = ?`, "reprovision-unit").Scan(
+FROM removal
+WHERE entity_uuid = ?`, "reprovision-unit").Scan(
 		&removalTypeID, &removalEntityUUID, &removalForce, &removalScheduledFor,
 	)
 	c.Assert(err, tc.ErrorIsNil)
@@ -160,8 +160,8 @@ WHERE  entity_uuid = ?`, "reprovision-unit").Scan(
 	var replacementUnitUUID string
 	err = db.QueryRowContext(c.Context(), `
 SELECT uuid
-FROM   unit
-WHERE  name = ? AND life_id = ?`, "reprovision/1", life.Alive).Scan(&replacementUnitUUID)
+FROM unit
+WHERE name = ? AND life_id = ?`, "reprovision/1", life.Alive).Scan(&replacementUnitUUID)
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(replacementUnitUUID, tc.Not(tc.Equals), "reprovision-unit")
 	var uniterState, storageState, secretState string
@@ -180,9 +180,9 @@ WHERE unit_uuid = ?`, replacementUnitUUID).Scan(&uniterState, &storageState, &se
 	var workloadMessage string
 	err = db.QueryRowContext(c.Context(), `
 SELECT uas.status_id, uws.status_id, uws.message
-FROM   unit_agent_status AS uas
-JOIN   unit_workload_status AS uws ON uas.unit_uuid = uws.unit_uuid
-WHERE  uas.unit_uuid = ?`, replacementUnitUUID).Scan(
+FROM unit_agent_status AS uas
+JOIN unit_workload_status AS uws ON uas.unit_uuid = uws.unit_uuid
+WHERE uas.unit_uuid = ?`, replacementUnitUUID).Scan(
 		&agentStatusID, &workloadStatusID, &workloadMessage,
 	)
 	c.Assert(err, tc.ErrorIsNil)
@@ -287,8 +287,8 @@ VALUES (?, ?, ?, ?, ?, ?)`, "reprovision-secret", 2, "reprovision-unit", 0,
 	var replacementUnitUUID string
 	err = s.DB().QueryRowContext(c.Context(), `
 SELECT uuid
-FROM   unit
-WHERE  name = ? AND life_id = ?`, "reprovision/1", life.Alive).Scan(&replacementUnitUUID)
+FROM unit
+WHERE name = ? AND life_id = ?`, "reprovision/1", life.Alive).Scan(&replacementUnitUUID)
 	c.Assert(err, tc.ErrorIsNil)
 
 	c.Check(s.rowCountWhere(c, "annotation_unit", "uuid = ? AND \"key\" = ?",
@@ -369,8 +369,8 @@ func (s *stateSuite) TestDetachLostMachineCloudInstanceRejectsReplacementUnitNam
 	var sequenceValue int
 	err := s.DB().QueryRowContext(c.Context(), `
 SELECT value
-FROM   sequence
-WHERE  namespace = ?`, "application_reprovision").Scan(&sequenceValue)
+FROM sequence
+WHERE namespace = ?`, "application_reprovision").Scan(&sequenceValue)
 	c.Assert(err, tc.ErrorIsNil)
 	collisionName := fmt.Sprintf("reprovision/%d", sequenceValue+1)
 	s.runQuery(c, "UPDATE unit SET name = ? WHERE uuid = ?", collisionName, "collision-unit")

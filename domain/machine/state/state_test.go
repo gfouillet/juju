@@ -154,7 +154,7 @@ func (s *stateSuite) TestIsMachineManuallyProvisionedManual(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO machine_manual (machine_uuid)
-VALUES ((SELECT uuid FROM machine WHERE name=?))
+VALUES ((SELECT uuid FROM machine WHERE name = ?))
 `, machineName)
 		return err
 	})
@@ -189,7 +189,7 @@ func (s *stateSuite) TestGetMachineLifeAndIsManuallyProvisionedManual(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO machine_manual (machine_uuid)
-VALUES ((SELECT uuid FROM machine WHERE name=?))
+VALUES ((SELECT uuid FROM machine WHERE name = ?))
 `, machineName)
 		return err
 	})
@@ -251,8 +251,8 @@ func (s *stateSuite) TestKeepInstance(c *tc.C) {
 
 	updateIsController := `
 UPDATE machine
-SET    keep_instance = TRUE
-WHERE  name = $1`
+SET keep_instance = TRUE
+WHERE name = $1`
 	_, err = db.ExecContext(c.Context(), updateIsController, machineName)
 	c.Assert(err, tc.ErrorIsNil)
 	isController, err = s.state.ShouldKeepInstance(c.Context(), machineName)
@@ -275,8 +275,8 @@ func (s *stateSuite) TestSetKeepInstance(c *tc.C) {
 	db := s.DB()
 	query := `
 SELECT keep_instance
-FROM   machine
-WHERE  name = $1`
+FROM machine
+WHERE name = $1`
 	row := db.QueryRowContext(c.Context(), query, machineName)
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
@@ -533,7 +533,7 @@ VALUES (?, 'foo', ?)`, "charm-uuid", subordinate)
 
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO application (uuid, charm_uuid, name, life_id, space_uuid)
-VALUES (?,?,?,0,?)`, "app-uuid", "charm-uuid", "foo", network.AlphaSpaceId)
+VALUES (?, ?, ?, 0, ?)`, "app-uuid", "charm-uuid", "foo", network.AlphaSpaceId)
 		if err != nil {
 			return errors.Capture(err)
 		}

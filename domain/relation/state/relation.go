@@ -425,12 +425,12 @@ func (st *State) getApplicationSettingsByRelAndApp(
 
 	stmt, err := st.Prepare(`
 SELECT &relationSetting.*
-FROM   relation_application_setting AS ras
-JOIN   relation_endpoint AS re ON ras.relation_endpoint_uuid = re.uuid
-JOIN   relation AS r ON re.relation_uuid = r.uuid
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-WHERE  r.uuid = $relationAndApplicationUUID.relation_uuid
-AND    ae.application_uuid = $relationAndApplicationUUID.application_uuid
+FROM relation_application_setting AS ras
+JOIN relation_endpoint AS re ON ras.relation_endpoint_uuid = re.uuid
+JOIN relation AS r ON re.relation_uuid = r.uuid
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+WHERE r.uuid = $relationAndApplicationUUID.relation_uuid
+AND ae.application_uuid = $relationAndApplicationUUID.application_uuid
 `, id, relationSetting{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -536,11 +536,11 @@ SELECT ep1.application_name AS &goalStateData.ep1_application_name,
        ep2.role AS &goalStateData.ep2_role,
        rs.status AS &goalStateData.status,
        rs.updated_at AS &goalStateData.updated_at
-FROM   v_relation_endpoint AS ep1
-JOIN   v_relation_endpoint AS ep2 ON ep1.relation_uuid = ep2.relation_uuid
-JOIN   v_relation_status AS rs ON ep1.relation_uuid = rs.relation_uuid
-WHERE  ep1.application_uuid = $applicationUUID.application_uuid
-AND    ep1.application_uuid != ep2.application_uuid
+FROM v_relation_endpoint AS ep1
+JOIN v_relation_endpoint AS ep2 ON ep1.relation_uuid = ep2.relation_uuid
+JOIN v_relation_status AS rs ON ep1.relation_uuid = rs.relation_uuid
+WHERE ep1.application_uuid = $applicationUUID.application_uuid
+AND ep1.application_uuid != ep2.application_uuid
 `, goalStateData{}, applicationUUID{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -616,11 +616,11 @@ func (st *State) getOtherApplicationInRelations(
 ) (string, error) {
 	findOtherEndsStmt, err := st.Prepare(`
 SELECT other.application_uuid AS &relationAndApplicationUUID.application_uuid
-FROM   v_application_subordinate AS app
-JOIN   v_application_subordinate AS other ON app.relation_uuid = other.relation_uuid
-WHERE  app.application_uuid = $relationAndApplicationUUID.application_uuid
-AND    other.application_uuid != $relationAndApplicationUUID.application_uuid
-AND    app.relation_uuid = $relationAndApplicationUUID.relation_uuid
+FROM v_application_subordinate AS app
+JOIN v_application_subordinate AS other ON app.relation_uuid = other.relation_uuid
+WHERE app.application_uuid = $relationAndApplicationUUID.application_uuid
+AND other.application_uuid != $relationAndApplicationUUID.application_uuid
+AND app.relation_uuid = $relationAndApplicationUUID.relation_uuid
 `, relationAndApplicationUUID{})
 	if err != nil {
 		return "", errors.Errorf("preparing other endpoint query: %w", err)
@@ -650,8 +650,8 @@ func (st *State) getApplicationSubordinate(
 	appSubordinateStmt, err := st.Prepare(`
 SELECT application_uuid AS &otherApplicationsForWatcher.application_uuid,
        subordinate AS &otherApplicationsForWatcher.subordinate
-FROM   v_application_subordinate
-WHERE  application_uuid = $entityUUID.uuid
+FROM v_application_subordinate
+WHERE application_uuid = $entityUUID.uuid
 `, otherApplicationsForWatcher{}, entityUUID{})
 	if err != nil {
 		return otherApplicationsForWatcher{}, errors.Errorf("preparing other application query: %w", err)
@@ -727,8 +727,8 @@ func (st *State) GetRelationUUIDByID(ctx context.Context, relationID int) (corer
 	}
 	stmt, err := st.Prepare(`
 SELECT &relationIDAndUUID.uuid
-FROM   relation
-WHERE  relation_id = $relationIDAndUUID.relation_id
+FROM relation
+WHERE relation_id = $relationIDAndUUID.relation_id
 `, id)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -769,10 +769,10 @@ func (st *State) GetRelationEndpointScope(
 	}
 
 	stmt, err := st.Prepare(`
-SELECT  scope AS &scope.name
-FROM    v_relation_endpoint
-WHERE   relation_uuid = $relationUUID.uuid
-AND     application_uuid = $entityUUID.uuid
+SELECT scope AS &scope.name
+FROM v_relation_endpoint
+WHERE relation_uuid = $relationUUID.uuid
+AND application_uuid = $entityUUID.uuid
 `, scope{}, entityUUID{}, relationUUID{})
 	if err != nil {
 		return "", errors.Capture(err)
@@ -830,10 +830,10 @@ func (st *State) GetRelationEndpointUUID(ctx context.Context, args domainrelatio
 	}
 	stmt, err := st.Prepare(`
 SELECT re.uuid AS &relationEndpointUUID.uuid
-FROM   relation_endpoint re
-JOIN   application_endpoint ae ON re.endpoint_uuid = ae.uuid
-WHERE  ae.application_uuid = $relationEndpointArgs.application_uuid
-AND    re.relation_uuid = $relationEndpointArgs.relation_uuid
+FROM relation_endpoint re
+JOIN application_endpoint ae ON re.endpoint_uuid = ae.uuid
+WHERE ae.application_uuid = $relationEndpointArgs.application_uuid
+AND re.relation_uuid = $relationEndpointArgs.relation_uuid
 `, relationEndpointUUID{}, dbArgs)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -901,14 +901,14 @@ func (st *State) GetRelationsStatusForUnit(
  SELECT re.relation_uuid AS &relationUnitStatus.relation_uuid,
         ru_in.uuid IS NOT NULL AS &relationUnitStatus.in_scope,
         r.suspended AS &relationUnitStatus.suspended
- FROM   relation_endpoint AS re
+ FROM relation_endpoint AS re
         JOIN relation AS r ON re.relation_uuid = r.uuid
         JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
         JOIN unit AS u ON ae.application_uuid = u.application_uuid
         LEFT JOIN relation_unit AS ru_in
              ON re.uuid = ru_in.relation_endpoint_uuid
              AND ru_in.unit_uuid = $unitUUIDArg.unit_uuid
- WHERE  u.uuid = $unitUUIDArg.unit_uuid;
+ WHERE u.uuid = $unitUUIDArg.unit_uuid;
 `, uuid, relationUnitStatus{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -989,8 +989,8 @@ func (st *State) getRelationEndpoints(
 	// elsewhere (e.g. names.RelationTag) without further reordering in Go.
 	stmt, err := st.Prepare(`
 SELECT &Endpoint.*
-FROM   v_relation_endpoint
-WHERE  relation_uuid = $relationUUID.uuid
+FROM v_relation_endpoint
+WHERE relation_uuid = $relationUUID.uuid
 ORDER BY CASE role
     WHEN 'requirer' THEN 0
     WHEN 'provider' THEN 1
@@ -1033,8 +1033,8 @@ func (st *State) exportRelationEndpoints(
 	}
 	stmt, err := st.Prepare(`
 SELECT &exportEndpoint.*
-FROM   v_relation_endpoint
-WHERE  relation_uuid = $relationUUID.uuid
+FROM v_relation_endpoint
+WHERE relation_uuid = $relationUUID.uuid
 ORDER BY CASE role
     WHEN 'requirer' THEN 0
     WHEN 'provider' THEN 1
@@ -1109,13 +1109,13 @@ func (st *State) getRegularRelationUUIDByEndpointIdentifiers(
 
 	stmt, err := st.Prepare(`
 SELECT &relationUUID.*
-FROM   relation r
-JOIN   v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
-JOIN   v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
-WHERE  e1.application_name = $endpointIdentifier1.application_name 
-AND    e1.endpoint_name    = $endpointIdentifier1.endpoint_name
-AND    e2.application_name = $endpointIdentifier2.application_name 
-AND    e2.endpoint_name    = $endpointIdentifier2.endpoint_name
+FROM relation r
+JOIN v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
+JOIN v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
+WHERE e1.application_name = $endpointIdentifier1.application_name
+AND e1.endpoint_name = $endpointIdentifier1.endpoint_name
+AND e2.application_name = $endpointIdentifier2.application_name
+AND e2.endpoint_name = $endpointIdentifier2.endpoint_name
 `, relationUUID{}, e1, e2)
 	if err != nil {
 		return uuid, errors.Capture(err)
@@ -1156,12 +1156,12 @@ func (st *State) getExistingRegularRelationUUIDBetweenApplications(
 	// single endpoint.
 	stmt, err := st.Prepare(`
 SELECT DISTINCT r.uuid AS &relationUUID.uuid
-FROM   relation r
-JOIN   v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
-JOIN   v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
-WHERE  e1.application_name = $applicationName1.application_name
-AND    e2.application_name = $applicationName2.application_name
-AND    e1.application_name != e2.application_name
+FROM relation r
+JOIN v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
+JOIN v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
+WHERE e1.application_name = $applicationName1.application_name
+AND e2.application_name = $applicationName2.application_name
+AND e1.application_name != e2.application_name
 `, relationUUID{}, a1, a2)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1200,10 +1200,10 @@ func (st *State) GetPeerRelationUUIDByEndpointIdentifiers(
 
 	stmt, err := st.Prepare(`
 SELECT &relationUUIDAndRole.*
-FROM   relation r
-JOIN   v_relation_endpoint e ON r.uuid = e.relation_uuid
-WHERE  e.application_name = $endpointIdentifier.application_name 
-AND    e.endpoint_name    = $endpointIdentifier.endpoint_name
+FROM relation r
+JOIN v_relation_endpoint e ON r.uuid = e.relation_uuid
+WHERE e.application_name = $endpointIdentifier.application_name
+AND e.endpoint_name = $endpointIdentifier.endpoint_name
 `, relationUUIDAndRole{}, e)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -1286,7 +1286,7 @@ func (st *State) GetRelationUnitChanges(
 	rel := relationUUID{UUID: relUUID}
 
 	unitStmt, err := st.Prepare(`
-SELECT 
+SELECT
     ru.unit_uuid AS &change.uuid,
     u.name AS &change.name,
     rush.sha256 AS &change.sha256
@@ -1301,13 +1301,13 @@ WHERE r.uuid = $relationUUID.uuid AND ru.unit_uuid IN ($uuids[:])`, change{}, re
 	}
 
 	appStmt, err := st.Prepare(`
-SELECT 
+SELECT
     ae.application_uuid AS &change.uuid,
     a.name AS &change.name,
     rash.sha256 AS &change.sha256
 FROM application_endpoint AS ae
 JOIN application AS a ON ae.application_uuid = a.uuid
-JOIN relation_endpoint AS re ON ae.uuid = re.endpoint_uuid 
+JOIN relation_endpoint AS re ON ae.uuid = re.endpoint_uuid
 JOIN relation AS r ON re.relation_uuid = r.uuid
 LEFT JOIN relation_application_settings_hash AS rash ON re.uuid = rash.relation_endpoint_uuid
 WHERE r.uuid = $relationUUID.uuid AND ae.application_uuid IN ($uuids[:])`, change{}, rel, uuids{})
@@ -1318,22 +1318,22 @@ WHERE r.uuid = $relationUUID.uuid AND ae.application_uuid IN ($uuids[:])`, chang
 	departedStmt, err := st.Prepare(`
 WITH departed AS (
     SELECT rud.unit_uuid, rud.unit_name
-    FROM   relation_unit_departure AS rud
-    WHERE  rud.relation_uuid = $relationUUID.uuid
-    AND    rud.unit_uuid IN ($uuids[:])
+    FROM relation_unit_departure AS rud
+    WHERE rud.relation_uuid = $relationUUID.uuid
+    AND rud.unit_uuid IN ($uuids[:])
 ), identities AS (
     SELECT d.unit_uuid, d.unit_name
-    FROM   departed AS d
+    FROM departed AS d
     UNION ALL
     SELECT u.uuid, u.name
-    FROM   unit AS u
+    FROM unit AS u
     LEFT JOIN departed AS d ON d.unit_uuid = u.uuid
-    WHERE  u.uuid IN ($uuids[:])
-    AND    d.unit_uuid IS NULL
+    WHERE u.uuid IN ($uuids[:])
+    AND d.unit_uuid IS NULL
 )
 SELECT i.unit_uuid AS &getUnit.uuid,
        i.unit_name AS &getUnit.name
-FROM   identities AS i`, getUnit{}, rel, uuids{})
+FROM identities AS i`, getUnit{}, rel, uuids{})
 	if err != nil {
 		return domainrelation.RelationUnitsChange{}, errors.Capture(err)
 	}
@@ -1570,11 +1570,11 @@ func (st *State) GetInScopeUnits(ctx context.Context, appUUID, relUUID string) (
 
 	stmt, err := st.Prepare(`
 SELECT u.name AS &name.name
-FROM   unit AS u
-JOIN   relation_unit AS ru ON u.uuid = ru.unit_uuid
-JOIN   relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
-WHERE  u.application_uuid = $applicationUUID.application_uuid
-AND    re.relation_uuid = $relationUUID.uuid
+FROM unit AS u
+JOIN relation_unit AS ru ON u.uuid = ru.unit_uuid
+JOIN relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
+WHERE u.application_uuid = $applicationUUID.application_uuid
+AND re.relation_uuid = $relationUUID.uuid
 `, name{}, applicationUUID, relationUUID)
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -1686,14 +1686,14 @@ func (st *State) getRelationUnit(
 		Name:         unitName,
 	}
 	stmt, err := st.Prepare(`
-SELECT 
+SELECT
        ru.uuid AS &getRelationUnit.relation_unit_uuid,
-       u.uuid  AS &getRelationUnit.unit_uuid
-FROM   relation_unit ru
-JOIN   unit AS u ON ru.unit_uuid = u.uuid 
-JOIN   relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
-WHERE  u.name = $getRelationUnit.name
-AND    re.relation_uuid = $getRelationUnit.relation_uuid`, args)
+       u.uuid AS &getRelationUnit.unit_uuid
+FROM relation_unit ru
+JOIN unit AS u ON ru.unit_uuid = u.uuid
+JOIN relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
+WHERE u.name = $getRelationUnit.name
+AND re.relation_uuid = $getRelationUnit.relation_uuid`, args)
 	if err != nil {
 		return "", "", errors.Capture(err)
 	}
@@ -1721,8 +1721,8 @@ func (st *State) IsPeerRelation(ctx context.Context, relUUID string) (bool, erro
 
 	countStmt, err := st.Prepare(`
 SELECT count(*) AS &rows.count
-FROM   relation_endpoint
-WHERE  relation_uuid = $entityUUID.uuid`, rows{}, entityUUID{})
+FROM relation_endpoint
+WHERE relation_uuid = $entityUUID.uuid`, rows{}, entityUUID{})
 	if err != nil {
 		return false, errors.Capture(err)
 	}
@@ -1784,11 +1784,11 @@ func (st *State) EnterScope(
 
 	alreadyInScopeStmt, err := st.Prepare(`
 SELECT COUNT(*) AS &rows.count
-FROM   relation_unit AS ru
-JOIN   relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
-JOIN   unit AS u ON ru.unit_uuid = u.uuid
-WHERE  u.name = $nameAndUUID.name
-AND    re.relation_uuid = $nameAndUUID.uuid
+FROM relation_unit AS ru
+JOIN relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
+JOIN unit AS u ON ru.unit_uuid = u.uuid
+WHERE u.name = $nameAndUUID.name
+AND re.relation_uuid = $nameAndUUID.uuid
 `, nameAndUUID{}, rows{})
 	if err != nil {
 		return internal.SubordinateUnitStatusHistoryData{}, errors.Capture(err)
@@ -1799,8 +1799,8 @@ AND    re.relation_uuid = $nameAndUUID.uuid
 	}
 	getUnitStmt, err := st.Prepare(`
 SELECT &getUnit.*
-FROM   unit
-WHERE  name = $getUnit.name
+FROM unit
+WHERE name = $getUnit.name
 `, unitArgs)
 	if err != nil {
 		return internal.SubordinateUnitStatusHistoryData{}, errors.Capture(err)
@@ -1874,9 +1874,9 @@ func (st *State) getRelationLife(ctx context.Context, tx *sqlair.TX, uuid string
 	}
 	stmt, err := st.Prepare(`
 SELECT &getLife.*
-FROM   relation t
-JOIN   life l ON t.life_id = l.id
-WHERE  t.uuid = $getLife.uuid
+FROM relation t
+JOIN life l ON t.life_id = l.id
+WHERE t.uuid = $getLife.uuid
 `, args)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -1897,9 +1897,9 @@ func (st *State) getRelationLifeAndSuspended(ctx context.Context, tx *sqlair.TX,
 	}
 	stmt, err := st.Prepare(`
 SELECT &lifeAndSuspended.*
-FROM   relation t
-JOIN   life l ON t.life_id = l.id
-WHERE  t.uuid = $entityUUID.uuid
+FROM relation t
+JOIN life l ON t.life_id = l.id
+WHERE t.uuid = $entityUUID.uuid
 `, arg, lifeAndSuspended{})
 	if err != nil {
 		return lifeAndSuspended{}, errors.Capture(err)
@@ -1921,9 +1921,9 @@ func (st *State) getUnitLife(ctx context.Context, tx *sqlair.TX, uuid string) (l
 	}
 	stmt, err := st.Prepare(`
 SELECT &getLife.*
-FROM   unit t
-JOIN   life l ON t.life_id = l.id
-WHERE  t.uuid = $getLife.uuid
+FROM unit t
+JOIN life l ON t.life_id = l.id
+WHERE t.uuid = $getLife.uuid
 `, args)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -1946,9 +1946,9 @@ func (st *State) getApplicationsInRelation(ctx context.Context, tx *sqlair.TX, u
 	}
 	stmt, err := st.Prepare(`
 SELECT &applicationUUID.application_uuid
-FROM   relation_endpoint re 
-JOIN   application_endpoint ae ON re.endpoint_uuid = ae.uuid
-WHERE  re.relation_uuid = $entityUUID.uuid
+FROM relation_endpoint re
+JOIN application_endpoint ae ON re.endpoint_uuid = ae.uuid
+WHERE re.relation_uuid = $entityUUID.uuid
 `, relUUID, applicationUUID{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -2035,9 +2035,9 @@ func (st *State) getRelationScope(
 	}
 	getScopeStmt, err := st.Prepare(`
 SELECT rs.name AS &scope.scope
-FROM   relation AS r
-JOIN   charm_relation_scope AS rs ON r.scope_id = rs.id
-WHERE  uuid = $entityUUID.uuid
+FROM relation AS r
+JOIN charm_relation_scope AS rs ON r.scope_id = rs.id
+WHERE uuid = $entityUUID.uuid
 `, relUUID, scope{})
 	if err != nil {
 		return "", errors.Capture(err)
@@ -2145,10 +2145,10 @@ func (st *State) isSubordinate(
 
 	stmt, err := st.Prepare(`
 SELECT subordinate AS &getSubordinate.subordinate
-FROM   charm_metadata cm
-JOIN   charm c ON c.uuid = cm.charm_uuid
-JOIN   application a ON a.charm_uuid = c.uuid
-WHERE  a.uuid = $getSubordinate.application_uuid
+FROM charm_metadata cm
+JOIN charm c ON c.uuid = cm.charm_uuid
+JOIN application a ON a.charm_uuid = c.uuid
+WHERE a.uuid = $getSubordinate.application_uuid
 `, subordinate)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -2191,11 +2191,11 @@ func (st *State) insertRelationUnit(
 		UnitUUID:     unitUUID,
 	}
 	getRelationUnitStmt, err := st.Prepare(`
-SELECT  ru.uuid AS &relationUnit.uuid
-FROM    relation_unit AS ru
-JOIN    relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
-WHERE   re.relation_uuid = $relationUnit.relation_uuid
-AND     ru.unit_uuid = $relationUnit.unit_uuid
+SELECT ru.uuid AS &relationUnit.uuid
+FROM relation_unit AS ru
+JOIN relation_endpoint AS re ON ru.relation_endpoint_uuid = re.uuid
+WHERE re.relation_uuid = $relationUnit.relation_uuid
+AND ru.unit_uuid = $relationUnit.unit_uuid
 `, getRelationUnit)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -2222,13 +2222,13 @@ AND     ru.unit_uuid = $relationUnit.unit_uuid
 	}
 
 	insertStmt, err := st.Prepare(`
-INSERT INTO relation_unit (uuid, relation_endpoint_uuid, unit_uuid) 
+INSERT INTO relation_unit (uuid, relation_endpoint_uuid, unit_uuid)
 SELECT $relationUnit.uuid, re.uuid, $relationUnit.unit_uuid
-FROM   relation_endpoint AS re
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-JOIN   unit AS u ON ae.application_uuid = u.application_uuid
-WHERE  re.relation_uuid = $relationUnit.relation_uuid
-AND    u.uuid = $relationUnit.unit_uuid
+FROM relation_endpoint AS re
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+JOIN unit AS u ON ae.application_uuid = u.application_uuid
+WHERE re.relation_uuid = $relationUnit.relation_uuid
+AND u.uuid = $relationUnit.unit_uuid
 `, insertRelationUnit)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -2343,9 +2343,9 @@ func (st *State) GetRelationUnitSettingsArchive(
 	uName := name{Name: unitName}
 	stmt, err := st.Prepare(`
 SELECT &relationSetting.*
-FROM   relation_unit_setting_archive
-WHERE  relation_uuid = $entityUUID.uuid
-AND    unit_name = $name.unit_name
+FROM relation_unit_setting_archive
+WHERE relation_uuid = $entityUUID.uuid
+AND unit_name = $name.unit_name
 `, rUUID, uName, relationSetting{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -2457,8 +2457,8 @@ func (st *State) updateApplicationSettingsHash(
 		Hash:                 hash,
 	}
 	stmt, err := st.Prepare(`
-INSERT INTO relation_application_settings_hash (*) 
-VALUES ($applicationSettingsHash.*) 
+INSERT INTO relation_application_settings_hash (*)
+VALUES ($applicationSettingsHash.*)
 ON CONFLICT (relation_endpoint_uuid) DO UPDATE SET sha256 = excluded.sha256
 `, applicationSettingsHash{})
 	if err != nil {
@@ -2497,8 +2497,8 @@ func (st *State) getApplicationSettings(
 	id := relationEndpointUUID{UUID: endpointUUID}
 	stmt, err := st.Prepare(`
 SELECT &relationSetting.*
-FROM   relation_application_setting
-WHERE  relation_endpoint_uuid = $relationEndpointUUID.uuid
+FROM relation_application_setting
+WHERE relation_endpoint_uuid = $relationEndpointUUID.uuid
 `, id, relationSetting{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -2528,15 +2528,15 @@ func (st *State) replaceApplicationSettings(
 	id := entityUUID{UUID: endpointUUID}
 	deleteStmt, err := st.Prepare(`
 DELETE FROM relation_application_setting
-WHERE       relation_endpoint_uuid = $entityUUID.uuid
+WHERE relation_endpoint_uuid = $entityUUID.uuid
 `, id)
 	if err != nil {
 		return errors.Capture(err)
 	}
 
 	updateStmt, err := st.Prepare(`
-INSERT INTO relation_application_setting (*) 
-VALUES ($relationApplicationSetting.*) 
+INSERT INTO relation_application_setting (*)
+VALUES ($relationApplicationSetting.*)
 ON CONFLICT (relation_endpoint_uuid, key) DO UPDATE SET value = excluded.value
 `, relationApplicationSetting{})
 	if err != nil {
@@ -2570,8 +2570,8 @@ func (st *State) getRelationUnitSettings(
 	id := entityUUID{UUID: relUnitUUID}
 	stmt, err := st.Prepare(`
 SELECT &relationSetting.*
-FROM   relation_unit_setting
-WHERE  relation_unit_uuid = $entityUUID.uuid
+FROM relation_unit_setting
+WHERE relation_unit_uuid = $entityUUID.uuid
 `, id, relationSetting{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -2607,8 +2607,8 @@ func (st *State) updateUnitSettings(
 	// Update the keys to set.
 	if len(set) > 0 {
 		updateStmt, err := st.Prepare(`
-INSERT INTO relation_unit_setting (*) 
-VALUES ($relationUnitSetting.*) 
+INSERT INTO relation_unit_setting (*)
+VALUES ($relationUnitSetting.*)
 ON CONFLICT (relation_unit_uuid, key) DO UPDATE SET value = excluded.value
 `, relationUnitSetting{})
 		if err != nil {
@@ -2625,7 +2625,7 @@ ON CONFLICT (relation_unit_uuid, key) DO UPDATE SET value = excluded.value
 		id := entityUUID{UUID: relUnitUUID}
 		deleteStmt, err := st.Prepare(`
 DELETE FROM relation_unit_setting
-WHERE       relation_unit_uuid = $entityUUID.uuid
+WHERE relation_unit_uuid = $entityUUID.uuid
 AND         key IN ($keys[:])
 `, id, unset)
 		if err != nil {
@@ -4135,7 +4135,7 @@ JOIN   charm AS c ON a.charm_uuid = c.uuid
 JOIN   charm_source AS cs ON c.source_id = cs.id
 WHERE  ae.uuid IN ($endpointUUIDs[:])
 AND    cs.name = 'cmr'
-	`, rows{}, uuids)
+`, rows{}, uuids)
 	if err != nil {
 		return errors.Capture(err)
 	}

@@ -48,8 +48,8 @@ func (s *storagePoolSchemaSuite) TestStoragePoolImmutableOrigin(c *tc.C) {
 		c.Context(),
 		`
 UPDATE storage_pool
-SET    origin_id = 2
-WHERE  uuid = ?
+SET origin_id = 2
+WHERE uuid = ?
 `,
 		storagePoolUUID.String(),
 	)

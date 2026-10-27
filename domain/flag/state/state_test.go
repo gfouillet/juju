@@ -54,9 +54,9 @@ func (s *stateSuite) TestSetFlag(c *tc.C) {
 	var flag dbFlag
 	err = s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
 		stmt, err := sqlair.Prepare(`
-SELECT (value, description) AS (&dbFlag.*) 
-FROM   flag 
-WHERE  name = 'foo'`, flag)
+SELECT (value, description) AS (&dbFlag.*)
+FROM flag
+WHERE name = 'foo'`, flag)
 		if err != nil {
 			return errors.Capture(err)
 		}

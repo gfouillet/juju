@@ -103,7 +103,7 @@ func (s *stateSuite) TestModelConfigEmpty(c *tc.C) {
 func (s *stateSuite) TestModelConfigAgentStream(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO agent_version (stream_id, target_version, latest_version) 
+INSERT INTO agent_version (stream_id, target_version, latest_version)
                    VALUES (1, ?, ?)`,
 			jujuversion.Current.String(), jujuversion.Current.String())
 		return err
@@ -122,7 +122,7 @@ INSERT INTO agent_version (stream_id, target_version, latest_version)
 func (s *stateSuite) TestModelConfigAgentStreamWithValueInConfig(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO agent_version (stream_id, target_version, latest_version) 
+INSERT INTO agent_version (stream_id, target_version, latest_version)
                    VALUES (1, ?, ?)`,
 			jujuversion.Current.String(), jujuversion.Current.String())
 		if err != nil {

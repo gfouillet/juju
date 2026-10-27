@@ -207,8 +207,8 @@ func (s *remoteApplicationOffererSuite) TestRemoteApplicationOffererScheduleRemo
 	// We should have a removal job scheduled immediately.
 	row := s.DB().QueryRow(`
 SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, "removal-uuid",
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, "removal-uuid",
 	)
 
 	var (
@@ -240,8 +240,8 @@ func (s *remoteApplicationOffererSuite) TestRemoteApplicationOffererScheduleRemo
 	// We rely on the worker to handle that fact.
 	row := s.DB().QueryRow(`
 SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, "removal-uuid",
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, "removal-uuid",
 	)
 
 	var (

@@ -66,7 +66,7 @@ func (st *State) DeleteApplicationResources(
 
 	// SQL statement to check there is no related resources in resource_file_store.
 	noFileStoreStmt, err := st.Prepare(`
-SELECT resource_uuid AS &resourceIdentity.uuid 
+SELECT resource_uuid AS &resourceIdentity.uuid
 FROM resource_file_store
 WHERE resource_uuid IN ($uuids[:])`, resourceIdentity{}, uuids{})
 	if err != nil {
@@ -75,7 +75,7 @@ WHERE resource_uuid IN ($uuids[:])`, resourceIdentity{}, uuids{})
 
 	// SQL statement to check there is no related resources in resource_image_store.
 	noImageStoreStmt, err := st.Prepare(`
-SELECT resource_uuid AS &resourceIdentity.uuid 
+SELECT resource_uuid AS &resourceIdentity.uuid
 FROM resource_image_store
 WHERE resource_uuid IN ($uuids[:])`, resourceIdentity{}, uuids{})
 	if err != nil {
@@ -84,7 +84,7 @@ WHERE resource_uuid IN ($uuids[:])`, resourceIdentity{}, uuids{})
 
 	// SQL statement to check there is no related resources in unit_resource.
 	noUnitResourceStmt, err := st.Prepare(`
-SELECT resource_uuid AS &resourceIdentity.uuid 
+SELECT resource_uuid AS &resourceIdentity.uuid
 FROM unit_resource
 WHERE resource_uuid IN ($uuids[:])`, resourceIdentity{}, uuids{})
 	if err != nil {
@@ -193,8 +193,8 @@ func (st *State) getAppResources(ctx context.Context, tx *sqlair.TX, appID appli
 	var resources []localUUID
 	// SQL statement to list all resources for an application.
 	listAppResourcesStmt, err := st.Prepare(`
-SELECT resource_uuid AS &localUUID.uuid 
-FROM application_resource 
+SELECT resource_uuid AS &localUUID.uuid
+FROM application_resource
 WHERE application_uuid = $applicationID.uuid`, id, localUUID{})
 	if err != nil {
 		return uuids{}, errors.Capture(err)
@@ -235,11 +235,11 @@ func (st *State) GetApplicationResourceID(
 
 	// Prepare the SQL statement to retrieve the resource UUID.
 	stmt, err := st.Prepare(`
-SELECT uuid as &resourceIdentity.uuid 
-FROM   v_application_resource
-WHERE  name = $resourceIdentity.name 
-AND    application_uuid = $resourceIdentity.application_uuid
-AND    state = 'available'
+SELECT uuid as &resourceIdentity.uuid
+FROM v_application_resource
+WHERE name = $resourceIdentity.name
+AND application_uuid = $resourceIdentity.application_uuid
+AND state = 'available'
 `, resource)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -288,11 +288,11 @@ func (st *State) GetUnitResourceID(
 	stmt, err := st.Prepare(`
 SELECT u.uuid AS &unitResourceResult.unit_uuid,
        ur.resource_uuid AS &unitResourceResult.resource_uuid
-FROM   unit AS u
+FROM unit AS u
 LEFT JOIN unit_resource AS ur
-ON     ur.unit_uuid = u.uuid
-AND    ur.charm_resource_name = $unitResource.charm_resource_name
-WHERE  u.name = $unitUUIDAndName.name
+ON ur.unit_uuid = u.uuid
+AND ur.charm_resource_name = $unitResource.charm_resource_name
+WHERE u.name = $unitUUIDAndName.name
 `, result, resourceInput, unitInput)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -345,12 +345,12 @@ func (st *State) GetResourceUUIDByApplicationAndResourceName(
 	// Prepare the SQL statement to retrieve the resource UUID.
 	stmt, err := st.Prepare(`
 SELECT r.uuid AS &localUUID.uuid
-FROM   resource AS r
-JOIN   application_resource ar ON r.uuid = ar.resource_uuid
-JOIN   application a           ON ar.application_uuid = a.uuid
-WHERE  r.charm_resource_name = $resourceAndAppName.resource_name 
-AND    a.name = $resourceAndAppName.application_name
-AND    r.state_id = 0 -- Only check available resources, not potential.
+FROM resource AS r
+JOIN application_resource ar ON r.uuid = ar.resource_uuid
+JOIN application a ON ar.application_uuid = a.uuid
+WHERE r.charm_resource_name = $resourceAndAppName.resource_name
+AND a.name = $resourceAndAppName.application_name
+AND r.state_id = 0 -- Only check available resources, not potential.
 `, names, uuid)
 	if err != nil {
 		return "", errors.Capture(err)

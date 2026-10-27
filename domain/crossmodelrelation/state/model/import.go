@@ -328,8 +328,8 @@ func (st *State) RelationExists(ctx context.Context, relationUUID string) (bool,
 	ident := uuid{UUID: relationUUID}
 	stmt, err := st.Prepare(`
 SELECT COUNT(*) AS &countResult.count
-FROM   relation
-WHERE  uuid = $uuid.uuid
+FROM relation
+WHERE uuid = $uuid.uuid
 `, countResult{}, ident)
 	if err != nil {
 		return false, errors.Capture(err)
@@ -366,10 +366,10 @@ func (st *State) GetSyntheticApplicationByRelationUUID(ctx context.Context, rela
 	ident := remoteRelationUUID{UUID: relationUUID}
 	stmt, err := st.Prepare(`
 SELECT oc.uuid AS &syntheticApplication.uuid,
-       a.name  AS &syntheticApplication.name
-FROM   offer_connection oc
-JOIN   application a ON a.uuid = oc.uuid
-WHERE  oc.remote_relation_uuid = $remoteRelationUUID.uuid
+       a.name AS &syntheticApplication.name
+FROM offer_connection oc
+JOIN application a ON a.uuid = oc.uuid
+WHERE oc.remote_relation_uuid = $remoteRelationUUID.uuid
 `, syntheticApplication{}, ident)
 	if err != nil {
 		return "", "", errors.Capture(err)
@@ -411,13 +411,13 @@ func (st *State) getRegularRelationUUIDByEndpointIdentifiers(
 
 	stmt, err := st.Prepare(`
 SELECT &uuid.*
-FROM   relation r
-JOIN   v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
-JOIN   v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
-WHERE  e1.application_name = $endpointIdentifier1.application_name 
-AND    e1.endpoint_name    = $endpointIdentifier1.endpoint_name
-AND    e2.application_name = $endpointIdentifier2.application_name 
-AND    e2.endpoint_name    = $endpointIdentifier2.endpoint_name
+FROM relation r
+JOIN v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
+JOIN v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
+WHERE e1.application_name = $endpointIdentifier1.application_name
+AND e1.endpoint_name = $endpointIdentifier1.endpoint_name
+AND e2.application_name = $endpointIdentifier2.application_name
+AND e2.endpoint_name = $endpointIdentifier2.endpoint_name
 `, uuid{}, e1, e2)
 	if err != nil {
 		return uuids, errors.Capture(err)

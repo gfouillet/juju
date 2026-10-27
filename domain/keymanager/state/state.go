@@ -127,7 +127,7 @@ SELECT $userPublicKeyInsert.comment,
        $userPublicKeyInsert.fingerprint,
        $userPublicKeyInsert.public_key,
        $userPublicKeyInsert.user_uuid,
-       s.id	
+       s.id
 FROM ssh_fingerprint_hash_algorithm s
 WHERE s.algorithm = $userPublicKeyInsert.algorithm
 `, userPublicKeyInsert{})
@@ -212,7 +212,7 @@ func (s *State) AddPublicKeysForUser(
 
 	insertModelAuthorisedKeyStmt, err := s.Prepare(`
 INSERT INTO model_authorized_keys (*) VALUES ($modelAuthorizedKey.*)
-	`, modelAuthorizedKey{})
+`, modelAuthorizedKey{})
 	if err != nil {
 		return errors.Errorf(
 			"preparing insert statement for adding user %q public keys to model %q: %w",

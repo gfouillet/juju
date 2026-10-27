@@ -84,7 +84,7 @@ VALUES (?, ?, 0);
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO charm_metadata (charm_uuid, name)
 VALUES (?, ?);
-		`, charmUUID, appName)
+`, charmUUID, appName)
 		if err != nil {
 			return errors.Capture(err)
 		}
@@ -160,8 +160,8 @@ func (s *modelSecretsSuite) addRevision(c *tc.C, uri *coresecrets.URI, content m
 		revisionUUID := internaluuid.MustNewUUID().String()
 		_, err := tx.ExecContext(ctx,
 			`
-INSERT INTO secret_revision (uuid, secret_id, revision, create_time, update_time) 
-VALUES (?, ?, (SELECT MAX(revision)+1 FROM secret_revision WHERE secret_id=?), ?, ?)`,
+INSERT INTO secret_revision (uuid, secret_id, revision, create_time, update_time)
+VALUES (?, ?, (SELECT MAX(revision) + 1 FROM secret_revision WHERE secret_id = ?), ?, ?)`,
 			revisionUUID, uri.ID, uri.ID, now, now,
 		)
 		if err != nil {
@@ -474,7 +474,7 @@ func (s *modelSecretsSuite) TestUpdateRemoteSecretRevision(c *tc.C) {
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 			row := tx.QueryRowContext(ctx, `
 			SELECT latest_revision FROM secret_reference WHERE secret_id = ?
-		`, uri.ID)
+`, uri.ID)
 			if err := row.Scan(&got); err != nil {
 				return err
 			}
@@ -556,9 +556,9 @@ func (s *modelSecretsSuite) setupSecretAccess(c *tc.C, uri *coresecrets.URI, uni
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		modelUUID := tc.Must0(c, coremodel.NewUUID)
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO model (uuid, controller_uuid,  name, qualifier, type, cloud, cloud_type)
+			INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 			VALUES (?, ?, "test", "prod", "iaas", "test-model", "ec2")
-		`, modelUUID.String(), coretesting.ControllerTag.Id())
+`, modelUUID.String(), coretesting.ControllerTag.Id())
 		if err != nil {
 			return err
 		}
@@ -570,9 +570,9 @@ func (s *modelSecretsSuite) setupSecretAccess(c *tc.C, uri *coresecrets.URI, uni
 		}
 
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO secret_permission(secret_id, role_id, subject_uuid, subject_type_id, scope_uuid, scope_type_id)
-			VALUES(?, ?, ?, ?, ?, ?)
-		`, uri.ID, domainsecret.RoleView, unitUUID, domainsecret.SubjectUnit, relationUUID, domainsecret.ScopeRelation)
+			INSERT INTO secret_permission (secret_id, role_id, subject_uuid, subject_type_id, scope_uuid, scope_type_id)
+			VALUES (?, ?, ?, ?, ?, ?)
+`, uri.ID, domainsecret.RoleView, unitUUID, domainsecret.SubjectUnit, relationUUID, domainsecret.ScopeRelation)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)

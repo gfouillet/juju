@@ -93,9 +93,9 @@ func (s *relationWithRemoteConsumer) TestEnsureRelationWithRemoteConsumerNotAliv
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `
 SELECT DISTINCT u.application_uuid
-FROM            relation_unit AS ru
-JOIN            unit AS u ON ru.unit_uuid = u.uuid
-WHERE           ru.uuid IN (?, ?, ?)
+FROM relation_unit AS ru
+JOIN unit AS u ON ru.unit_uuid = u.uuid
+WHERE ru.uuid IN (?, ?, ?)
 `, synthRelUnitUUIDs[0], synthRelUnitUUIDs[1], synthRelUnitUUIDs[2]).Scan(&gotAppUUID)
 		return err
 	})
@@ -111,10 +111,10 @@ func (s *relationWithRemoteConsumer) TestEnsureRelationWithRemoteConsumerNotAliv
 	var departedRelationUnitUUID string
 	err := s.DB().QueryRowContext(c.Context(), `
 SELECT ru.uuid
-FROM   relation_unit AS ru
-JOIN   unit AS u ON ru.unit_uuid = u.uuid
-WHERE  u.application_uuid = ?
-LIMIT  1`, synthAppUUID.String()).Scan(&departedRelationUnitUUID)
+FROM relation_unit AS ru
+JOIN unit AS u ON ru.unit_uuid = u.uuid
+WHERE u.application_uuid = ?
+LIMIT 1`, synthAppUUID.String()).Scan(&departedRelationUnitUUID)
 	c.Assert(err, tc.ErrorIsNil)
 
 	err = st.LeaveScope(c.Context(), departedRelationUnitUUID)
@@ -130,9 +130,9 @@ LIMIT  1`, synthAppUUID.String()).Scan(&departedRelationUnitUUID)
 	var remainingSyntheticUnits int
 	err = s.DB().QueryRowContext(c.Context(), `
 SELECT COUNT(*)
-FROM   unit
-WHERE  application_uuid = ?
-AND    life_id = ?`, synthAppUUID.String(), int(life.Dead)).Scan(&remainingSyntheticUnits)
+FROM unit
+WHERE application_uuid = ?
+AND life_id = ?`, synthAppUUID.String(), int(life.Dead)).Scan(&remainingSyntheticUnits)
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(remainingSyntheticUnits, tc.Equals, 2)
 }
@@ -158,8 +158,8 @@ func (s *relationWithRemoteConsumer) TestRelationWithRemoteConsumerScheduleRemov
 
 	row := s.DB().QueryRowContext(c.Context(), `
 SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, "removal-uuid",
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, "removal-uuid",
 	)
 
 	var (
@@ -188,8 +188,8 @@ func (s *relationWithRemoteConsumer) TestRelationWithRemoteConsumerScheduleRemov
 
 	row := s.DB().QueryRowContext(c.Context(), `
 SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, "removal-uuid",
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, "removal-uuid",
 	)
 
 	var (

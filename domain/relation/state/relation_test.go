@@ -989,7 +989,7 @@ func (s *addRelationSuite) addRemoteApplication(
 	// Add charm with CMR source (source_id = 2)
 	// Note: architecture_id must be NULL for CMR charms per chk_charm_architecture constraint
 	s.query(c, `
-INSERT INTO charm (uuid, reference_name, architecture_id, source_id) 
+INSERT INTO charm (uuid, reference_name, architecture_id, source_id)
 VALUES (?, ?, NULL, 2)
 `, charmUUID, charmUUID)
 	s.addCharmMetadata(c, charmUUID, false)
@@ -1071,7 +1071,7 @@ func (s *addRelationSuite) addApplicationEndpointFromRelation(c *tc.C,
 
 	// Add relation to charm
 	s.query(c, `
-INSERT INTO charm_relation (uuid, charm_uuid, name, interface, capacity, role_id,  scope_id)
+INSERT INTO charm_relation (uuid, charm_uuid, name, interface, capacity, role_id, scope_id)
 SELECT ?, ?, ?, ?, ?, crr.id, crs.id
 FROM charm_relation_scope crs
 JOIN charm_relation_role crr ON crr.name = ?
@@ -1081,8 +1081,8 @@ WHERE crs.name = ?
 
 	// application endpoint
 	s.query(c, `
-INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid,space_uuid)
-VALUES (?,?,?,?)
+INSERT INTO application_endpoint (uuid, application_uuid, charm_relation_uuid, space_uuid)
+VALUES (?, ?, ?, ?)
 `, relationEndpointUUID.String(), appUUID.String(), charmRelationUUID.String(), network.AlphaSpaceId)
 
 	return relationEndpointUUID
@@ -4825,7 +4825,7 @@ func (s *relationSuite) TestGetRelationUUIDsByUnitUUIDEmpty(c *tc.C) {
 func (s *relationSuite) addRelationUnitSettingsHash(c *tc.C, relationUnitUUID corerelation.UnitUUID, hash string) {
 	s.query(c, `
 INSERT INTO relation_unit_settings_hash (relation_unit_uuid, sha256)
-VALUES (?,?)
+VALUES (?, ?)
 `, relationUnitUUID, hash)
 }
 
@@ -4834,7 +4834,7 @@ VALUES (?,?)
 func (s *relationSuite) addRelationApplicationSettingsHash(c *tc.C, relationEndpointUUID string, hash string) {
 	s.query(c, `
 INSERT INTO relation_application_settings_hash (relation_endpoint_uuid, sha256)
-VALUES (?,?)
+VALUES (?, ?)
 `, relationEndpointUUID, hash)
 }
 
@@ -4849,7 +4849,7 @@ func (s *addRelationSuite) fetchAllRelationStatusesOrderByRelationIDs(c *tc.C) [
 
 		query := `
 SELECT rst.name
-FROM relation r 
+FROM relation r
 JOIN relation_status rs ON r.uuid = rs.relation_uuid
 JOIN relation_status_type rst ON rs.relation_status_type_id = rst.id
 ORDER BY r.relation_id
@@ -4885,8 +4885,8 @@ func (s *addRelationSuite) fetchAllEndpointUUIDsByRelationIDs(c *tc.C) map[int][
 
 		query := `
 SELECT re.endpoint_uuid, r.relation_id
-FROM relation_endpoint re 
-JOIN relation r  ON re.relation_uuid = r.uuid
+FROM relation_endpoint re
+JOIN relation r ON re.relation_uuid = r.uuid
 `
 		rows, err := tx.QueryContext(ctx, query)
 		if err != nil {

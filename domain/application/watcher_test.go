@@ -69,8 +69,8 @@ func (s *watcherSuite) SetUpTest(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
-			VALUES (?, ?, "test", "prod",  "iaas", "test-model", "ec2")
-		`, s.modelUUID.String(), testing.ControllerTag.Id())
+			VALUES (?, ?, "test", "prod", "iaas", "test-model", "ec2")
+`, s.modelUUID.String(), testing.ControllerTag.Id())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -169,13 +169,13 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 		c.Assert(err, tc.ErrorIsNil)
 
 		err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", "foo/0").Scan(&unitID1); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", "foo/0").Scan(&unitID1); err != nil {
 				return errors.Capture(err)
 			}
-			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", "foo/1").Scan(&unitID2); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", "foo/1").Scan(&unitID2); err != nil {
 				return errors.Capture(err)
 			}
-			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", "bar/1").Scan(&unitID3); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", "bar/1").Scan(&unitID3); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -192,7 +192,7 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 		setup(c)
 		// Update non app unit first up.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name=?", "bar/0"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name = ?", "bar/0"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -206,7 +206,7 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 	})
 	harness.AddTest(c, func(c *tc.C) {
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name=?", "foo/0"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name = ?", "foo/0"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -219,7 +219,7 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 	})
 	harness.AddTest(c, func(c *tc.C) {
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 2 WHERE name=?", "foo/0"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 2 WHERE name = ?", "foo/0"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -233,16 +233,16 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 	harness.AddTest(c, func(c *tc.C) {
 		// Removing dead unit, no change.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid=?", unitID1); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid = ?", unitID1); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid=?", unitID1); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid = ?", unitID1); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid=?", unitID1); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid = ?", unitID1); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE name=?", "foo/0"); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE name = ?", "foo/0"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -254,7 +254,7 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 	harness.AddTest(c, func(c *tc.C) {
 		// Updating different app unit with > 0 app units remaining - no change.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name=?", "bar/1"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name = ?", "bar/1"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -266,7 +266,7 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 	harness.AddTest(c, func(c *tc.C) {
 		// Removing non app unit - no change.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name=?", "bar/0"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name = ?", "bar/0"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -278,16 +278,16 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 	harness.AddTest(c, func(c *tc.C) {
 		// Removing non dead unit - change.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid=?", unitID2); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid = ?", unitID2); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid=?", unitID2); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid = ?", unitID2); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid=?", unitID2); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid = ?", unitID2); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE name=?", "foo/1"); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE name = ?", "foo/1"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -301,7 +301,7 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 	harness.AddTest(c, func(c *tc.C) {
 		// Updating different app unit with no app units remaining - no change.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name=?", "bar/667"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name = ?", "bar/667"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -313,16 +313,16 @@ func (s *watcherSuite) TestWatchApplicationUnitLife(c *tc.C) {
 	harness.AddTest(c, func(c *tc.C) {
 		// Deleting different app unit with no app units remaining - no change.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid=?", unitID3); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid = ?", unitID3); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid=?", unitID3); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid = ?", unitID3); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid=?", unitID3); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid = ?", unitID3); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE name=?", "bar/667"); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE name = ?", "bar/667"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -345,10 +345,10 @@ func (s *watcherSuite) TestWatchApplicationUnitLifeInitial(c *tc.C) {
 		s.createIAASApplication(c, svc, "bar", service.AddIAASUnitArg{})
 
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", "foo/0").Scan(&unitID1); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", "foo/0").Scan(&unitID1); err != nil {
 				return errors.Capture(err)
 			}
-			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", "foo/1").Scan(&unitID2); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", "foo/1").Scan(&unitID2); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -387,7 +387,7 @@ func (s *watcherSuite) TestWatchUnitLife(c *tc.C) {
 	harness.AddTest(c, func(c *tc.C) {
 		// Test unit life going to dying fires.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name=?", "foo/0"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name = ?", "foo/0"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -400,7 +400,7 @@ func (s *watcherSuite) TestWatchUnitLife(c *tc.C) {
 	harness.AddTest(c, func(c *tc.C) {
 		// Test unit life going to dead fires.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 2 WHERE name=?", "foo/0"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 2 WHERE name = ?", "foo/0"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -414,19 +414,19 @@ func (s *watcherSuite) TestWatchUnitLife(c *tc.C) {
 		// Test unit removal fires.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 			var unitID1 string
-			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", "foo/0").Scan(&unitID1); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", "foo/0").Scan(&unitID1); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid=?", unitID1); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid = ?", unitID1); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid=?", unitID1); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid = ?", unitID1); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid=?", unitID1); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid = ?", unitID1); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE name=?", "foo/0"); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE name = ?", "foo/0"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -439,7 +439,7 @@ func (s *watcherSuite) TestWatchUnitLife(c *tc.C) {
 	harness.AddTest(c, func(c *tc.C) {
 		// Test annother unit life going to dying does not fire.
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name=?", "foo/1"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE unit SET life_id = 1 WHERE name = ?", "foo/1"); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -529,7 +529,7 @@ func (s *watcherSuite) TestWatchApplicationsWithPendingCharms(c *tc.C) {
 UPDATE charm SET available = TRUE
 FROM application AS a
 INNER JOIN charm AS c ON a.charm_uuid = c.uuid
-WHERE a.uuid=?`, id0.String())
+WHERE a.uuid = ?`, id0.String())
 			return err
 		})
 		c.Assert(err, tc.ErrorIsNil)
@@ -546,7 +546,7 @@ WHERE a.uuid=?`, id0.String())
 		err = db.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, `
 UPDATE application SET charm_modified_version = 1
-WHERE uuid=?`, id0.String())
+WHERE uuid = ?`, id0.String())
 			return err
 		})
 		c.Assert(err, tc.ErrorIsNil)
@@ -598,7 +598,7 @@ func (s *watcherSuite) TestWatchApplication(c *tc.C) {
 		err = db.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, `
 UPDATE application SET charm_modified_version = 1
-WHERE uuid=?`, appUUID)
+WHERE uuid = ?`, appUUID)
 			return err
 		})
 		c.Assert(err, tc.ErrorIsNil)
@@ -614,7 +614,7 @@ WHERE uuid=?`, appUUID)
 		err = db.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, `
 UPDATE application SET name = ?
-WHERE uuid=?`, appName, appUUID)
+WHERE uuid = ?`, appName, appUUID)
 			return err
 		})
 		c.Assert(err, tc.ErrorIsNil)
@@ -1110,19 +1110,19 @@ func (s *watcherSuite) TestWatchUnitAddRemoveOnMachine(c *tc.C) {
 	deleteUnit := func(c *tc.C, name string) {
 		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 			var unitUUID string
-			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name=?", name).Scan(&unitUUID); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT uuid FROM unit WHERE name = ?", name).Scan(&unitUUID); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid=?", unitUUID); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_agent_status WHERE unit_uuid = ?", unitUUID); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid=?", unitUUID); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_status WHERE unit_uuid = ?", unitUUID); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid=?", unitUUID); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit_workload_version WHERE unit_uuid = ?", unitUUID); err != nil {
 				return errors.Capture(err)
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE uuid=?", unitUUID); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unit WHERE uuid = ?", unitUUID); err != nil {
 				return errors.Capture(err)
 			}
 			return nil
@@ -1243,7 +1243,7 @@ func (s *watcherSuite) TestWatchApplications(c *tc.C) {
 			_, err := tx.ExecContext(ctx, `
 UPDATE application
 SET name = ?
-WHERE uuid=?
+WHERE uuid = ?
 `, "bar", appID)
 			return err
 		})
@@ -1615,7 +1615,7 @@ func (s *watcherSuite) TestWatchUnitAddresses(c *tc.C) {
 func (s *watcherSuite) getApplicationConfigHash(c *tc.C, db changestream.WatchableDB, appUUID coreapplication.UUID) string {
 	var hash string
 	err := db.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, `SELECT sha256 FROM application_config_hash WHERE application_uuid=?`, appUUID.String())
+		row := tx.QueryRowContext(ctx, `SELECT sha256 FROM application_config_hash WHERE application_uuid = ?`, appUUID.String())
 		err := row.Scan(&hash)
 		return err
 	})

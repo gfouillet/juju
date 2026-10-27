@@ -84,7 +84,7 @@ func (s *linkLayerSuite) TestGetAllLinkLayerDevicesByNetNodeUUIDs(c *tc.C) {
 
 	// Create IP addresses for each device
 	insertIPAddress := `
-INSERT INTO ip_address (uuid, device_uuid, address_value, type_id, scope_id, origin_id, config_type_id, subnet_uuid, net_node_uuid) 
+INSERT INTO ip_address (uuid, device_uuid, address_value, type_id, scope_id, origin_id, config_type_id, subnet_uuid, net_node_uuid)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	s.query(c, insertIPAddress, "ip-uuid-1", eth0UUID, "192.168.1.10/24", 0, 2, 0, 4, subnet1UUID, nodeUUID1)
 	s.query(c, insertIPAddress, "ip-uuid-2", eth0UUID, "192.168.1.11/24", 0, 2, 0, 4, subnet1UUID, nodeUUID1)

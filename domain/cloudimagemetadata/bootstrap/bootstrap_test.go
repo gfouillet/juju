@@ -133,7 +133,7 @@ func (s *bootstrapSuite) retrieveMetadataFromDB(c *tc.C) ([]cloudimagemetadata.M
 		metadata = nil
 
 		rows, err := tx.Query(`
-SELECT 
+SELECT
 source,
 stream,
 region,

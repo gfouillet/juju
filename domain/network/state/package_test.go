@@ -94,7 +94,7 @@ VALUES (?, ?, ?, ?)
 func (s *linkLayerBaseSuite) addApplicationExtraEndpoint(
 	c *tc.C, applicationUUID coreapplication.UUID, charmRelationUUID string, boundSpaceUUID string) {
 	s.query(c, `
-INSERT INTO application_extra_endpoint (application_uuid, charm_extra_binding_uuid,space_uuid)
+INSERT INTO application_extra_endpoint (application_uuid, charm_extra_binding_uuid, space_uuid)
 VALUES (?, ?, ?)
 `, applicationUUID, charmRelationUUID, nilZeroPtr(boundSpaceUUID))
 }
@@ -102,7 +102,7 @@ VALUES (?, ?, ?)
 // addApplicationExposedEndpoint inserts a record linking an application,
 // its exposed endpoint, and the associated space into the database.
 func (s *linkLayerBaseSuite) addApplicationExposedEndpoint(c *tc.C, applicationUUID, endpointUUID, boundSpaceUUID string) {
-	s.query(c, `INSERT INTO application_exposed_endpoint_space (application_uuid, application_endpoint_uuid, space_uuid) 
+	s.query(c, `INSERT INTO application_exposed_endpoint_space (application_uuid, application_endpoint_uuid, space_uuid)
 			VALUES (?, ?, ?)`, applicationUUID, endpointUUID, boundSpaceUUID)
 }
 
@@ -119,7 +119,7 @@ func (s *linkLayerBaseSuite) addCharm(c *tc.C) string {
 func (s *linkLayerBaseSuite) addCharmRelation(c *tc.C, charmUUID corecharm.ID, r charm.Relation) string {
 	charmRelationUUID := uuid.MustNewUUID().String()
 	s.query(c, `
-INSERT INTO charm_relation (uuid, charm_uuid, name, role_id, interface, optional, capacity, scope_id) 
+INSERT INTO charm_relation (uuid, charm_uuid, name, role_id, interface, optional, capacity, scope_id)
 VALUES (?, ?, ?,
        (SELECT id FROM charm_relation_role WHERE name = ?),
        ?, ?, ?,
@@ -145,7 +145,7 @@ func (s *linkLayerBaseSuite) addNetNode(c *tc.C) string {
 
 func (s *linkLayerBaseSuite) addMachine(c *tc.C, name, netNodeUUID string) machine.UUID {
 	machineUUID := machinetesting.GenUUID(c)
-	s.query(c, "INSERT INTO machine (uuid, net_node_uuid, name, life_id) VALUES (?, ?, ? ,?)",
+	s.query(c, "INSERT INTO machine (uuid, net_node_uuid, name, life_id) VALUES (?, ?, ?, ?)",
 		machineUUID.String(), netNodeUUID, name, 0)
 	return machineUUID
 }

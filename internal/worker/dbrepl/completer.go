@@ -151,7 +151,7 @@ func (c *sqlCompleter) tables() []string {
 	var out []string
 	err := db.StdTxn(c.ctx, func(ctx context.Context, tx *sql.Tx) error {
 		out = nil
-		rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+		rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 		if err != nil {
 			return err
 		}

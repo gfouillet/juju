@@ -48,12 +48,12 @@ SELECT (ctrl.uuid,
        ca_cert,
        address) as (&Controller.*),
        model.uuid as &Controller.model
-FROM   external_controller AS ctrl
+FROM external_controller AS ctrl
        LEFT JOIN external_model AS model
-       ON        ctrl.uuid = model.controller_uuid
+       ON ctrl.uuid = model.controller_uuid
        LEFT JOIN external_controller_address AS addrs
-       ON        ctrl.uuid = addrs.controller_uuid
-WHERE  ctrl.uuid = $Controller.uuid`
+       ON ctrl.uuid = addrs.controller_uuid
+WHERE ctrl.uuid = $Controller.uuid`
 	s, err := st.Prepare(q, controller)
 	if err != nil {
 		return nil, errors.Errorf("preparing %q: %w", q, err)
@@ -86,15 +86,15 @@ SELECT (ctrl.uuid,
        ctrl.ca_cert,
        addrs.address) as (&Controller.*),
        model.uuid as &Controller.model
-FROM   external_controller AS ctrl	
+FROM external_controller AS ctrl
        LEFT JOIN external_model AS model
-       ON        ctrl.uuid = model.controller_uuid
+       ON ctrl.uuid = model.controller_uuid
        LEFT JOIN external_controller_address AS addrs
-       ON        ctrl.uuid = addrs.controller_uuid
-WHERE  ctrl.uuid IN (
+       ON ctrl.uuid = addrs.controller_uuid
+WHERE ctrl.uuid IN (
     SELECT controller_uuid
-    FROM   external_model AS model
-    WHERE  model.uuid IN ($ModelUUIDs[:])
+    FROM external_model AS model
+    WHERE model.uuid IN ($ModelUUIDs[:])
 )`
 
 	stmt, err := st.Prepare(q, Controller{}, dbModelUUIDs)
@@ -179,7 +179,7 @@ func (st *State) updateExternalControllerTx(
 	upsertControllerQuery := `
 INSERT INTO external_controller (uuid, alias, ca_cert)
 VALUES ($Controller.*)
-  ON CONFLICT(uuid) DO UPDATE SET alias=excluded.alias, ca_cert=excluded.ca_cert
+  ON CONFLICT (uuid) DO UPDATE SET alias = excluded.alias, ca_cert = excluded.ca_cert
 `
 	upsertControllerStmt, err := st.Prepare(upsertControllerQuery, externalController)
 	if err != nil {
@@ -194,8 +194,8 @@ VALUES ($Controller.*)
 
 	deleteUnusedAddressesQuery := `
 DELETE FROM external_controller_address
-WHERE  controller_uuid = $Controller.uuid
-AND    address NOT IN ($ControllerUUIDs[:])
+WHERE controller_uuid = $Controller.uuid
+AND address NOT IN ($ControllerUUIDs[:])
 `
 	deleteUnusedAddressesStmt, err := st.Prepare(deleteUnusedAddressesQuery, externalController, cIDs)
 	if err != nil {
@@ -223,7 +223,7 @@ AND    address NOT IN ($ControllerUUIDs[:])
 		insertNewAddressesQuery := `
 INSERT INTO external_controller_address (uuid, controller_uuid, address)
 VALUES ($Address.*)
-  ON CONFLICT(controller_uuid, address) DO NOTHING
+  ON CONFLICT (controller_uuid, address) DO NOTHING
 `
 		insertNewAddressesStmt, err := st.Prepare(insertNewAddressesQuery, Address{})
 		if err != nil {
@@ -250,7 +250,7 @@ VALUES ($Address.*)
 		upsertModelQuery := `
 INSERT INTO external_model (uuid, controller_uuid)
 VALUES ($Model.*)
-  ON CONFLICT(uuid) DO UPDATE SET controller_uuid=excluded.controller_uuid
+  ON CONFLICT (uuid) DO UPDATE SET controller_uuid = excluded.controller_uuid
 `
 		upsertModelStmt, err := st.Prepare(upsertModelQuery, Model{})
 		if err != nil {
@@ -281,9 +281,9 @@ func (st *State) ModelsForController(
 	}
 
 	stmt, err := st.Prepare(`
-SELECT &Model.uuid 
-FROM   external_model 
-WHERE  controller_uuid = $Controller.uuid`, controller, Model{})
+SELECT &Model.uuid
+FROM external_model
+WHERE controller_uuid = $Controller.uuid`, controller, Model{})
 	if err != nil {
 		return nil, errors.Errorf("preparing select models for controller: %w", err)
 	}

@@ -290,7 +290,7 @@ func (s *stateSuite) insertControllerNodes(c *tc.C, amount int) {
 	query, err := sqlair.Prepare(`
 INSERT INTO controller_node (controller_id, dqlite_node_id, dqlite_bind_address)
 VALUES ($M.ctrl_id, $M.node_id, $M.addr)
-			`, sqlair.M{})
+`, sqlair.M{})
 	c.Assert(err, tc.ErrorIsNil)
 
 	err = s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
@@ -314,7 +314,7 @@ func (s *stateSuite) insertChangeLogWitness(c *tc.C, runner coredatabase.TxnRunn
 INSERT INTO change_log_witness (controller_id, lower_bound, updated_at)
 VALUES ($M.ctrl_id, $M.lower_bound, $M.updated_at)
 ON CONFLICT (controller_id) DO UPDATE SET lower_bound = $M.lower_bound, updated_at = $M.updated_at;
-			`, sqlair.M{})
+`, sqlair.M{})
 	c.Assert(err, tc.ErrorIsNil)
 
 	err = runner.Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
@@ -337,7 +337,7 @@ func (s *stateSuite) insertChangeLogItems(c *tc.C, runner coredatabase.TxnRunner
 	query, err := sqlair.Prepare(`
 INSERT INTO change_log (id, edit_type_id, namespace_id, changed, created_at)
 VALUES ($M.id, 4, 10002, 0, $M.created_at);
-			`, sqlair.M{})
+`, sqlair.M{})
 	c.Assert(err, tc.ErrorIsNil)
 
 	err = runner.Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
@@ -377,7 +377,7 @@ SELECT (controller_id, lower_bound, updated_at) AS (&Watermark.*) FROM change_lo
 func (s *stateSuite) expectChangeLogItems(c *tc.C, runner coredatabase.TxnRunner, amount, lowerBound, upperBound int) {
 	query, err := sqlair.Prepare(`
 SELECT (id, edit_type_id, namespace_id, changed, created_at) AS (&ChangeLogItem.*) FROM change_log;
-	`, ChangeLogItem{})
+`, ChangeLogItem{})
 	c.Assert(err, tc.ErrorIsNil)
 
 	var got []ChangeLogItem

@@ -27,8 +27,8 @@ func GetStoragePoolUUID(
 	inputArg := nameAndUUID{Name: name}
 	stmt, err := preparer.Prepare(`
 SELECT &nameAndUUID.uuid
-FROM   storage_pool
-WHERE  name = $nameAndUUID.name`, inputArg)
+FROM storage_pool
+WHERE name = $nameAndUUID.name`, inputArg)
 	if err != nil {
 		return "", errors.Capture(err)
 	}

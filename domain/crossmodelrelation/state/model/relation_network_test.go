@@ -221,7 +221,7 @@ func (s *relationNetworkStateSuite) createTestRelationWithNamesAndLife(c *tc.C, 
 	relUUID := internaluuid.MustNewUUID()
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		var globalScopeID int
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_scope WHERE name='global'`).Scan(&globalScopeID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_scope WHERE name = 'global'`).Scan(&globalScopeID); err != nil {
 			return err
 		}
 
@@ -235,9 +235,9 @@ VALUES (?, ?, ?, ?)`, relUUID.String(), lifeID, s.relationCount, globalScopeID);
 		var ep1, ep2 string
 		qEP := `
 SELECT ae.uuid
-FROM   application_endpoint ae
-JOIN   charm_relation cr ON cr.uuid = ae.charm_relation_uuid
-WHERE  ae.application_uuid = ? AND cr.name = ?`
+FROM application_endpoint ae
+JOIN charm_relation cr ON cr.uuid = ae.charm_relation_uuid
+WHERE ae.application_uuid = ? AND cr.name = ?`
 
 		if err := tx.QueryRowContext(ctx, qEP, appUUID1.String(), "db").Scan(&ep1); err != nil {
 			return err

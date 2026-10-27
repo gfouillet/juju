@@ -223,8 +223,8 @@ func (st *State) GetStorageResourceTagInfoForApplication(
 
 	appNameStmt, err := st.Prepare(`
 SELECT &applicationName.*
-FROM   application
-WHERE  uuid = $entityUUID.uuid
+FROM application
+WHERE uuid = $entityUUID.uuid
 `,
 		appNameVal, appUUIDInput)
 	if err != nil {
@@ -302,7 +302,7 @@ func (st *State) getStorageResourceTagInfoForModel(
 
 	resourceTagStmt, err := st.Prepare(`
 SELECT value AS &modelResourceTagInfo.resource_tags
-FROM   model_config
+FROM model_config
 WHERE  key = $modelConfigKey.key
 `,
 		dbVal, modelConfigKeyInput)

@@ -40,9 +40,9 @@ func TestControllerStateSuite(t *testing.T) {
 // controller_node_agent_version that will be used to query the versions.
 func (s *controllerStateSuite) seedControllersAndAgents(c *tc.C) {
 	res, err := s.DB().Exec(`
-INSERT INTO controller_node(controller_id, dqlite_node_id)
-VALUES ('1', '1'), 
-       ('2', '2'), 
+INSERT INTO controller_node (controller_id, dqlite_node_id)
+VALUES ('1', '1'),
+       ('2', '2'),
        ('3', '3'),
        ('4', '4')`)
 

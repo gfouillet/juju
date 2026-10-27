@@ -51,8 +51,8 @@ func (st *State) GetBlockDevice(
 	}
 	blockDeviceStmt, err := st.Prepare(`
 SELECT &blockDevice.*
-FROM   block_device
-WHERE  uuid = $entityUUID.uuid
+FROM block_device
+WHERE uuid = $entityUUID.uuid
 `, input, blockDevice{})
 	if err != nil {
 		return coreblockdevice.BlockDevice{}, errors.Capture(err)
@@ -60,8 +60,8 @@ WHERE  uuid = $entityUUID.uuid
 
 	blockDeviceLinkStmt, err := st.Prepare(`
 SELECT &deviceLink.*
-FROM   block_device_link_device
-WHERE  block_device_uuid = $entityUUID.uuid
+FROM block_device_link_device
+WHERE block_device_uuid = $entityUUID.uuid
 `, input, deviceLink{})
 	if err != nil {
 		return coreblockdevice.BlockDevice{}, errors.Capture(err)
@@ -143,8 +143,8 @@ func (st *State) loadBlockDevices(
 
 	blockDeviceStmt, err := st.Prepare(`
 SELECT &blockDevice.*
-FROM   block_device
-WHERE  machine_uuid = $entityUUID.uuid
+FROM block_device
+WHERE machine_uuid = $entityUUID.uuid
 `, input, blockDevice{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -152,8 +152,8 @@ WHERE  machine_uuid = $entityUUID.uuid
 
 	blockDeviceLinkStmt, err := st.Prepare(`
 SELECT &deviceLink.*
-FROM   block_device_link_device
-WHERE  machine_uuid = $entityUUID.uuid
+FROM block_device_link_device
+WHERE machine_uuid = $entityUUID.uuid
 `, input, deviceLink{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -222,8 +222,8 @@ func (st *State) checkMachineNotDead(
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.*
-FROM   machine
-WHERE  uuid = $entityLife.uuid`, io)
+FROM machine
+WHERE uuid = $entityLife.uuid`, io)
 	if err != nil {
 		return errors.Capture(err)
 	}
@@ -267,8 +267,8 @@ func (st *State) GetMachineUUIDByName(
 
 	stmt, err := st.Prepare(`
 SELECT &entityLife.*
-FROM   machine
-WHERE  name = $entityName.name`, in, out)
+FROM machine
+WHERE name = $entityName.name`, in, out)
 	if err != nil {
 		return "", errors.Capture(err)
 	}
@@ -361,10 +361,10 @@ func (st *State) removeUnreferencedBlockDevices(
 	}
 
 	selectBlockDevicesStmt, err := st.Prepare(`
-SELECT    bd.uuid AS &entityUUID.uuid
-FROM      block_device bd
-LEFT JOIN storage_volume_attachment sva ON bd.uuid=sva.block_device_uuid
-WHERE     bd.uuid IN ($blockDeviceUUIDs[:]) AND sva.block_device_uuid IS NULL
+SELECT bd.uuid AS &entityUUID.uuid
+FROM block_device bd
+LEFT JOIN storage_volume_attachment sva ON bd.uuid = sva.block_device_uuid
+WHERE bd.uuid IN ($blockDeviceUUIDs[:]) AND sva.block_device_uuid IS NULL
 `, input, entityUUID{})
 	if err != nil {
 		return errors.Capture(err)
@@ -381,7 +381,7 @@ WHERE block_device_uuid IN ($blockDeviceUUIDs[:])
 
 	deleteBlockDevicesStmt, err := st.Prepare(`
 DELETE
-FROM  block_device
+FROM block_device
 WHERE uuid IN ($blockDeviceUUIDs[:])
 `, input)
 	if err != nil {
@@ -420,8 +420,8 @@ func (st *State) updateBlockDevices(
 
 	deleteOldLinkStmt, err := st.Prepare(`
 DELETE
-FROM   block_device_link_device
-WHERE  block_device_uuid IN ($blockDeviceUUIDs[:])
+FROM block_device_link_device
+WHERE block_device_uuid IN ($blockDeviceUUIDs[:])
 `, blockDeviceUUIDs{})
 	if err != nil {
 		return errors.Capture(err)
@@ -437,7 +437,7 @@ VALUES ($deviceLink.*)
 
 	updateBlockDeviceStmt, err := st.Prepare(`
 UPDATE block_device
-SET    name = $blockDevice.name,
+SET name = $blockDevice.name,
        hardware_id = $blockDevice.hardware_id,
        wwn = $blockDevice.wwn,
        serial_id = $blockDevice.serial_id,
@@ -449,7 +449,7 @@ SET    name = $blockDevice.name,
        host_filesystem_uuid = $blockDevice.host_filesystem_uuid,
        filesystem_type = $blockDevice.filesystem_type,
        provenance_id = $blockDevice.provenance_id
-WHERE  uuid = $blockDevice.uuid
+WHERE uuid = $blockDevice.uuid
 `, blockDevice{})
 	if err != nil {
 		return errors.Capture(err)
@@ -628,7 +628,7 @@ func (st *State) GetBlockDevicesForAllMachines(
 
 	blockDeviceStmt, err := st.Prepare(`
 SELECT &blockDevice.*
-FROM   block_device
+FROM block_device
 `, blockDevice{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -636,7 +636,7 @@ FROM   block_device
 
 	devLinkStmt, err := st.Prepare(`
 SELECT &deviceLink.*
-FROM   block_device_link_device
+FROM block_device_link_device
 `, deviceLink{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -644,7 +644,7 @@ FROM   block_device_link_device
 
 	machineNameStmt, err := st.Prepare(`
 SELECT &entityName.*
-FROM   machine
+FROM machine
 `, entityName{})
 
 	if err != nil {

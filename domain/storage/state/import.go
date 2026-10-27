@@ -215,9 +215,9 @@ func (st *State) transformStorageInstances(
 
 	stmt, err := st.Prepare(`
 SELECT cm.name AS &name.name
-FROM   unit AS u
-JOIN   charm_metadata AS cm ON u.charm_uuid = cm.charm_uuid
-WHERE  u.uuid = $entityUUID.uuid`, name{}, entityUUID{})
+FROM unit AS u
+JOIN charm_metadata AS cm ON u.charm_uuid = cm.charm_uuid
+WHERE u.uuid = $entityUUID.uuid`, name{}, entityUUID{})
 	if err != nil {
 		return nil, nil, errors.Capture(err)
 	}
@@ -298,16 +298,16 @@ FROM (
            net_node_uuid AS machine_net_node_uuid,
            NULL AS unit_name,
            NULL AS unit_net_node_uuid
-    FROM   machine
-    WHERE  name IN ($machineNames[:])
+    FROM machine
+    WHERE name IN ($machineNames[:])
     UNION
     SELECT NULL AS machine_name,
            NULL AS machine_net_node_uuid,
            name AS unit_name,
            net_node_uuid AS unit_net_node_uuid
-    FROM   unit
-    WHERE  name IN ($unitNames[:])
-) 
+    FROM unit
+    WHERE name IN ($unitNames[:])
+)
 `, machineNameInput, unitNameInput, machineAndUnitNetNodeUUID{})
 	if err != nil {
 		return nil, nil, errors.Capture(err)
@@ -355,7 +355,7 @@ func (st *State) GetUnitUUIDsByNames(ctx context.Context, units []string) (map[s
 SELECT &nameAndUUID.*
 FROM unit
 WHERE name IN ($unitNames[:])
-	`, unitNameInput, nameAndUUID{})
+`, unitNameInput, nameAndUUID{})
 	if err != nil {
 		return nil, errors.Capture(err)
 	}
@@ -586,9 +586,9 @@ func (st *State) GetBlockDevicesForMachinesByNetNodeUUIDs(
 SELECT (bd.uuid, bd.name, bd.hardware_id, bd.wwn, bd.bus_address,
        bd.serial_id, bd.size_mib, bd.filesystem_label, bd.host_filesystem_uuid,
        bd.filesystem_type, bd.in_use, bd.mount_point, m.net_node_uuid) AS (&blockDevice.*)
-FROM   block_device AS bd
-JOIN   machine AS m ON bd.machine_uuid = m.uuid
-WHERE  m.net_node_uuid IN ($uuids[:])
+FROM block_device AS bd
+JOIN machine AS m ON bd.machine_uuid = m.uuid
+WHERE m.net_node_uuid IN ($uuids[:])
 `, uuids{}, blockDevice{})
 	if err != nil {
 		return nil, errors.Errorf("preparing block device query: %w", err)
@@ -596,9 +596,9 @@ WHERE  m.net_node_uuid IN ($uuids[:])
 
 	blockDeviceLinkStmt, err := st.Prepare(`
 SELECT (bd.block_device_uuid, bd.name, m.net_node_uuid) AS (&deviceLink.*)
-FROM   block_device_link_device AS bd
-JOIN   machine AS m ON bd.machine_uuid = m.uuid
-WHERE  m.net_node_uuid IN ($uuids[:])
+FROM block_device_link_device AS bd
+JOIN machine AS m ON bd.machine_uuid = m.uuid
+WHERE m.net_node_uuid IN ($uuids[:])
 `, uuids{}, deviceLink{})
 	if err != nil {
 		return nil, errors.Errorf("preparing block device link device query: %w", err)

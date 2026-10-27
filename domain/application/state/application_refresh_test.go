@@ -98,10 +98,10 @@ func (s *applicationRefreshSuite) TestSetApplicationCharmCreatesImmutableResourc
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT r.uuid, r.charm_uuid
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 0`, appID).Scan(&oldResourceUUID, &oldCharmUUID); err != nil {
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 0`, appID).Scan(&oldResourceUUID, &oldCharmUUID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -133,21 +133,21 @@ VALUES (?, ?, ?, ?)`, oldResourceUUID, storeUUID, 42, "sha384")
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT r.uuid, r.charm_uuid, r.revision, rfs.store_uuid
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-JOIN   resource_file_store AS rfs ON rfs.resource_uuid = r.uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 0`, appID).Scan(
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+JOIN resource_file_store AS rfs ON rfs.resource_uuid = r.uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 0`, appID).Scan(
 			&currentResourceUUID, &currentCharmUUID, &currentRevision, &currentStoreUUID,
 		); err != nil {
 			return err
 		}
 		return tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM   resource
-WHERE  uuid = ?
-AND    charm_uuid = ?
-AND    revision = ?`, oldResourceUUID, oldCharmUUID, revision).Scan(&oldRows)
+FROM resource
+WHERE uuid = ?
+AND charm_uuid = ?
+AND revision = ?`, oldResourceUUID, oldCharmUUID, revision).Scan(&oldRows)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(currentResourceUUID, tc.Equals, replacementResourceUUID)
@@ -160,9 +160,9 @@ AND    revision = ?`, oldResourceUUID, oldCharmUUID, revision).Scan(&oldRows)
 	var removalJobUUID, removalEntityUUID string
 	err = s.DB().QueryRowContext(c.Context(), `
 SELECT uuid, entity_uuid
-FROM   removal
-WHERE  removal_type_id = ?
-AND    entity_uuid = ?`, removal.ResourceJob, oldResourceUUID).Scan(
+FROM removal
+WHERE removal_type_id = ?
+AND entity_uuid = ?`, removal.ResourceJob, oldResourceUUID).Scan(
 		&removalJobUUID, &removalEntityUUID,
 	)
 	c.Assert(err, tc.ErrorIsNil)
@@ -191,10 +191,10 @@ func (s *applicationRefreshSuite) TestSetApplicationCharmCarriesPinnedUpload(c *
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT r.uuid
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 0`, appID).Scan(&oldResourceUUID); err != nil {
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 0`, appID).Scan(&oldResourceUUID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -226,12 +226,12 @@ VALUES (?, ?, ?, ?)`, oldResourceUUID, storeUUID, 42, "sha384")
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT r.uuid, r.charm_uuid, r.revision, rot.name, rfs.store_uuid
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-JOIN   resource_origin_type AS rot ON rot.id = r.origin_type_id
-JOIN   resource_file_store AS rfs ON rfs.resource_uuid = r.uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 0`, appID).Scan(
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+JOIN resource_origin_type AS rot ON rot.id = r.origin_type_id
+JOIN resource_file_store AS rfs ON rfs.resource_uuid = r.uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 0`, appID).Scan(
 			&currentResourceUUID, &currentCharmUUID, &currentRevision,
 			&origin, &currentStoreUUID,
 		); err != nil {
@@ -243,9 +243,9 @@ SELECT COUNT(*) FROM resource WHERE uuid = ?`, oldResourceUUID).Scan(&oldRows); 
 		}
 		return tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM   resource_file_store
-WHERE  resource_uuid = ?
-AND    store_uuid = ?`, oldResourceUUID, storeUUID).Scan(&oldStoreLinks)
+FROM resource_file_store
+WHERE resource_uuid = ?
+AND store_uuid = ?`, oldResourceUUID, storeUUID).Scan(&oldStoreLinks)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(currentResourceUUID, tc.Equals, replacementResourceUUID)
@@ -279,11 +279,11 @@ func (s *applicationRefreshSuite) TestSetApplicationCharmDoesNotReuseResourceWit
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT a.charm_uuid, ar.resource_uuid
-FROM   application AS a
-JOIN   application_resource AS ar ON ar.application_uuid = a.uuid
-JOIN   resource AS r ON r.uuid = ar.resource_uuid
-WHERE  a.uuid = ?
-AND    r.state_id = 0`, appID).Scan(&oldCharmUUID, &oldResourceUUID)
+FROM application AS a
+JOIN application_resource AS ar ON ar.application_uuid = a.uuid
+JOIN resource AS r ON r.uuid = ar.resource_uuid
+WHERE a.uuid = ?
+AND r.state_id = 0`, appID).Scan(&oldCharmUUID, &oldResourceUUID)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -295,11 +295,11 @@ AND    r.state_id = 0`, appID).Scan(&oldCharmUUID, &oldResourceUUID)
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 SELECT a.charm_uuid, ar.resource_uuid
-FROM   application AS a
-JOIN   application_resource AS ar ON ar.application_uuid = a.uuid
-JOIN   resource AS r ON r.uuid = ar.resource_uuid
-WHERE  a.uuid = ?
-AND    r.state_id = 0`, appID).Scan(&charmUUID, &resourceUUID)
+FROM application AS a
+JOIN application_resource AS ar ON ar.application_uuid = a.uuid
+JOIN resource AS r ON r.uuid = ar.resource_uuid
+WHERE a.uuid = ?
+AND r.state_id = 0`, appID).Scan(&charmUUID, &resourceUUID)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(charmUUID, tc.Equals, oldCharmUUID)
@@ -322,9 +322,9 @@ func (s *applicationRefreshSuite) TestSetApplicationCharmRejectsCandidateFromDif
 	var oldCharmUUID, oldResourceUUID string
 	err := s.DB().QueryRowContext(c.Context(), `
 SELECT a.charm_uuid, ar.resource_uuid
-FROM   application AS a
-JOIN   application_resource AS ar ON ar.application_uuid = a.uuid
-WHERE  a.uuid = ?`, appID).Scan(&oldCharmUUID, &oldResourceUUID)
+FROM application AS a
+JOIN application_resource AS ar ON ar.application_uuid = a.uuid
+WHERE a.uuid = ?`, appID).Scan(&oldCharmUUID, &oldResourceUUID)
 	c.Assert(err, tc.ErrorIsNil)
 
 	pendingUUID := s.createPendingResource(
@@ -343,9 +343,9 @@ WHERE  a.uuid = ?`, appID).Scan(&oldCharmUUID, &oldResourceUUID)
 	var pendingRows int
 	err = s.DB().QueryRowContext(c.Context(), `
 SELECT a.charm_uuid, ar.resource_uuid
-FROM   application AS a
-JOIN   application_resource AS ar ON ar.application_uuid = a.uuid
-WHERE  a.uuid = ?`, appID).Scan(&charmUUID, &resourceUUID)
+FROM application AS a
+JOIN application_resource AS ar ON ar.application_uuid = a.uuid
+WHERE a.uuid = ?`, appID).Scan(&charmUUID, &resourceUUID)
 	c.Assert(err, tc.ErrorIsNil)
 	err = s.DB().QueryRowContext(c.Context(), `
 SELECT COUNT(*) FROM pending_application_resource WHERE resource_uuid = ?`, pendingUUID).Scan(&pendingRows)
@@ -376,9 +376,9 @@ func (s *applicationRefreshSuite) TestSetApplicationCharmRejectsUnresolvedDestin
 	var oldCharmUUID, oldResourceUUID string
 	err := s.DB().QueryRowContext(c.Context(), `
 SELECT a.charm_uuid, ar.resource_uuid
-FROM   application AS a
-JOIN   application_resource AS ar ON ar.application_uuid = a.uuid
-WHERE  a.uuid = ?`, appID).Scan(&oldCharmUUID, &oldResourceUUID)
+FROM application AS a
+JOIN application_resource AS ar ON ar.application_uuid = a.uuid
+WHERE a.uuid = ?`, appID).Scan(&oldCharmUUID, &oldResourceUUID)
 	c.Assert(err, tc.ErrorIsNil)
 
 	err = s.state.SetApplicationCharm(c.Context(), appID, newCharmUUID, application.SetCharmStateParams{})
@@ -388,9 +388,9 @@ WHERE  a.uuid = ?`, appID).Scan(&oldCharmUUID, &oldResourceUUID)
 	var charmUUID, resourceUUID string
 	err = s.DB().QueryRowContext(c.Context(), `
 SELECT a.charm_uuid, ar.resource_uuid
-FROM   application AS a
-JOIN   application_resource AS ar ON ar.application_uuid = a.uuid
-WHERE  a.uuid = ?`, appID).Scan(&charmUUID, &resourceUUID)
+FROM application AS a
+JOIN application_resource AS ar ON ar.application_uuid = a.uuid
+WHERE a.uuid = ?`, appID).Scan(&charmUUID, &resourceUUID)
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(charmUUID, tc.Equals, oldCharmUUID)
 	c.Check(resourceUUID, tc.Equals, oldResourceUUID)
@@ -440,10 +440,10 @@ SELECT charm_uuid FROM application WHERE uuid = ?`, appID).Scan(&oldCharmUUID)
 	c.Assert(err, tc.ErrorIsNil)
 	oldResourceRows, err := s.DB().QueryContext(c.Context(), `
 SELECT r.uuid
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 0`, appID)
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 0`, appID)
 	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = oldResourceRows.Close() }()
 	for oldResourceRows.Next() {
@@ -487,11 +487,11 @@ VALUES (?, ?)`, oldPotentialUUID, appID)
 	var currentRepositoryResourceUUIDs []string
 	currentRows, err := s.DB().QueryContext(c.Context(), `
 SELECT r.uuid, r.charm_resource_name, r.charm_uuid, r.revision, rot.name
-FROM   resource AS r
-JOIN   resource_origin_type AS rot ON rot.id = r.origin_type_id
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 0`, appID)
+FROM resource AS r
+JOIN resource_origin_type AS rot ON rot.id = r.origin_type_id
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 0`, appID)
 	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = currentRows.Close() }()
 	for currentRows.Next() {
@@ -514,10 +514,10 @@ SELECT COUNT(*) FROM resource WHERE uuid = ?`, oldPotentialUUID).Scan(&oldPotent
 	c.Assert(err, tc.ErrorIsNil)
 	repositoryRows, err := s.DB().QueryContext(c.Context(), `
 SELECT r.uuid
-FROM   resource AS r
-JOIN   application_resource AS ar ON ar.resource_uuid = r.uuid
-WHERE  ar.application_uuid = ?
-AND    r.state_id = 1`, appID)
+FROM resource AS r
+JOIN application_resource AS ar ON ar.resource_uuid = r.uuid
+WHERE ar.application_uuid = ?
+AND r.state_id = 1`, appID)
 	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = repositoryRows.Close() }()
 	for repositoryRows.Next() {
@@ -579,11 +579,11 @@ func (s *applicationRefreshSuite) TestSetApplicationCharmResourceReconciliationR
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT a.charm_uuid, ar.resource_uuid
-FROM   application AS a
-JOIN   application_resource AS ar ON ar.application_uuid = a.uuid
-JOIN   resource AS r ON r.uuid = ar.resource_uuid
-WHERE  a.uuid = ?
-AND    r.state_id = 0`, appID).Scan(&oldCharmUUID, &oldResourceUUID); err != nil {
+FROM application AS a
+JOIN application_resource AS ar ON ar.application_uuid = a.uuid
+JOIN resource AS r ON r.uuid = ar.resource_uuid
+WHERE a.uuid = ?
+AND r.state_id = 0`, appID).Scan(&oldCharmUUID, &oldResourceUUID); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `
@@ -607,17 +607,17 @@ END`)
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `
 SELECT a.charm_uuid, ar.resource_uuid
-FROM   application AS a
-JOIN   application_resource AS ar ON ar.application_uuid = a.uuid
-JOIN   resource AS r ON r.uuid = ar.resource_uuid
-WHERE  a.uuid = ?
-AND    r.state_id = 0`, appID).Scan(&charmUUID, &resourceUUID); err != nil {
+FROM application AS a
+JOIN application_resource AS ar ON ar.application_uuid = a.uuid
+JOIN resource AS r ON r.uuid = ar.resource_uuid
+WHERE a.uuid = ?
+AND r.state_id = 0`, appID).Scan(&charmUUID, &resourceUUID); err != nil {
 			return err
 		}
 		if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM   pending_application_resource
-WHERE  resource_uuid = ?`, pendingUUID).Scan(&pendingRows); err != nil {
+FROM pending_application_resource
+WHERE resource_uuid = ?`, pendingUUID).Scan(&pendingRows); err != nil {
 			return err
 		}
 		if err := tx.QueryRowContext(ctx, `
@@ -836,8 +836,8 @@ func (s *applicationRefreshSuite) TestSetApplicationCharmChangePlatform(c *tc.C)
 		}
 		return tx.QueryRowContext(ctx, `
 SELECT application_uuid, os_id, channel, architecture_id
-FROM   application_platform
-WHERE  application_uuid = ?
+FROM application_platform
+WHERE application_uuid = ?
 `, appID).Scan(&platform.ApplicationID, &platform.OSTypeID, &platform.Channel, &platform.ArchitectureID)
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -1772,9 +1772,9 @@ INSERT INTO resource (
     state_id, created_at
 )
 SELECT ?, ?, ?, ?, rot.id, rs.id, ?
-FROM   resource_origin_type AS rot, resource_state AS rs
-WHERE  rot.name = ?
-AND    rs.name = 'available'`,
+FROM resource_origin_type AS rot, resource_state AS rs
+WHERE rot.name = ?
+AND rs.name = 'available'`,
 			resourceUUID, charmUUID, name, revision, s.state.clock.Now().UTC(), origin.String(),
 		); err != nil {
 			return err
@@ -1820,10 +1820,10 @@ func (s *applicationRefreshSuite) establishRelationWith(c *tc.C, currentAppID co
 		getEndpointUUIDQuery := `
 			SELECT ae.uuid
 			FROM application_endpoint AS ae
-			JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid 
+			JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
 			WHERE ae.application_uuid = ?
 			AND cr.name = ?
-		`
+`
 		// Get the endpoint for the original application.
 		err := tx.QueryRowContext(ctx, getEndpointUUIDQuery, currentAppID.String(), relationName).Scan(&origEndpointUUID)
 		if err != nil {
@@ -1845,7 +1845,7 @@ func (s *applicationRefreshSuite) establishRelationWith(c *tc.C, currentAppID co
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO relation (uuid, life_id, relation_id, scope_id)
 			VALUES (?, 0, ?, 0)
-		`, relUUID, s.counter)
+`, relUUID, s.counter)
 		if err != nil {
 			return errors.Errorf("inserting relation: %w", err)
 		}
@@ -1878,10 +1878,10 @@ func (s *applicationRefreshSuite) establishPeerRelation(c *tc.C, appID coreappli
 		getEndpointUUIDQuery := `
 			SELECT ae.uuid
 			FROM application_endpoint AS ae
-			JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid 
+			JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
 			WHERE ae.application_uuid = ?
 			AND cr.name = ?
-		`
+`
 		// Get the endpoint for the original application.
 		err := tx.QueryRowContext(ctx, getEndpointUUIDQuery, appID.String(), relationName).Scan(&appEndpointUUID)
 		if err != nil {
@@ -1896,7 +1896,7 @@ func (s *applicationRefreshSuite) establishPeerRelation(c *tc.C, appID coreappli
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO relation (uuid, life_id, relation_id, scope_id)
 			VALUES (?, 0, ?, 0)
-		`, relUUID, s.counter)
+`, relUUID, s.counter)
 		if err != nil {
 			return errors.Errorf("inserting relation: %w", err)
 		}

@@ -60,9 +60,9 @@ func (st *State) lookupCharmRelationUUIDs(
 ) ([]endpoint, error) {
 	getEndpoints, err := st.Prepare(`
 SELECT &endpoint.*
-FROM   v_endpoint
-WHERE  unit_uuid = $unitUUID.unit_uuid
-AND    endpoint IN ($endpoints[:])
+FROM v_endpoint
+WHERE unit_uuid = $unitUUID.unit_uuid
+AND endpoint IN ($endpoints[:])
 `, endpoint{}, unitUUID, endpointNames)
 	if err != nil {
 		return nil, errors.Errorf("preparing get endpoints statement: %w", err)

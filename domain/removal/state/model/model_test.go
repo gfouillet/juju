@@ -146,7 +146,7 @@ func (s *modelSuite) TestEnsureModelNotAliveCascadeContainerHosts(c *tc.C) {
 
 	_, err := s.DB().Exec(`
 INSERT INTO machine_parent (machine_uuid, parent_uuid) VALUES (?, ?)
-	`, containerUUID, hostUUID)
+`, containerUUID, hostUUID)
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().Exec(`UPDATE machine SET life_id = 2 WHERE uuid = ?`, deadUUID)
@@ -549,9 +549,9 @@ func (s *modelSuite) TestModelRemovalNotExistsSuccess(c *tc.C) {
 	// We rely on the worker to handle that fact.
 	ensureRemovalJob := func(removalUUID string) {
 		row := s.DB().QueryRow(`
-SELECT t.name, r.entity_uuid, r.force, r.scheduled_for 
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, removalUUID,
+SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, removalUUID,
 		)
 
 		var (
@@ -624,9 +624,9 @@ func (s *modelSuite) TestControllerModelRemovalNotExistsSuccess(c *tc.C) {
 	// We rely on the worker to handle that fact.
 	ensureRemovalJob := func(removalUUID string) {
 		row := s.DB().QueryRow(`
-SELECT t.name, r.entity_uuid, r.force, r.scheduled_for 
-FROM   removal r JOIN removal_type t ON r.removal_type_id = t.id
-where  r.uuid = ?`, removalUUID,
+SELECT t.name, r.entity_uuid, r.force, r.scheduled_for
+FROM removal r JOIN removal_type t ON r.removal_type_id = t.id
+where r.uuid = ?`, removalUUID,
 		)
 
 		var (

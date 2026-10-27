@@ -46,8 +46,8 @@ func (s *modelStorageSuite) changeStorageAttachmentLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_attachment
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -60,8 +60,8 @@ func (s *modelStorageSuite) changeFilesystemLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_filesystem
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -74,8 +74,8 @@ func (s *modelStorageSuite) changeVolumeLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_volume
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -89,8 +89,8 @@ func (s *modelStorageSuite) changeFilesystemAttachmentLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_filesystem_attachment
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -104,8 +104,8 @@ func (s *modelStorageSuite) changeVolumeAttachmentLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_volume_attachment
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -119,8 +119,8 @@ func (s *modelStorageSuite) changeVolumeAttachmentPlanLife(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_volume_attachment_plan
-SET    life_id = ?
-WHERE  uuid = ?
+SET life_id = ?
+WHERE uuid = ?
 `,
 		int(life), uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -131,7 +131,7 @@ WHERE  uuid = ?
 func (s *modelStorageSuite) deleteFilesystem(c *tc.C, uuid string) {
 	_, err := s.DB().Exec(`
 DELETE FROM storage_filesystem
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 		uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -142,7 +142,7 @@ WHERE  uuid = ?
 func (s *modelStorageSuite) deleteFilesystemAttachment(c *tc.C, uuid string) {
 	_, err := s.DB().Exec(`
 DELETE FROM storage_filesystem_attachment
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 		uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -152,7 +152,7 @@ WHERE  uuid = ?
 func (s *modelStorageSuite) deleteVolume(c *tc.C, uuid string) {
 	_, err := s.DB().Exec(`
 DELETE FROM storage_volume
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 		uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -163,7 +163,7 @@ WHERE  uuid = ?
 func (s *modelStorageSuite) deleteVolumeAttachment(c *tc.C, uuid string) {
 	_, err := s.DB().Exec(`
 DELETE FROM storage_volume_attachment
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 		uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -174,7 +174,7 @@ WHERE  uuid = ?
 func (s *modelStorageSuite) deleteVolumeAttachmentPlan(c *tc.C, uuid string) {
 	_, err := s.DB().Exec(`
 DELETE FROM storage_volume_attachment_plan
-WHERE  uuid = ?
+WHERE uuid = ?
 `,
 		uuid)
 	c.Assert(err, tc.ErrorIsNil)
@@ -189,7 +189,7 @@ func (s *modelStorageSuite) newMachineFilesystem(c *tc.C) (string, string) {
 	_, err = s.DB().Exec(`
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 1)
-	`,
+`,
 		fsUUID.String(), fsUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -205,7 +205,7 @@ func (s *modelStorageSuite) newMachineVolume(c *tc.C) (string, string) {
 	_, err = s.DB().Exec(`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 1)
-	`,
+`,
 		vUUID.String(), vUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -221,7 +221,7 @@ func (s *modelStorageSuite) newModelFilesystem(c *tc.C) (string, string) {
 	_, err = s.DB().Exec(`
 INSERT INTO storage_filesystem (uuid, filesystem_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 0)
-	`,
+`,
 		fsUUID.String(), fsUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -237,7 +237,7 @@ func (s *modelStorageSuite) newModelVolume(c *tc.C) (string, string) {
 	_, err = s.DB().Exec(`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 0)
-	`,
+`,
 		vUUID.String(), vUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
@@ -299,8 +299,8 @@ func (s *modelStorageSuite) changeVolumeAttachmentBlockDevice(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE storage_volume_attachment
-SET    block_device_uuid = ?
-WHERE  uuid = ?`, blockDeviceUUID, attachmentUUID)
+SET block_device_uuid = ?
+WHERE uuid = ?`, blockDeviceUUID, attachmentUUID)
 	c.Assert(err, tc.ErrorIsNil)
 }
 
@@ -309,8 +309,8 @@ func (s *modelStorageSuite) changeBlockDeviceMountPoint(
 ) {
 	_, err := s.DB().Exec(`
 UPDATE block_device
-SET    mount_point = ?
-WHERE  uuid = ?`, mountPoint, blockDeviceUUID)
+SET mount_point = ?
+WHERE uuid = ?`, mountPoint, blockDeviceUUID)
 	c.Assert(err, tc.ErrorIsNil)
 }
 

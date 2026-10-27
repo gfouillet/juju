@@ -235,9 +235,9 @@ func (s *stateSuite) phaseOf(c *tc.C, modelUUID string) string {
 	var phase string
 	err := s.DB().QueryRowContext(c.Context(), `
 SELECT mmipt.type
-FROM   model_migration_import AS mmi
-JOIN   model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
-WHERE  mmi.model_uuid = ?`, modelUUID).Scan(&phase)
+FROM model_migration_import AS mmi
+JOIN model_migration_import_phase_type AS mmipt ON mmipt.id = mmi.phase_type_id
+WHERE mmi.model_uuid = ?`, modelUUID).Scan(&phase)
 	c.Assert(err, tc.ErrorIsNil)
 	return phase
 }

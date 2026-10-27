@@ -159,10 +159,10 @@ JOIN offer_connection oc ON oc.uuid = arc.offer_connection_uuid
 WHERE oc.offer_uuid = ?`, offerUUID).Scan(&offerConnUUID); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM application_remote_consumer WHERE offer_connection_uuid=?`, offerConnUUID); err != nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM application_remote_consumer WHERE offer_connection_uuid = ?`, offerConnUUID); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM offer_connection WHERE uuid=?`, offerConnUUID); err != nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM offer_connection WHERE uuid = ?`, offerConnUUID); err != nil {
 				return err
 			}
 			return nil
@@ -273,7 +273,7 @@ func (s *watcherSuite) addRelation(c *tc.C, db database.TxnRunner) corerelation.
 	relationID := s.nextRelationID()
 	err := db.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(c.Context(), `
-INSERT INTO relation (uuid, life_id, relation_id, scope_id) 
+INSERT INTO relation (uuid, life_id, relation_id, scope_id)
 VALUES (?, 0, ?, 0)
 `, relationUUID, relationID)
 		return err
@@ -329,10 +329,10 @@ VALUES (?, ?, false, 'test app')`, charmUUID, "local-app"); err != nil {
 
 		// Get provider role and global scope IDs.
 		var providerRoleID, globalScopeID int
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_role WHERE name='provider'`).Scan(&providerRoleID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_role WHERE name = 'provider'`).Scan(&providerRoleID); err != nil {
 			return err
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_scope WHERE name='global'`).Scan(&globalScopeID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_scope WHERE name = 'global'`).Scan(&globalScopeID); err != nil {
 			return err
 		}
 
@@ -382,7 +382,7 @@ func (s *watcherSuite) initModel(c *tc.C, db database.TxnRunner) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
 VALUES (?, ?, "test", "prod", "iaas", "fluffy", "ec2")
-		`, s.modelUUID, coretesting.ControllerTag.Id())
+`, s.modelUUID, coretesting.ControllerTag.Id())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -436,8 +436,8 @@ func (s *watcherSuite) addRevision(c *tc.C, db database.TxnRunner, uri *coresecr
 		revisionUUID := uuid.MustNewUUID().String()
 		_, err := tx.ExecContext(ctx,
 			`
-INSERT INTO secret_revision (uuid, secret_id, revision, create_time, update_time) 
-VALUES (?, ?, (SELECT MAX(revision)+1 FROM secret_revision WHERE secret_id=?), ?, ?)`,
+INSERT INTO secret_revision (uuid, secret_id, revision, create_time, update_time)
+VALUES (?, ?, (SELECT MAX(revision) + 1 FROM secret_revision WHERE secret_id = ?), ?, ?)`,
 			revisionUUID, uri.ID, uri.ID, now, now,
 		)
 		if err != nil {
@@ -712,10 +712,10 @@ JOIN offer_connection oc ON oc.uuid = arc.offer_connection_uuid
 WHERE oc.remote_relation_uuid = ?`, consumerRelationUUID1).Scan(&offerConnUUID); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM application_remote_consumer WHERE offer_connection_uuid=?`, offerConnUUID); err != nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM application_remote_consumer WHERE offer_connection_uuid = ?`, offerConnUUID); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM offer_connection WHERE uuid=?`, offerConnUUID); err != nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM offer_connection WHERE uuid = ?`, offerConnUUID); err != nil {
 				return err
 			}
 			return nil
@@ -808,9 +808,9 @@ func (s *watcherSuite) setupRemoteOffererLocalAndRelation(c *tc.C, db database.T
 
 		qEP := `
 SELECT ae.uuid
-FROM   application_endpoint ae
-JOIN   charm_relation cr ON cr.uuid = ae.charm_relation_uuid
-WHERE  ae.application_uuid = ? AND cr.name = ?`
+FROM application_endpoint ae
+JOIN charm_relation cr ON cr.uuid = ae.charm_relation_uuid
+WHERE ae.application_uuid = ? AND cr.name = ?`
 		var remoteEP string
 		if err := tx.QueryRowContext(ctx, qEP, remoteAppUUID, "db").Scan(&remoteEP); err != nil {
 			return err
@@ -820,7 +820,7 @@ WHERE  ae.application_uuid = ? AND cr.name = ?`
 		}
 
 		var globalScopeID int
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_scope WHERE name='global'`).Scan(&globalScopeID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_scope WHERE name = 'global'`).Scan(&globalScopeID); err != nil {
 			return err
 		}
 
@@ -915,10 +915,10 @@ VALUES (?, ?, false, 'test app')`, charmUUID, "local-app-2"); err != nil {
 			return err
 		}
 		var providerRoleID, globalScopeID int
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_role WHERE name='provider'`).Scan(&providerRoleID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_role WHERE name = 'provider'`).Scan(&providerRoleID); err != nil {
 			return err
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_scope WHERE name='global'`).Scan(&globalScopeID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM charm_relation_scope WHERE name = 'global'`).Scan(&globalScopeID); err != nil {
 			return err
 		}
 		crUUID := tc.Must(c, uuid.NewUUID).String()
@@ -947,9 +947,9 @@ VALUES (?, ?, ?, ?)`, epUUID, appUUID, crUUID, network.AlphaSpaceId); err != nil
 		}
 		if err := tx.QueryRowContext(ctx, `
 SELECT ae.uuid
-FROM   application_endpoint ae
-JOIN   charm_relation cr ON cr.uuid = ae.charm_relation_uuid
-WHERE  ae.application_uuid = ? AND cr.name = ?`, local1AppUUID, "db").Scan(&ep1); err != nil {
+FROM application_endpoint ae
+JOIN charm_relation cr ON cr.uuid = ae.charm_relation_uuid
+WHERE ae.application_uuid = ? AND cr.name = ?`, local1AppUUID, "db").Scan(&ep1); err != nil {
 			return err
 		}
 

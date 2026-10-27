@@ -26,14 +26,14 @@ func (st *State) RelationWithRemoteConsumerExists(ctx context.Context, rUUID str
 	remoteRelationUUID := entityUUID{UUID: rUUID}
 	existsStmt, err := st.Prepare(`
 SELECT r.uuid AS &entityUUID.uuid
-FROM   relation AS r
-JOIN   relation_endpoint AS re ON r.uuid = re.relation_uuid
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-JOIN   application AS a ON ae.application_uuid = a.uuid
-JOIN   charm AS c ON a.charm_uuid = c.uuid
-JOIN   charm_source AS cs ON c.source_id = cs.id
-WHERE  r.uuid = $entityUUID.uuid
-AND    cs.name = 'cmr'`, remoteRelationUUID)
+FROM relation AS r
+JOIN relation_endpoint AS re ON r.uuid = re.relation_uuid
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+JOIN application AS a ON ae.application_uuid = a.uuid
+JOIN charm AS c ON a.charm_uuid = c.uuid
+JOIN charm_source AS cs ON c.source_id = cs.id
+WHERE r.uuid = $entityUUID.uuid
+AND cs.name = 'cmr'`, remoteRelationUUID)
 	if err != nil {
 		return false, errors.Errorf("preparing remote relation exists query: %w", err)
 	}
@@ -69,23 +69,23 @@ func (st *State) EnsureRelationWithRemoteConsumerNotAliveCascade(ctx context.Con
 	remoteRelationUUID := entityUUID{UUID: rUUID}
 	updateRelationStmt, err := st.Prepare(`
 UPDATE relation
-SET    life_id = 1
-WHERE  uuid = $entityUUID.uuid
-AND    life_id = 0`, remoteRelationUUID)
+SET life_id = 1
+WHERE uuid = $entityUUID.uuid
+AND life_id = 0`, remoteRelationUUID)
 	if err != nil {
 		return internal.CascadedRelationWithRemoteConsumerLives{}, errors.Errorf("preparing remote relation life update: %w", err)
 	}
 
 	getSyntheticAppUUIDStmt, err := st.Prepare(`
 SELECT a.uuid AS &entityUUID.uuid
-FROM   relation AS r
-JOIN   relation_endpoint AS re ON r.uuid = re.relation_uuid
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-JOIN   application AS a ON ae.application_uuid = a.uuid
-JOIN   charm AS c ON a.charm_uuid = c.uuid
-JOIN   charm_source AS cs ON c.source_id = cs.id
-WHERE  r.uuid = $entityUUID.uuid
-AND    cs.name = 'cmr'`, remoteRelationUUID)
+FROM relation AS r
+JOIN relation_endpoint AS re ON r.uuid = re.relation_uuid
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+JOIN application AS a ON ae.application_uuid = a.uuid
+JOIN charm AS c ON a.charm_uuid = c.uuid
+JOIN charm_source AS cs ON c.source_id = cs.id
+WHERE r.uuid = $entityUUID.uuid
+AND cs.name = 'cmr'`, remoteRelationUUID)
 	if err != nil {
 		return internal.CascadedRelationWithRemoteConsumerLives{},
 			errors.Errorf("preparing remote relation synthetic application UUID query: %w", err)
@@ -93,19 +93,19 @@ AND    cs.name = 'cmr'`, remoteRelationUUID)
 
 	getSyntheticRelationUnitUUIDsStmt, err := st.Prepare(`
 SELECT ru.uuid AS &entityUUID.uuid
-FROM   relation_unit AS ru
-JOIN   unit AS u ON ru.unit_uuid = u.uuid
-WHERE  u.application_uuid = $entityUUID.uuid
-	`, entityUUID{})
+FROM relation_unit AS ru
+JOIN unit AS u ON ru.unit_uuid = u.uuid
+WHERE u.application_uuid = $entityUUID.uuid
+`, entityUUID{})
 	if err != nil {
 		return internal.CascadedRelationWithRemoteConsumerLives{}, errors.Errorf("preparing remote relation synthetic unit UUID query: %w", err)
 	}
 
 	updateSyntheticUnitStmt, err := st.Prepare(`
 UPDATE unit
-SET    life_id = 2
-WHERE  life_id = 0
-AND    application_uuid = $entityUUID.uuid
+SET life_id = 2
+WHERE life_id = 0
+AND application_uuid = $entityUUID.uuid
 `, entityUUID{})
 	if err != nil {
 		return internal.CascadedRelationWithRemoteConsumerLives{}, errors.Errorf("preparing remote relation synthetic unit update: %w", err)
@@ -197,21 +197,21 @@ func (st *State) DeleteRelationWithRemoteConsumer(ctx context.Context, rUUID str
 func (st *State) deleteRelationWithRemoteConsumer(ctx context.Context, tx *sqlair.TX, remoteRelationUUID entityUUID) error {
 	getSyntheticAppUUIDStmt, err := st.Prepare(`
 SELECT a.uuid AS &entityUUID.uuid
-FROM   relation AS r
-JOIN   relation_endpoint AS re ON r.uuid = re.relation_uuid
-JOIN   application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
-JOIN   application AS a ON ae.application_uuid = a.uuid
-JOIN   charm AS c ON a.charm_uuid = c.uuid
-JOIN   charm_source AS cs ON c.source_id = cs.id
-WHERE  r.uuid = $entityUUID.uuid
-AND    cs.name = 'cmr'`, remoteRelationUUID)
+FROM relation AS r
+JOIN relation_endpoint AS re ON r.uuid = re.relation_uuid
+JOIN application_endpoint AS ae ON re.endpoint_uuid = ae.uuid
+JOIN application AS a ON ae.application_uuid = a.uuid
+JOIN charm AS c ON a.charm_uuid = c.uuid
+JOIN charm_source AS cs ON c.source_id = cs.id
+WHERE r.uuid = $entityUUID.uuid
+AND cs.name = 'cmr'`, remoteRelationUUID)
 	if err != nil {
 		return errors.Errorf("preparing remote relation application UUID query: %w", err)
 	}
 
 	deleteRelationNetworkIngressStmt, err := st.Prepare(`
 DELETE FROM relation_network_ingress
-WHERE  relation_uuid = $entityUUID.uuid`, remoteRelationUUID)
+WHERE relation_uuid = $entityUUID.uuid`, remoteRelationUUID)
 	if err != nil {
 		return errors.Errorf("preparing relation network egress deletion: %w", err)
 	}

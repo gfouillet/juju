@@ -35,11 +35,11 @@ func (st *ModelState) GetApplicationUUIDForOffer(ctx context.Context, oUUID stri
 	// bound to the same application. So we can just return the first result.
 	stmt, err := st.Prepare(`
 SELECT ae.application_uuid AS &applicationUUID.uuid
-FROM   offer AS o
-JOIN   offer_endpoint AS oe ON o.uuid = oe.offer_uuid
-JOIN   application_endpoint AS ae ON oe.endpoint_uuid = ae.uuid
-WHERE  o.uuid = $offerUUID.uuid
-	`, applicationUUID{}, ident)
+FROM offer AS o
+JOIN offer_endpoint AS oe ON o.uuid = oe.offer_uuid
+JOIN application_endpoint AS ae ON oe.endpoint_uuid = ae.uuid
+WHERE o.uuid = $offerUUID.uuid
+`, applicationUUID{}, ident)
 
 	if err != nil {
 		return "", errors.Capture(err)
@@ -95,30 +95,30 @@ func (st *ModelState) GetRemoteApplicationOffererStatuses(ctx context.Context) (
 
 	stmt, err := st.Prepare(`
 SELECT
-  a.name           AS &fullRemoteApplicationStatus.name,
-  aro.life_id      AS &fullRemoteApplicationStatus.life_id,
-  aros.status_id   AS &fullRemoteApplicationStatus.status_id,
-  aros.message     AS &fullRemoteApplicationStatus.message,
-  aros.data        AS &fullRemoteApplicationStatus.data,
-  aros.updated_at  AS &fullRemoteApplicationStatus.updated_at,
-  aro.offer_url    AS &fullRemoteApplicationStatus.offer_url,
-  cr."name"        AS &fullRemoteApplicationStatus.endpoint_name,
-  cr.interface     AS &fullRemoteApplicationStatus.endpoint_interface,
-  crr."name"       AS &fullRemoteApplicationStatus.endpoint_role,
-  cr.capacity      AS &fullRemoteApplicationStatus.endpoint_limit,
+  a.name AS &fullRemoteApplicationStatus.name,
+  aro.life_id AS &fullRemoteApplicationStatus.life_id,
+  aros.status_id AS &fullRemoteApplicationStatus.status_id,
+  aros.message AS &fullRemoteApplicationStatus.message,
+  aros.data AS &fullRemoteApplicationStatus.data,
+  aros.updated_at AS &fullRemoteApplicationStatus.updated_at,
+  aro.offer_url AS &fullRemoteApplicationStatus.offer_url,
+  cr."name" AS &fullRemoteApplicationStatus.endpoint_name,
+  cr.interface AS &fullRemoteApplicationStatus.endpoint_interface,
+  crr."name" AS &fullRemoteApplicationStatus.endpoint_role,
+  cr.capacity AS &fullRemoteApplicationStatus.endpoint_limit,
   re.relation_uuid AS &fullRemoteApplicationStatus.relation_uuid
-FROM      application AS a
-JOIN      application_remote_offerer        AS aro  ON a.uuid = aro.application_uuid
+FROM application AS a
+JOIN application_remote_offerer AS aro ON a.uuid = aro.application_uuid
 -- We can't guarantee that there will be a status for a remote application,
 -- so we need a left join here.
 LEFT JOIN application_remote_offerer_status AS aros ON aro.uuid = aros.application_remote_offerer_uuid
 -- No need to left join, since a remote app needs at least one endpoint to
 -- make sense.
-JOIN      application_endpoint              AS ae   ON a.uuid = ae.application_uuid
-JOIN      charm_relation                    AS cr   ON ae.charm_relation_uuid = cr.uuid
-JOIN      charm_relation_role               AS crr  ON cr.role_id = crr.id
+JOIN application_endpoint AS ae ON a.uuid = ae.application_uuid
+JOIN charm_relation AS cr ON ae.charm_relation_uuid = cr.uuid
+JOIN charm_relation_role AS crr ON cr.role_id = crr.id
 -- Left join, since we don't know if any relations exist
-LEFT JOIN v_relation_endpoint               AS re   ON re.application_uuid = a.uuid
+LEFT JOIN v_relation_endpoint AS re ON re.application_uuid = a.uuid
 `, fullRemoteApplicationStatus{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -280,7 +280,7 @@ func (st *ModelState) SetRemoteApplicationOffererStatus(
 
 	stmt, err := st.Prepare(`
 INSERT INTO application_remote_offerer_status (*) VALUES ($remoteApplicationStatus.*)
-ON CONFLICT(application_remote_offerer_uuid) DO UPDATE SET
+ON CONFLICT (application_remote_offerer_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at,
@@ -337,10 +337,10 @@ func (st *ModelState) SetRemoteApplicationOffererStatusByApplicationUUID(
 
 	resolveStmt, err := st.Prepare(`
 SELECT aro.uuid AS &remoteApplicationOffererStatusTarget.uuid,
-       a.name  AS &remoteApplicationOffererStatusTarget.name
-FROM   application AS a
-JOIN   application_remote_offerer AS aro ON a.uuid = aro.application_uuid
-WHERE  a.uuid = $applicationUUID.uuid
+       a.name AS &remoteApplicationOffererStatusTarget.name
+FROM application AS a
+JOIN application_remote_offerer AS aro ON a.uuid = aro.application_uuid
+WHERE a.uuid = $applicationUUID.uuid
 `, remoteApplicationOffererStatusTarget{}, ident)
 	if err != nil {
 		return "", errors.Capture(err)
@@ -348,7 +348,7 @@ WHERE  a.uuid = $applicationUUID.uuid
 
 	upsertStmt, err := st.Prepare(`
 INSERT INTO application_remote_offerer_status (*) VALUES ($remoteApplicationStatus.*)
-ON CONFLICT(application_remote_offerer_uuid) DO UPDATE SET
+ON CONFLICT (application_remote_offerer_uuid) DO UPDATE SET
     status_id = excluded.status_id,
     message = excluded.message,
     updated_at = excluded.updated_at,
@@ -398,12 +398,12 @@ func (st *ModelState) lookupRemoteApplicationOfferer(ctx context.Context, tx *sq
 	appIdent := applicationName{Name: name}
 
 	queryRemoteAppStmt, err := st.Prepare(`
-SELECT    aro.uuid AS &remoteApplicationUUID.uuid
-FROM      application AS a
+SELECT aro.uuid AS &remoteApplicationUUID.uuid
+FROM application AS a
 -- left join ensures we can distinguish between an application that doesn't
 -- exist and one that is not remote
 LEFT JOIN application_remote_offerer AS aro ON a.uuid = aro.application_uuid
-WHERE     a.name = $applicationName.name `,
+WHERE a.name = $applicationName.name`,
 		remoteApplicationUUID{}, appIdent)
 	if err != nil {
 		return "", errors.Capture(err)

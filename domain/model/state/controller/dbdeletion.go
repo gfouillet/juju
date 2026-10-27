@@ -28,8 +28,8 @@ func (st *State) GetPendingModelDatabaseDeletions(ctx context.Context) ([]string
 
 	stmt, err := st.Prepare(`
 SELECT &dbModelDatabaseDeletion.namespace
-FROM   model_database_deletion
-WHERE  namespace NOT IN (SELECT namespace FROM namespace_list)
+FROM model_database_deletion
+WHERE namespace NOT IN (SELECT namespace FROM namespace_list)
 `, dbModelDatabaseDeletion{})
 	if err != nil {
 		return nil, errors.Capture(err)
@@ -67,7 +67,7 @@ func (st *State) RemoveModelDatabaseDeletion(ctx context.Context, namespace stri
 	arg := dbModelDatabaseDeletion{Namespace: namespace}
 	stmt, err := st.Prepare(`
 DELETE FROM model_database_deletion
-WHERE  namespace = $dbModelDatabaseDeletion.namespace
+WHERE namespace = $dbModelDatabaseDeletion.namespace
 `, arg)
 	if err != nil {
 		return errors.Capture(err)

@@ -65,13 +65,13 @@ func (s *modelStorageStatusSuite) newMachineVolume(
 	_, err := s.DB().Exec(`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id)
 VALUES (?, ?, 0, 1)
-	`, volumeUUID.String(), volumeID)
+`, volumeUUID.String(), volumeID)
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().Exec(`
 INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid)
 VALUES (?, ?)
-	`, storageInstanceUUID.String(), volumeUUID.String())
+`, storageInstanceUUID.String(), volumeUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
 	return volumeUUID, volumeID
@@ -91,13 +91,13 @@ func (s *modelStorageStatusSuite) newDeadModelVolume(
 	_, err := s.DB().Exec(`
 INSERT INTO storage_volume (uuid, volume_id, life_id, provision_scope_id, persistent)
 VALUES (?, ?, ?, 0, true)
-	`, volumeUUID.String(), volumeID, int(life.Dead))
+`, volumeUUID.String(), volumeID, int(life.Dead))
 	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.DB().Exec(`
 INSERT INTO storage_instance_volume (storage_instance_uuid, storage_volume_uuid)
 VALUES (?, ?)
-	`, storageInstanceUUID.String(), volumeUUID.String())
+`, storageInstanceUUID.String(), volumeUUID.String())
 	c.Assert(err, tc.ErrorIsNil)
 
 	return volumeID

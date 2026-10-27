@@ -45,10 +45,10 @@ func (s *MigrationState) GetApplicationLeadershipForModel(ctx context.Context, m
 
 	stmt, err := s.Prepare(`
 SELECT &leadership.*
-FROM   lease
-WHERE  lease_type_id = 1
-AND    model_uuid = $leadership.model_uuid
-AND    expiry >= date('now');`, lease)
+FROM lease
+WHERE lease_type_id = 1
+AND model_uuid = $leadership.model_uuid
+AND expiry >= date('now');`, lease)
 	if err != nil {
 		return nil, errors.Errorf("preparing delete lease statement: %w", err)
 	}

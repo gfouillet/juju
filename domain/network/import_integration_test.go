@@ -828,8 +828,8 @@ func (s *importSuite) setModel(c *tc.C, cloudType, modelType string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO model (uuid, controller_uuid, name, qualifier, type, cloud, cloud_type)
-			VALUES (?, ?, "test", "prod",  ?, "test-model", ?)
-		`, s.ModelUUID(), testing.ControllerTag.Id(), modelType, cloudType)
+			VALUES (?, ?, "test", "prod", ?, "test-model", ?)
+`, s.ModelUUID(), testing.ControllerTag.Id(), modelType, cloudType)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -842,7 +842,7 @@ func (s *importSuite) checkLinkLayerDeviceExistsOnMachine(c *tc.C, machineName m
 			SELECT COUNT(*) FROM link_layer_device lld
 			JOIN machine m ON m.net_node_uuid = lld.net_node_uuid
 			WHERE m.name = ? AND lld.name = ?
-		`, machineName.String(), deviceName).Scan(&count)
+`, machineName.String(), deviceName).Scan(&count)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(count, tc.Equals, 1, tc.Commentf("expected 1 link layer device for machine %q with name %q", machineName, deviceName))
@@ -856,7 +856,7 @@ func (s *importSuite) checkAddressExistsForDeviceOnMachine(c *tc.C, machineName 
 			JOIN link_layer_device lld ON ip.device_uuid = lld.uuid
 			JOIN machine m ON m.net_node_uuid = lld.net_node_uuid
 			WHERE m.name = ? AND lld.name = ? AND ip.address_value = ?
-		`, machineName.String(), deviceName, addressValue).Scan(&count)
+`, machineName.String(), deviceName, addressValue).Scan(&count)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	if !c.Check(count, tc.Equals, 1, tc.Commentf("expected 1 ip address for machine %q, device %q with value %q", machineName, deviceName, addressValue)) {
@@ -870,7 +870,7 @@ func (s *importSuite) checkSubnetExists(c *tc.C, subnetCIDR string) {
 		return tx.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM subnet
 			WHERE cidr = ?
-		`, subnetCIDR).Scan(&count)
+`, subnetCIDR).Scan(&count)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(count, tc.Equals, 1, tc.Commentf("expected 1 subnet for cidr %q, got %d", subnetCIDR, count))
@@ -884,7 +884,7 @@ func (s *importSuite) checkAddressExistsForServiceForApp(c *tc.C, appName, addre
 			JOIN application AS a ON ks.application_uuid = a.uuid
 			JOIN ip_address AS ip ON ks.net_node_uuid = ip.net_node_uuid
 			WHERE a.name = ? AND ip.address_value = ?
-		`, appName, addressValue).Scan(&count)
+`, appName, addressValue).Scan(&count)
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(count, tc.Equals, 1, tc.Commentf("expected 1 ip address for application %q with value %q", appName, addressValue))

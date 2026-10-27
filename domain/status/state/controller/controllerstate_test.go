@@ -59,7 +59,7 @@ func (s *controllerStateSuite) TestGetModelStatusContextDestroying(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 UPDATE model SET life_id = 1 WHERE uuid = ?
-		`, modelUUID)
+`, modelUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -82,7 +82,7 @@ func (s *controllerStateSuite) TestGetModelStatusContextMigrating(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO model_migration_import (uuid, model_uuid, source_migration_uuid, updated_at) VALUES (?, ?, 'source-migration-uuid', '2026-01-02T03:04:05Z')
-		`, "migration-uuid-123", modelUUID)
+`, "migration-uuid-123", modelUUID)
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
@@ -134,7 +134,7 @@ func (s *controllerStateSuite) TestGetControllerNodeIDs(c *tc.C) {
 			_, err := tx.ExecContext(ctx, `
 INSERT INTO controller_node (controller_id, dqlite_node_id, dqlite_bind_address)
 VALUES (?, ?, ?)
-			`, controllerID, nodeID, "10.0.0."+strconv.Itoa(i))
+`, controllerID, nodeID, "10.0.0."+strconv.Itoa(i))
 			if err != nil {
 				return err
 			}

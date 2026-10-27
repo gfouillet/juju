@@ -491,8 +491,8 @@ func (s *taskSuite) TestLogTaskMessage(c *tc.C) {
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT content
-FROM   operation_task_log
-WHERE  task_uuid = ?
+FROM operation_task_log
+WHERE task_uuid = ?
 `, taskUUID).Scan(&obtainedTaskMsg)
 	})
 	c.Check(err, tc.ErrorIsNil)
@@ -538,10 +538,10 @@ func (s *taskSuite) checkTaskStatus(c *tc.C, taskUUID, status string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT ots.task_uuid
-FROM   operation_task_status AS ots
-JOIN   operation_task_status_value AS otsv ON ots.status_id = otsv.id
-WHERE  ots.task_uuid = ?
-AND    otsv.status = ?
+FROM operation_task_status AS ots
+JOIN operation_task_status_value AS otsv ON ots.status_id = otsv.id
+WHERE ots.task_uuid = ?
+AND otsv.status = ?
 `, taskUUID, status).Scan(&task)
 	})
 	c.Check(err, tc.ErrorIsNil)
@@ -555,8 +555,8 @@ func (s *taskSuite) checkOperationCompleted(c *tc.C, operationUUID string, compl
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return tx.QueryRow(`
 SELECT completed_at
-FROM   operation
-WHERE  uuid = ?
+FROM operation
+WHERE uuid = ?
 `, operationUUID).Scan(&completedAt)
 	})
 	c.Check(err, tc.ErrorIsNil)

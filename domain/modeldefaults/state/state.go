@@ -82,7 +82,7 @@ func (s *State) CloudDefaults(
 
 	cloudUUID := cloudUUIDValue{UUID: uuid.String()}
 	cloudDefaultsStmt, err := s.Prepare(`
-SELECT &keyValue.* 
+SELECT &keyValue.*
 FROM cloud_defaults
 WHERE cloud_defaults.cloud_uuid = $cloudUUIDValue.uuid
 `, keyValue{}, cloudUUID)
@@ -434,7 +434,7 @@ func SetCloudDefaults(
 	var cloudUUIDVal cloudUUIDValue
 	cloudUUIDStmt, err := sqlair.Prepare(`
 SELECT &cloudUUIDValue.*
-FROM cloud 
+FROM cloud
 WHERE name = $cloudNameValue.name
 `, cloudNameVal, cloudUUIDVal)
 	if err != nil {
@@ -453,8 +453,8 @@ WHERE name = $cloudNameValue.name
 	}
 
 	deleteStmt, err := sqlair.Prepare(`
-DELETE FROM cloud_defaults 
-WHERE       cloud_defaults.cloud_uuid = $cloudUUIDValue.uuid
+DELETE FROM cloud_defaults
+WHERE cloud_defaults.cloud_uuid = $cloudUUIDValue.uuid
 `, cloudUUIDVal)
 	if err != nil {
 		return errors.Capture(err)
