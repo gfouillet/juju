@@ -669,7 +669,7 @@ func (st *State) DeleteCloud(ctx context.Context, name string) error {
 
 	modelCountStmt, err := st.Prepare(`
 WITH target_cloud AS (
-    SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
+    SELECT cloud.uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
 
 SELECT COUNT(*) AS &countResult.count
@@ -682,7 +682,7 @@ WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 
 	credAttrDeleteStmt, err := st.Prepare(`
 WITH target_cloud AS (
-    SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
+    SELECT cloud.uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 ),
 
 target_credentials AS (
@@ -700,7 +700,7 @@ WHERE cloud_credential_uuid IN (SELECT uuid FROM target_credentials)
 
 	credDeleteStmt, err := st.Prepare(`
 WITH target_cloud AS (
-    SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
+    SELECT cloud.uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
 
 DELETE FROM cloud_credential
@@ -720,7 +720,7 @@ WHERE cloud.name = $dbCloudName.name
 
 	cloudRegionDeleteStmt, err := st.Prepare(`
 WITH target_cloud AS (
-    SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
+    SELECT cloud.uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
 
 DELETE FROM cloud_region
@@ -732,7 +732,7 @@ WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 
 	cloudCACertDeleteStmt, err := st.Prepare(`
 WITH target_cloud AS (
-    SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
+    SELECT cloud.uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
 
 DELETE FROM cloud_ca_cert
@@ -744,7 +744,7 @@ WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 
 	cloudAuthTypeDeleteStmt, err := st.Prepare(`
 WITH target_cloud AS (
-    SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
+    SELECT cloud.uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
 
 DELETE FROM cloud_auth_type

@@ -487,7 +487,7 @@ INSERT INTO cloud_credential (uuid, name, cloud_uuid, auth_type_id, owner_uuid)
 SELECT
     ? AS uuid,
     'default' AS name,
-    uuid AS cloud_uuid,
+    cloud.uuid AS cloud_uuid,
     1 AS auth_type_id,
     ? AS owner_uuid
 FROM cloud
@@ -538,7 +538,7 @@ INSERT INTO cloud_credential (uuid, name, cloud_uuid, auth_type_id, owner_uuid)
 SELECT
     ? AS uuid,
     'default' AS name,
-    uuid AS cloud_uuid,
+    cloud.uuid AS cloud_uuid,
     1 AS auth_type_id,
     ? AS owner_uuid
 FROM cloud

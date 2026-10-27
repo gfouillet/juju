@@ -36,10 +36,10 @@ SELECT
     ? AS uuid,
     ? AS name,
     cloud_type.id AS cloud_type_id,
-    "" AS endpoint,
+    '' AS endpoint,
     true AS skip_tls_verify
 FROM cloud_type
-WHERE type = ?
+WHERE cloud_type.type = ?
 `, cloudUUID.String(), cloud.Name, cloud.Type)
 		if err != nil {
 			fmt.Println("this error")
@@ -53,7 +53,7 @@ SELECT
     ? AS cloud_uuid,
     auth_type.id AS auth_type_id
 FROM auth_type
-WHERE type = ?
+WHERE auth_type.type = ?
 `, cloudUUID.String(), authType)
 			if err != nil {
 				fmt.Println("this error2")
