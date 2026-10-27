@@ -64,7 +64,13 @@ type versionHash struct {
 
 // Return all versions in the schema table, in increasing order.
 func selectSchemaVersions(ctx context.Context, tx *sql.Tx) ([]versionHash, error) {
-	statement := `SELECT version, hash FROM schema ORDER BY version;`
+	statement := `
+SELECT
+    version,
+    hash
+FROM schema
+ORDER BY version;
+`
 	rows, err := tx.QueryContext(ctx, statement)
 	if err != nil {
 		return nil, errors.Capture(err)
