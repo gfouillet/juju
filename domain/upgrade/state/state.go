@@ -137,7 +137,7 @@ func (st *State) SetControllerReady(ctx context.Context, upgradeUUID domainupgra
 SELECT &ControllerNodeInfo.controller_node_id
 FROM upgrade_info_controller_node
 WHERE upgrade_info_uuid = $ControllerNodeInfo.upgrade_info_uuid
-AND controller_node_id = $ControllerNodeInfo.controller_node_id;
+    AND controller_node_id = $ControllerNodeInfo.controller_node_id;
 `, controllerNodeInfo)
 	if err != nil {
 		return errors.Errorf("preparing check exists node statement: %w", err)
@@ -185,12 +185,12 @@ func (st *State) AllProvisionedControllersReady(ctx context.Context, upgradeUUID
 	stmt, err := st.Prepare(`
 SELECT COUNT(*) AS &Count.num
 FROM controller_node AS node
-       LEFT JOIN upgrade_info_controller_node AS upgrade_node
-       ON node.controller_id = upgrade_node.controller_node_id
-       AND upgrade_node.upgrade_info_uuid = $ControllerNodeInfo.upgrade_info_uuid
+LEFT JOIN upgrade_info_controller_node AS upgrade_node
+    ON node.controller_id = upgrade_node.controller_node_id
+    AND upgrade_node.upgrade_info_uuid = $ControllerNodeInfo.upgrade_info_uuid
 WHERE node.dqlite_node_id IS NOT NULL
-AND node.life_id < 2
-AND upgrade_node.controller_node_id IS NULL;
+    AND node.life_id < 2
+    AND upgrade_node.controller_node_id IS NULL;
 `, count, controllerNodeInfo)
 	if err != nil {
 		return false, errors.Errorf("preparing select count provisioned controllers statement: %w", err)
@@ -323,7 +323,7 @@ func (st *State) SetControllerDone(ctx context.Context, upgradeUUID domainupgrad
 SELECT (controller_node_id, node_upgrade_completed_at) AS (&ControllerNodeInfo.*)
 FROM upgrade_info_controller_node
 WHERE upgrade_info_uuid = $ControllerNodeInfo.upgrade_info_uuid
-AND controller_node_id = $ControllerNodeInfo.controller_node_id;
+    AND controller_node_id = $ControllerNodeInfo.controller_node_id;
 `, controllerNodeInfo)
 	if err != nil {
 		return errors.Errorf("preparing select done query: %w", err)
@@ -333,8 +333,8 @@ AND controller_node_id = $ControllerNodeInfo.controller_node_id;
 UPDATE upgrade_info_controller_node
 SET node_upgrade_completed_at = DATETIME("now")
 WHERE upgrade_info_uuid = $ControllerNodeInfo.upgrade_info_uuid
-AND controller_node_id = $ControllerNodeInfo.controller_node_id
-AND node_upgrade_completed_at IS NULL;
+    AND controller_node_id = $ControllerNodeInfo.controller_node_id
+    AND node_upgrade_completed_at IS NULL;
 `, controllerNodeInfo)
 	if err != nil {
 		return errors.Errorf("preparing update node query: %w", err)
@@ -348,16 +348,16 @@ AND node_upgrade_completed_at IS NULL;
 UPDATE upgrade_info
 SET state_type_id = $M.to_state
 WHERE uuid = $Info.uuid AND state_type_id = $M.from_state
-AND (
-    SELECT COUNT(*)
-	FROM upgrade_info_controller_node
-    WHERE upgrade_info_uuid = $Info.uuid
-    AND node_upgrade_completed_at IS NOT NULL
-) = (
-    SELECT COUNT(*)
-    FROM upgrade_info_controller_node
-    WHERE upgrade_info_uuid = $Info.uuid
-);
+    AND (
+        SELECT COUNT(*)
+        FROM upgrade_info_controller_node
+        WHERE upgrade_info_uuid = $Info.uuid
+            AND node_upgrade_completed_at IS NOT NULL
+    ) = (
+        SELECT COUNT(*)
+        FROM upgrade_info_controller_node
+        WHERE upgrade_info_uuid = $Info.uuid
+    );
 `, info, m)
 	if err != nil {
 		return errors.Errorf("preparing complete upgrade query: %w", err)
@@ -472,7 +472,7 @@ func (st *State) updateState(ctx context.Context, tx *sqlair.TX, uuid string, fr
 UPDATE upgrade_info
 SET state_type_id = $M.to
 WHERE uuid = $Info.uuid
-AND state_type_id = $M.from;`, info, m)
+    AND state_type_id = $M.from;`, info, m)
 	if err != nil {
 		return errors.Errorf("preparing update from %q to %q statement: %w", from, to, err)
 	}
