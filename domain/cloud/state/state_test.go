@@ -428,7 +428,7 @@ SELECT
     p.access_type,
     p.grant_to,
     p.grant_on
-FROM v_permission p
+FROM v_permission AS p
 WHERE p.grant_to = ?
 `, "fluffy")
 	c.Assert(row.Err(), tc.ErrorIsNil)
@@ -485,11 +485,11 @@ func (s *stateSuite) TestDeleteCloudWithCredentials(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO cloud_credential (uuid, name, cloud_uuid, auth_type_id, owner_uuid)
 SELECT
-    ?,
-    'default',
-    uuid,
-    1,
-    ?
+    ? AS uuid,
+    'default' AS name,
+    uuid AS cloud_uuid,
+    1 AS auth_type_id,
+    ? AS owner_uuid
 FROM cloud
 WHERE cloud.name = ?
 `, credUUID, s.adminUUID.String(), "fluffy")
@@ -536,11 +536,11 @@ func (s *stateSuite) TestDeleteCloudWithCredentialAndModel(c *tc.C) {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO cloud_credential (uuid, name, cloud_uuid, auth_type_id, owner_uuid)
 SELECT
-    ?,
-    'default',
-    uuid,
-    1,
-    ?
+    ? AS uuid,
+    'default' AS name,
+    uuid AS cloud_uuid,
+    1 AS auth_type_id,
+    ? AS owner_uuid
 FROM cloud
 WHERE cloud.name = ?
 `, credUUID, s.adminUUID.String(), "fluffy")

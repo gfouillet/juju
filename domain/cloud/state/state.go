@@ -587,14 +587,14 @@ func insertPermission(ctx context.Context, tx *sqlair.TX, ownerName user.Name, c
 	newPermission := `
 INSERT INTO permission (uuid, access_type_id, object_type_id, grant_to, grant_on)
 SELECT
-    $dbAddUserPermission.uuid,
-    at.id,
-    ot.id,
-    u.uuid,
-    $dbAddUserPermission.grant_on
-FROM v_user_auth u,
-    permission_access_type at,
-    permission_object_type ot
+    $dbAddUserPermission.uuid AS uuid,
+    at.id AS access_type_id,
+    ot.id AS object_type_id,
+    u.uuid AS grant_to,
+    $dbAddUserPermission.grant_on AS grant_on
+FROM v_user_auth AS u,
+    permission_access_type AS at,
+    permission_object_type AS ot
 WHERE u.name = $dbAddUserPermission.name
     AND u.disabled = false
     AND u.removed = false
