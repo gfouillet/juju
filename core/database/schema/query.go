@@ -16,10 +16,10 @@ import (
 
 const schemaTable = `
 CREATE TABLE IF NOT EXISTS schema (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-    version      INTEGER NOT NULL,
-    hash         TEXT NOT NULL,
-    updated_at   DATETIME NOT NULL
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    version INTEGER NOT NULL,
+    hash TEXT NOT NULL,
+    updated_at DATETIME NOT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schema_version ON schema (version);

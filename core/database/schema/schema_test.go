@@ -183,7 +183,7 @@ func (s *schemaSuite) TestEnsureHashBreaks(c *tc.C) {
 	c.Assert(current, tc.DeepEquals, ChangeSet{Current: 0, Post: 2})
 
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "UPDATE schema SET hash = 'blah' WHERE version=2;")
+		_, err := tx.ExecContext(ctx, "UPDATE schema SET hash = 'blah' WHERE version = 2;")
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
