@@ -21,14 +21,25 @@ func TestIntegrationSuite(t *testing.T) {
 	tc.Run(t, &integrationSuite{})
 }
 
-func (s *integrationSuite) TestSQLFluffEndToEnd(c *tc.C) {
+// sqlfluffBinary returns the sqlfluff binary or skips the calling test.
+// Jobs that install sqlfluff set SQLCHECK_REQUIRE_SQLFLUFF so a missing
+// installation fails loudly instead of silently skipping integration
+// coverage. Other CI systems and local runs skip when it is unavailable.
+func sqlfluffBinary(c *tc.C) string {
+	c.Helper()
 	bin, err := lookSQLFluff()
-	if err != nil {
-		if os.Getenv("CI") != "" {
-			c.Fatalf("sqlfluff is required in CI: %v", err)
-		}
-		c.Skip("sqlfluff not installed")
+	if err == nil {
+		return bin
 	}
+	if os.Getenv("SQLCHECK_REQUIRE_SQLFLUFF") == "1" {
+		c.Fatalf("sqlfluff is required by SQLCHECK_REQUIRE_SQLFLUFF: %v", err)
+	}
+	c.Skip("sqlfluff not installed")
+	return ""
+}
+
+func (s *integrationSuite) TestSQLFluffEndToEnd(c *tc.C) {
+	bin := sqlfluffBinary(c)
 
 	// Pinned sqlfluff with .github/.sqlfluff does not emit CP01 for
 	// lowercase keywords. LT01 (layout.spacing) is a known hit.
@@ -84,13 +95,7 @@ WHERE x = 1
 }
 
 func (s *integrationSuite) TestSQLFluffFixEndToEnd(c *tc.C) {
-	bin, err := lookSQLFluff()
-	if err != nil {
-		if os.Getenv("CI") != "" {
-			c.Fatalf("sqlfluff is required in CI: %v", err)
-		}
-		c.Skip("sqlfluff not installed")
-	}
+	bin := sqlfluffBinary(c)
 
 	// Run the real plan/apply/re-lint cycle to validate the message
 	// matchers against the pinned sqlfluff output and to prove that fixes

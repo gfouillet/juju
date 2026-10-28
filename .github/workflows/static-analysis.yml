@@ -98,6 +98,8 @@ jobs:
 
       - name: Test sqlcheck
         run: go test ./scripts/sqlcheck/...
+        env:
+          SQLCHECK_REQUIRE_SQLFLUFF: "1"
 
       - name: Lint embedded SQL
         run: make lint-sql SQLCHECK_FLAGS='--report-only --github'
